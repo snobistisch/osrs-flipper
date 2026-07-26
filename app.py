@@ -211,8 +211,12 @@ def ranked_table(rows, top_n):
         "Qty": r.qty_per_window, "Tied up": r.capital_needed,
         "Round trip": engine.format_duration(r.expected_total_seconds),
         "P(fill) %": r.p_fill * 100,
+        # Blank once the floor is too far below the price to be protection —
+        # "+3060%" on a 5 gp rune is true and tells you nothing.
         "Alch floor %": (r.alch_distance * 100
-                         if r.alch_distance is not None else None),
+                         if r.alch_distance is not None
+                         and r.alch_distance < engine.DEFAULT_CALIBRATION.alch_relevant_distance
+                         else None),
         "Fill %": r.fill_share * 100 if r.deep_checked else None,
         "Reverts": r.mean_reverting if r.deep_checked else None,
         "Measured": round(r.raw_gp_per_slot_hour),

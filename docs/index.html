@@ -1671,7 +1671,7 @@ function renderTable() {
       <td class="${r.totalSeconds > 8 * SECONDS_PER_HOUR ? "bad" : ""}">${formatDuration(r.totalSeconds)}</td>
       <td class="${r.pFill < 0.25 ? "bad" : ""}">${Math.round(r.pFill * 100)}%</td>
       <td class="${r.alchDistance != null && r.alchDistance <= 0 ? "pos" : ""}">${
-        r.alchDistance == null ? "—"
+        r.alchDistance == null || r.alchDistance >= CAL.alch_relevant_distance ? "—"
         : (r.alchDistance >= 0 ? "+" : "−") + Math.round(Math.abs(r.alchDistance) * 100) + "%"}</td>
       <td class="${r.deep && r.fillShare <= 0.25 ? "bad" : ""}">${
         r.deep ? Math.round(r.fillShare * 100) + "%" : "—"}</td>
