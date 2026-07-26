@@ -30,6 +30,13 @@ def parse_args(argv):
     p.add_argument("--min-depth", type=int, default=1,
                    help="min gp of undercut room; 0 shows flips you cannot "
                         "queue-jump, like one-tick rune spreads")
+    p.add_argument("--min-price", type=engine.parse_gp, default=1,
+                   help="min buy price per item, e.g. 100 or 5k")
+    p.add_argument("--max-price", type=engine.parse_gp, default=None,
+                   help="max buy price per item, e.g. 10k or 1m")
+    p.add_argument("--tax-free", action="store_true",
+                   help="only flips that pay zero GE tax (sell under 50 gp: "
+                        "the 2%% rounds down to 0, the whole spread is yours)")
     p.add_argument("--members", action="store_true",
                    help="include members-only items")
     p.add_argument("--top", type=int, default=20, help="rows to show")
@@ -43,16 +50,25 @@ def config_from(opts) -> filters.FilterConfig:
     return filters.FilterConfig(
         capital=opts.capital, slots=opts.slots, include_members=opts.members,
         max_quote_age=opts.max_age, min_thin_volume_1h=opts.min_vol,
-        min_roi=opts.min_roi, min_undercut_depth=opts.min_depth)
+        min_roi=opts.min_roi, min_undercut_depth=opts.min_depth,
+        min_price=opts.min_price, max_price=opts.max_price,
+        tax_free_only=opts.tax_free)
 
 
 def print_table(rows, funnel, opts):
     per_slot = engine.capital_per_slot(opts.capital, opts.slots)
+    price_part = ""
+    if opts.min_price > 1 or opts.max_price is not None:
+        price_part = " | price {}–{}".format(
+            engine.format_gp(opts.min_price),
+            engine.format_gp(opts.max_price) if opts.max_price else "∞")
+    if opts.tax_free:
+        price_part += " | tax-free only"
     print("Budget {} gp across {} slots = {} gp per flip | quote age <= {}s | "
-          "vol >= {}/1h | ROI >= {:.1%} | undercut room >= {} gp".format(
+          "vol >= {}/1h | ROI >= {:.1%} | undercut room >= {} gp{}".format(
               engine.format_gp(opts.capital), opts.slots,
               engine.format_gp(per_slot), opts.max_age, opts.min_vol,
-              opts.min_roi, opts.min_depth))
+              opts.min_roi, opts.min_depth, price_part))
     print("Funnel:  " + "  ->  ".join(
         "{} {}".format(v, k) for k, v in funnel.items() if v))
     print()

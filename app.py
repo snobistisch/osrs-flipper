@@ -126,18 +126,37 @@ def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
         max_age = st.slider("Max quote age (s)", 30, 3_600, 300, step=30,
                             help="Age of the OLDER of the two /latest sides. "
                                  "Wide margins on stale quotes are dead items.")
-        min_vol = st.slider("Min thin-side volume / 1h", 0, 2_000, 120, step=10,
+        min_vol = st.slider("Min thin-side volume / 1h", 0, 10_000, 120,
+                            step=20,
                             help="Units traded on the quieter side of the book "
-                                 "in the last hour.")
+                                 "in the last hour. Push it up to keep only "
+                                 "the most liquid staples.")
         min_roi = st.slider("Min ROI after tax (%)", 0.0, 10.0, 1.0, step=0.1)
+        col_lo, col_hi = st.columns(2)
+        min_price_raw = col_lo.text_input("Min price", value="",
+                                          placeholder="e.g. 100")
+        max_price_raw = col_hi.text_input("Max price", value="",
+                                          placeholder="e.g. 10k")
+        tax_free = st.checkbox("Tax-free items only (< 50 gp)", value=False,
+                               help="Under 50 gp the 2% GE tax rounds down to "
+                                    "zero, so the whole spread is yours.")
         include_members = st.checkbox("Include members items", value=False)
         top_n = st.slider("Rows", 10, 100, 50, step=10)
         st.caption("Prices refetch at most once per 30 s "
                    "(wiki acceptable-use policy).")
+    def parse_price(raw):
+        try:
+            return engine.parse_gp(raw)
+        except ValueError:
+            return None
+
     return filters.FilterConfig(
         capital=capital, slots=slots, include_members=include_members,
         max_quote_age=max_age, min_thin_volume_1h=min_vol,
-        min_roi=min_roi / 100, min_undercut_depth=min_depth), top_n
+        min_roi=min_roi / 100, min_undercut_depth=min_depth,
+        min_price=parse_price(min_price_raw) or 1,
+        max_price=parse_price(max_price_raw),
+        tax_free_only=tax_free), top_n
 
 
 def ranked_table(rows, top_n):

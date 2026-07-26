@@ -97,6 +97,38 @@ class GateTests(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(funnel["cannot afford one"], 1)
 
+    def test_price_range_gates_on_the_buy_estimate(self):
+        cheap = {1: item(1, name="cheap"), 2: item(2, name="dear")}
+        quotes = {1: quote(high=45, low=40), 2: quote(high=1_250, low=950)}
+        acts5 = {1: act_5m(avg_high=45, avg_low=40), 2: act_5m()}
+        acts1h = {1: act_1h(avg_high=45, avg_low=40), 2: act_1h()}
+        rows, funnel = rank(cheap, quotes, acts5, acts1h, min_price=100)
+        self.assertEqual([r.name for r in rows], ["dear"])
+        self.assertEqual(funnel["price out of range"], 1)
+        rows, funnel = rank(cheap, quotes, acts5, acts1h, max_price=100)
+        self.assertEqual([r.name for r in rows], ["cheap"])
+        self.assertEqual(funnel["price out of range"], 1)
+
+    def test_tax_free_only_keeps_the_sub_50gp_flips(self):
+        # sell at 45: floor(45 * 2%) = 0, the whole spread is yours
+        items = {1: item(1, name="untaxed"), 2: item(2, name="taxed")}
+        quotes = {1: quote(high=45, low=40), 2: quote(high=1_250, low=950)}
+        acts5 = {1: act_5m(avg_high=45, avg_low=40), 2: act_5m()}
+        acts1h = {1: act_1h(avg_high=45, avg_low=40), 2: act_1h()}
+        rows, funnel = rank(items, quotes, acts5, acts1h, tax_free_only=True)
+        self.assertEqual([r.name for r in rows], ["untaxed"])
+        self.assertEqual(rows[0].tax, 0)
+        self.assertEqual(funnel["pays tax"], 1)
+
+    def test_tax_exempt_bond_passes_the_tax_free_filter(self):
+        bond_id = 13190
+        rows, _ = rank({bond_id: item(bond_id, limit=100)},
+                       {bond_id: quote(high=5_000_000, low=4_800_000)},
+                       {bond_id: act_5m(avg_high=5_000_000, avg_low=4_800_000)},
+                       {bond_id: act_1h(avg_high=5_000_000, avg_low=4_800_000)},
+                       capital=100_000_000, slots=1, tax_free_only=True)
+        self.assertEqual(len(rows), 1)
+
     def test_funnel_sums_to_input(self):
         items = {1: item(1), 2: item(2, members=True), 3: item(3)}
         quotes = {1: quote(), 2: quote(), 3: quote(age=9_999), 4: quote()}

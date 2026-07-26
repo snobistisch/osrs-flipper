@@ -26,6 +26,10 @@ class FilterConfig:
     min_thin_volume_1h: int = 120  # units/h on the thin side of the book
     min_roi: float = 0.01          # net margin / buy price
     min_undercut_depth: int = 1    # 0 lets in flips you cannot queue-jump
+    min_price: int = 1             # gp per item, on the buy estimate
+    max_price: Optional[int] = None    # None = no cap
+    tax_free_only: bool = False    # only flips whose sell pays zero GE tax
+                                   # (under 50 gp the 2% rounds down to 0)
 
 
 @dataclass(frozen=True)
@@ -68,8 +72,8 @@ class FlipRow:
 # in exactly one bucket, so the funnel always sums to len(quotes).
 FUNNEL_STAGES = (
     "in /latest", "no mapping entry", "members-only", "null price side",
-    "quote too old", "volume too thin", "roi too low", "no undercut room",
-    "cannot afford one", "passed",
+    "quote too old", "volume too thin", "price out of range", "pays tax",
+    "roi too low", "no undercut room", "cannot afford one", "passed",
 )
 
 
@@ -148,7 +152,13 @@ def _evaluate(
         act_1h.avg_high if act_1h else None, high_vol_1h)
     buy, sell = engine.executable_prices(quote.low, quote.high, ref_low, ref_high)
 
+    if buy < config.min_price or (config.max_price is not None
+                                  and buy > config.max_price):
+        return "price out of range"
     tax_exempt = item_id in engine.TAX_EXEMPT_ITEM_IDS
+    tax = engine.ge_tax(sell, tax_exempt)
+    if config.tax_free_only and tax > 0:
+        return "pays tax"
     item_roi = engine.roi(buy, sell, tax_exempt)
     if item_roi < config.min_roi:
         return "roi too low"
@@ -174,7 +184,7 @@ def _evaluate(
     return FlipRow(
         item_id=item_id, name=item.name, buy=buy, sell=sell,
         latest_low=quote.low, latest_high=quote.high,
-        tax=engine.ge_tax(sell, tax_exempt), margin=margin, roi=item_roi,
+        tax=tax, margin=margin, roi=item_roi,
         limit=item.limit, thin_volume_1h=thin_volume, qty_per_window=qty,
         capital_needed=qty * buy, gross_profit=gross, undercut_depth=depth,
         drift=drift, quote_age=age, expected_gp=expected,

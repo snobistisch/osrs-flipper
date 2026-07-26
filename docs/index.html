@@ -107,6 +107,8 @@ input[type="checkbox"] { accent-color: var(--gold); width: 1rem; height: 1rem; }
 }
 #main { padding: 1.2rem 1.5rem 3rem; min-width: 0; }
 .field { margin-bottom: 1.1rem; }
+.price-row { display: flex; gap: 0.5rem; }
+.price-row input { min-width: 0; }
 .field label { display: block; font-size: 0.9rem; color: var(--text-dim); }
 .field .val { color: var(--gold); font-weight: 600; }
 .budget-box { margin-bottom: 1.2rem; }
@@ -286,13 +288,29 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
     </div>
     <div class="field">
       <label for="f-vol">Min volume / hour <span class="val" id="f-vol-v"></span></label>
-      <input type="range" id="f-vol" min="0" max="2000" step="10" value="120">
-      <div class="small dim">Units traded on the quieter side of the book.</div>
+      <input type="range" id="f-vol" min="0" max="10000" step="20" value="120">
+      <div class="small dim">Units traded on the quieter side of the book.
+        Push it up to keep only the most liquid staples.</div>
     </div>
     <div class="field">
       <label for="f-roi">Min ROI after tax <span class="val" id="f-roi-v"></span></label>
       <input type="range" id="f-roi" min="0" max="100" step="1" value="10">
     </div>
+    <div class="field">
+      <label>Price per item (gp)</label>
+      <div class="price-row">
+        <input type="text" id="f-price-min" placeholder="min, e.g. 100" autocomplete="off">
+        <input type="text" id="f-price-max" placeholder="max, e.g. 10k" autocomplete="off">
+      </div>
+      <div class="small dim">Filters on the buy estimate. Blank = no limit;
+        amounts like 5k and 1.5m work.</div>
+    </div>
+    <div class="field checkline">
+      <input type="checkbox" id="f-taxfree">
+      <label for="f-taxfree" style="margin:0">Tax-free items only (&lt; 50 gp)</label>
+    </div>
+    <div class="small dim" style="margin:-0.6rem 0 1.1rem">Under 50 gp the 2%
+      GE tax rounds down to zero — the whole spread is yours.</div>
     <div class="field checkline">
       <input type="checkbox" id="f-members">
       <label for="f-members" style="margin:0">Include members items</label>
@@ -877,8 +895,8 @@ function rankFlips(items, quotes, act5m, act1h, config, now) {
   const funnel = {
     "in /latest": 0, "no mapping entry": 0, "members-only": 0,
     "null price side": 0, "quote too old": 0, "volume too thin": 0,
-    "roi too low": 0, "no undercut room": 0, "cannot afford one": 0,
-    "passed": 0,
+    "price out of range": 0, "pays tax": 0, "roi too low": 0,
+    "no undercut room": 0, "cannot afford one": 0, "passed": 0,
   };
   const perSlot = capitalPerSlot(config.capital, config.slots);
 
@@ -911,7 +929,14 @@ function rankFlips(items, quotes, act5m, act1h, config, now) {
       a1h?.avgHighPrice ?? null, highVol1h);
     const [buy, sell] = executablePrices(low, high, refLow, refHigh);
 
+    if (buy < config.minPrice ||
+        (config.maxPrice != null && buy > config.maxPrice)) {
+      funnel["price out of range"]++; continue;
+    }
     const exempt = TAX_EXEMPT_IDS.has(id);
+    if (config.taxFreeOnly && geTax(sell, exempt) > 0) {
+      funnel["pays tax"]++; continue;
+    }
     const itemRoi = roi(buy, sell, exempt);
     if (itemRoi < config.minRoi) { funnel["roi too low"]++; continue; }
 
@@ -957,6 +982,12 @@ const state = {
 
 const $ = (sel) => document.querySelector(sel);
 
+function parsePriceInput(sel) {
+  const raw = $(sel).value.trim();
+  if (!raw) return null;
+  try { return parseGp(raw); } catch { return null; }
+}
+
 function readConfig() {
   return {
     capital: state.capital,
@@ -966,6 +997,9 @@ function readConfig() {
     minVolume1h: Number($("#f-vol").value),
     minRoi: Number($("#f-roi").value) / 1000,   // slider is tenths of a percent
     minUndercutDepth: Number($("#f-depth").value),
+    minPrice: parsePriceInput("#f-price-min") ?? 1,
+    maxPrice: parsePriceInput("#f-price-max"),
+    taxFreeOnly: $("#f-taxfree").checked,
   };
 }
 
@@ -1384,6 +1418,13 @@ let filterTimer = null;
   });
 });
 $("#f-members").addEventListener("change", loadAndRender);
+$("#f-taxfree").addEventListener("change", loadAndRender);
+["#f-price-min", "#f-price-max"].forEach((sel) => {
+  $(sel).addEventListener("input", () => {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(loadAndRender, 400);
+  });
+});
 $("#f-slots").addEventListener("change", () => {
   syncFilterLabels();
   loadAndRender();
