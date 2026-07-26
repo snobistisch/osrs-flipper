@@ -227,6 +227,76 @@ class ExpectedValueTests(unittest.TestCase):
         self.assertGreater(fresh, stale)
 
 
+def bucket(avg_high=None, high_vol=0, avg_low=None, low_vol=0):
+    return {"avgHighPrice": avg_high, "highPriceVolume": high_vol,
+            "avgLowPrice": avg_low, "lowPriceVolume": low_vol}
+
+
+def flat_history(n=56, low=40, high=42, low_vol=1_000, high_vol=1_000):
+    return [bucket(high, high_vol, low, low_vol) for _ in range(n)]
+
+
+class HistoryTests(unittest.TestCase):
+    def test_salmon_dump_gets_almost_no_fill(self):
+        # 14 days of sellers at 40; one bucket dumps 150 units at 30.
+        # Buying at 31 reaches only that dumper's volume.
+        points = flat_history(55) + [bucket(42, 800, 30, 150)]
+        view = engine.history_view(points, buy=31, sell=41)
+        # only the dump bucket's seller volume sits near the dumped price
+        self.assertAlmostEqual(view.buy_fill_share, 150 / (55 * 1_000 + 150))
+        self.assertEqual(view.fill_factor, engine.FILL_FLOOR)
+        self.assertEqual(view.baseline_low, 40)
+        self.assertLess(view.dislocation, -0.10)
+
+    def test_flat_market_at_fair_prices_keeps_full_fill(self):
+        view = engine.history_view(flat_history(), buy=40, sell=42)
+        self.assertEqual(view.fill_factor, 1.0)
+        self.assertAlmostEqual(view.trend, 0.0)
+        self.assertEqual(view.momentum, 1.0)
+        self.assertAlmostEqual(view.dislocation, 0.0)
+
+    def test_uptrend_rewarded_and_bounded(self):
+        rising = [bucket(100 + i, 1_000, 98 + i, 1_000) for i in range(56)]
+        view = engine.history_view(rising, buy=150, sell=155)
+        self.assertGreater(view.trend, 0.05)
+        self.assertGreater(view.momentum, 1.0)
+        self.assertLessEqual(view.momentum, 1.25)
+
+    def test_uptrend_quoted_at_the_band_keeps_full_fill(self):
+        # fill shares are detrended: an item marching upward, quoted at its
+        # usual spread around today's level, is not punished for trading
+        # above last week's absolute prices
+        growth = 1.004
+        rising = [bucket(round(12_600 * growth ** (i - 55)), 1_000,
+                         round(12_200 * growth ** (i - 55)), 1_000)
+                  for i in range(56)]
+        view = engine.history_view(rising, buy=12_200, sell=12_600)
+        self.assertEqual(view.fill_factor, 1.0)
+        self.assertGreater(view.momentum, 1.0)
+
+    def test_downtrend_penalised_harder(self):
+        up = engine.momentum_factor(0.05)
+        down = engine.momentum_factor(-0.05)
+        self.assertGreater(1.0 - down, up - 1.0)
+        self.assertEqual(engine.momentum_factor(-1.0), 0.5)
+
+    def test_sparse_history_refuses_to_judge(self):
+        self.assertIsNone(engine.history_view(flat_history(5), 40, 42))
+        self.assertIsNone(engine.history_view([], 40, 42))
+
+    def test_null_buckets_are_skipped_not_fatal(self):
+        points = flat_history(30) + [bucket()] * 26
+        view = engine.history_view(points, buy=40, sell=42)
+        self.assertEqual(view.buckets, 30)
+
+    def test_only_last_14_days_count(self):
+        # 100 ancient buckets at 10 gp, then 56 recent at 40: the window
+        # slices to the recent ones, so cheap ancient volume is invisible
+        ancient = [bucket(12, 1_000, 10, 1_000) for _ in range(100)]
+        view = engine.history_view(ancient + flat_history(56), buy=11, sell=41)
+        self.assertAlmostEqual(view.buy_fill_share, 0.0)
+
+
 class SlotTests(unittest.TestCase):
     def test_gp_per_slot_hour_spreads_over_the_window(self):
         self.assertEqual(engine.gp_per_slot_hour(40_000), 10_000)

@@ -250,6 +250,101 @@ class SlotAllocationTests(unittest.TestCase):
         self.assertEqual(rows[0].capital_needed, 100 * 950)
 
 
+def history_bucket(avg_high, high_vol, avg_low, low_vol):
+    return {"avgHighPrice": avg_high, "highPriceVolume": high_vol,
+            "avgLowPrice": avg_low, "lowPriceVolume": low_vol}
+
+
+class RefineTests(unittest.TestCase):
+    """Stage 2: the salmon case — intraday says buy, 14 days say you won't."""
+
+    def _salmon_rows(self):
+        # Intraday: dumper active for the last hour, so the whole intraday
+        # pipeline (latest, 5m, 1h) agrees the buy side is ~30.
+        items = {1: item(1, name="Salmon", limit=15_000),
+                 2: item(2, name="Leather", limit=13_000)}
+        quotes = {1: quote(high=42, low=30), 2: quote(high=192, low=173)}
+        acts_5m = {1: act_5m(avg_high=42, high_volume=900, avg_low=30,
+                             low_volume=700),
+                   2: act_5m(avg_high=192, high_volume=90, avg_low=173,
+                             low_volume=80)}
+        acts_1h = {1: act_1h(avg_high=42, high_volume=9_000, avg_low=30,
+                             low_volume=7_000),
+                   2: act_1h(avg_high=192, high_volume=1_100, avg_low=173,
+                             low_volume=1_000)}
+        return rank(items, quotes, acts_5m, acts_1h, capital=80_000, slots=1)
+
+    def _histories(self):
+        # 14 days of truth: salmon sellers accepted ~40 for all real volume;
+        # leather traded exactly where it is quoted now.
+        salmon = ([history_bucket(42, 5_000, 40, 5_000)] * 55
+                  + [history_bucket(42, 5_000, 30, 700)])
+        leather = [history_bucket(192, 1_000, 173, 1_000)] * 56
+        return {1: salmon, 2: leather}
+
+    def test_intraday_alone_loves_the_salmon_dump(self):
+        rows, _ = self._salmon_rows()
+        self.assertEqual(rows[0].name, "Salmon")
+
+    def test_history_collapses_it(self):
+        rows, _ = self._salmon_rows()
+        refined, count = filters.refine_with_history(
+            rows, lambda i: self._histories()[i], top_k=15)
+        self.assertEqual(count, 2)
+        self.assertEqual(refined[0].name, "Leather")
+        salmon = next(r for r in refined if r.name == "Salmon")
+        self.assertEqual(salmon.fill_factor, engine.FILL_FLOOR)
+        self.assertTrue(any("below the 14-day average" in w
+                            for w in salmon.warnings))
+        self.assertTrue(any("14-day volume" in w for w in salmon.warnings))
+
+    def test_flat_item_keeps_roughly_its_stage1_ev(self):
+        rows, _ = self._salmon_rows()
+        leather = next(r for r in rows if r.name == "Leather")
+        refined, _ = filters.refine_with_history(
+            rows, lambda i: self._histories()[i], top_k=15)
+        leather_after = next(r for r in refined if r.name == "Leather")
+        self.assertAlmostEqual(leather_after.expected_gp, leather.expected_gp)
+        self.assertEqual(leather_after.fill_factor, 1.0)
+
+    def test_uptrend_outranks_its_flat_twin(self):
+        # identical intraday state, identical quotes: only the 14-day shape
+        # differs. The riser ends at today's quote; the flat twin sat there
+        # all along. Momentum should break the tie toward the riser.
+        items = {1: item(1, name="flat"), 2: item(2, name="rising")}
+        quotes = {n: quote(high=12_600, low=12_200) for n in (1, 2)}
+        acts = {n: act_5m(avg_high=12_600, avg_low=12_200) for n in (1, 2)}
+        acts1h = {n: act_1h(avg_high=12_600, avg_low=12_200) for n in (1, 2)}
+        rows, _ = rank(items, quotes, acts, acts1h, capital=100_000_000)
+        flat = [history_bucket(12_600, 1_000, 12_200, 1_000)] * 56
+        growth = 1.004
+        rising = [history_bucket(round(12_600 * growth ** (i - 55)), 1_000,
+                                 round(12_200 * growth ** (i - 55)), 1_000)
+                  for i in range(56)]
+        refined, _ = filters.refine_with_history(
+            rows, lambda i: {1: flat, 2: rising}[i], top_k=15)
+        self.assertEqual(refined[0].name, "rising")
+        self.assertGreater(refined[0].momentum, 1.0)
+        flat_row = next(r for r in refined if r.name == "flat")
+        self.assertEqual(flat_row.momentum, 1.0)
+        self.assertEqual(flat_row.fill_factor, 1.0)
+
+    def test_missing_history_keeps_stage1_and_flags_it(self):
+        rows, _ = self._salmon_rows()
+        refined, count = filters.refine_with_history(
+            rows, lambda i: None, top_k=15)
+        self.assertEqual(count, 0)
+        self.assertEqual([r.name for r in refined], [r.name for r in rows])
+        self.assertTrue(all("no usable 14-day history" in r.warnings[-1]
+                            for r in refined))
+
+    def test_top_k_zero_changes_nothing(self):
+        rows, _ = self._salmon_rows()
+        refined, count = filters.refine_with_history(rows, lambda i: [], 0)
+        self.assertEqual(count, 0)
+        self.assertEqual(refined, rows)
+
+
 class PassingRowTests(unittest.TestCase):
     def test_row_fields(self):
         rows, funnel = rank({1: item(limit=10_000)},

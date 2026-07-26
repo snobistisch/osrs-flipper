@@ -27,6 +27,7 @@ USER_AGENT = ("osrs-flipper/0.1 - GE flipping dashboard - "
 LATEST_TTL = 30          # seconds; also the minimum poll interval
 INTERVAL_TTL = {"5m": 60, "1h": 300}
 MAPPING_MAX_AGE = 24 * 3600
+TIMESERIES_TTL = 1800    # per-item history moves slowly at 6h buckets
 TIMESTEPS = ("5m", "1h", "6h", "24h")
 
 
@@ -193,9 +194,19 @@ class WikiClient:
         return items
 
     def timeseries(self, item_id: int, timestep: str = "1h") -> List[dict]:
-        """History for ONE item (detail view only — never call in a loop)."""
+        """History for ONE item: the detail view, plus top-K refinement.
+
+        Never called across all items — only for a single selected item or a
+        shortlist of ~15 candidates, and cached 30 minutes so repeated
+        rankings reuse the same fetch.
+        """
         if timestep not in TIMESTEPS:
             raise ValueError("timestep must be one of {}".format(list(TIMESTEPS)))
+        key = "ts:{}:{}".format(item_id, timestep)
+        return self._cached(key, TIMESERIES_TTL,
+                            lambda: self._fetch_timeseries(item_id, timestep))
+
+    def _fetch_timeseries(self, item_id: int, timestep: str) -> List[dict]:
         payload = self._get("/timeseries", {"id": item_id, "timestep": timestep})
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list):

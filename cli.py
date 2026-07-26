@@ -33,6 +33,9 @@ def parse_args(argv):
     p.add_argument("--members", action="store_true",
                    help="include members-only items")
     p.add_argument("--top", type=int, default=20, help="rows to show")
+    p.add_argument("--deep", type=int, default=15,
+                   help="re-score this many top candidates against 14 days of "
+                        "/timeseries history (0 disables)")
     return p.parse_args(argv)
 
 
@@ -58,25 +61,30 @@ def print_table(rows, funnel, opts):
               "or --min-depth.")
         return
 
-    header = "{:<26} {:>9} {:>9} {:>7} {:>6} {:>6} {:>7} {:>7} {:>11} {:>11}"
+    header = "{:<26} {:>9} {:>9} {:>7} {:>6} {:>5} {:>5} {:>5} {:>7} {:>7} {:>11} {:>11}"
     print(header.format("ITEM", "BUY", "SELL", "MARGIN", "ROI", "ROOM",
-                        "QTY/4H", "TIED UP", "QUOTED/4H", "EV/SLOT/H"))
+                        "FILL", "TRND", "QTY/4H", "TIED UP", "QUOTED/4H",
+                        "EV/SLOT/H"))
     for r in rows[:opts.top]:
-        print("{:<26.26} {:>9,} {:>9,} {:>7,} {:>5.1f}% {:>6,} {:>7,} {:>7} "
-              "{:>11,} {:>11,.0f}".format(
+        fill = "{:.0%}".format(r.fill_share) if r.deep_checked else "—"
+        trend = "{:+.0%}".format(r.trend) if r.deep_checked else "—"
+        print("{:<26.26} {:>9,} {:>9,} {:>7,} {:>5.1f}% {:>5,} {:>5} {:>5} "
+              "{:>7,} {:>7} {:>11,} {:>11,.0f}".format(
                   r.name, r.buy, r.sell, r.margin, r.roi * 100,
-                  r.undercut_depth, r.qty_per_window,
+                  r.undercut_depth, fill, trend, r.qty_per_window,
                   engine.format_gp(r.capital_needed), r.gross_profit,
                   r.gp_per_slot_hour))
         for note in r.warnings:
             print("{:<26} {}".format("", "· " + note))
     print()
     print("ROOM = gp of price improvement you can afford per side and still "
-          "profit. The GE fills by price first, then by offer age, so with no "
-          "room you wait behind offers that may be days old.")
-    print("EV/SLOT/H = expected gp per offer slot per hour: the quoted profit "
-          "discounted for queue position, price drift and quote staleness. "
-          "QUOTED/4H is the undiscounted best case.")
+          "profit; with 0 you wait behind offers that may be days old. "
+          "FILL = share of the last 14 days' volume that traded at your "
+          "prices — the last print is not the market. TRND = recent vs prior "
+          "multi-day VWAP.")
+    print("EV/SLOT/H = expected gp per offer slot per hour: quoted profit "
+          "discounted for queue position, drift, staleness, 14-day fill "
+          "probability and momentum. QUOTED/4H is the undiscounted best case.")
 
 
 def main(argv=None):
@@ -92,6 +100,14 @@ def main(argv=None):
         return 1
     rows, funnel = filters.rank_flips(items, quotes, activity_5m, activity_1h,
                                       config_from(opts), now=time.time())
+    if opts.deep > 0:
+        def fetch(item_id):
+            try:
+                return client.timeseries(item_id, engine.HISTORY_TIMESTEP)
+            except api.ApiError:
+                return None
+        rows, refined = filters.refine_with_history(rows, fetch, opts.deep)
+        funnel["deep-checked vs 14d history"] = refined
     print_table(rows, funnel, opts)
     return 0
 

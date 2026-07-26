@@ -254,6 +254,155 @@ def expected_value(margin: int, qty: int, depth: int, drift: float,
             * freshness(age_seconds))
 
 
+# ---------------------------------------------------------------------------
+# Multi-day history — the last print is not the market
+# ---------------------------------------------------------------------------
+# Intraday data cannot tell a real spread from a transient dump: a few hundred
+# salmon sold at 30 gp in the last minutes looks like a buy at 30, but if the
+# last two weeks of seller volume went at 40, a large offer at 30 fills only
+# against that one dumper and then sits. These functions read ~14 days of 6h
+# timeseries buckets and answer: at your prices, what share of the market's
+# real volume would actually have filled you, and which way is it moving?
+
+HISTORY_TIMESTEP = "6h"
+HISTORY_WINDOW_BUCKETS = 56       # 14 days of 6h buckets
+MIN_HISTORY_BUCKETS = 8           # fewer traded buckets: refuse to refine
+RECENT_TREND_BUCKETS = 12         # ~3 days
+FILL_FLOOR = 0.05                 # even "never traded there" keeps 5%
+FILL_TOLERANCE = 0.01             # prices within 1% count as reachable
+
+
+class HistoryView:
+    """Multi-day metrics for one item at one (buy, sell) estimate."""
+    __slots__ = ("buckets", "baseline_low", "baseline_high", "buy_fill_share",
+                 "sell_fill_share", "fill_factor", "trend", "momentum",
+                 "dislocation")
+
+    def __init__(self, buckets, baseline_low, baseline_high, buy_fill_share,
+                 sell_fill_share, fill_factor, trend, momentum, dislocation):
+        self.buckets = buckets
+        self.baseline_low = baseline_low
+        self.baseline_high = baseline_high
+        self.buy_fill_share = buy_fill_share
+        self.sell_fill_share = sell_fill_share
+        self.fill_factor = fill_factor
+        self.trend = trend
+        self.momentum = momentum
+        self.dislocation = dislocation
+
+
+def _weighted_avg(pairs: List[Tuple[float, int]]) -> Optional[float]:
+    total = sum(vol for _, vol in pairs)
+    if total <= 0:
+        return None
+    return sum(price * vol for price, vol in pairs) / total
+
+
+def _bucket_vwap(points: List[dict]) -> Optional[float]:
+    """Volume-weighted mid price over a run of buckets."""
+    pairs = []
+    for p in points:
+        high, low = p.get("avgHighPrice"), p.get("avgLowPrice")
+        hv = p.get("highPriceVolume") or 0
+        lv = p.get("lowPriceVolume") or 0
+        value = (high or 0) * hv + (low or 0) * lv
+        vol = (hv if high is not None else 0) + (lv if low is not None else 0)
+        if vol > 0:
+            pairs.append((value / vol, vol))
+    return _weighted_avg(pairs)
+
+
+def momentum_factor(trend: float) -> float:
+    """Bounded EV multiplier from the multi-day trend.
+
+    A rise with volume behind it is the price signature of an update-driven
+    demand shift, and your sell leg fills easily into it — mild reward. A
+    decline means you hold depreciating inventory between the legs — harsher
+    penalty. Constants are judgement-tuned, like every factor in this file.
+    """
+    m = 1 + (1.5 * trend if trend >= 0 else 3.0 * trend)
+    return max(0.5, min(1.25, m))
+
+
+def history_view(points: List[dict], buy: int, sell: int) -> Optional[HistoryView]:
+    """Read a slice of /timeseries buckets (wiki key names, oldest first).
+
+    Returns None when fewer than MIN_HISTORY_BUCKETS buckets traded — too
+    little history to say anything, so the caller keeps its stage-1 numbers.
+    """
+    points = points[-HISTORY_WINDOW_BUCKETS:]
+    lows, highs = [], []
+    buckets = 0
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        hv = p.get("highPriceVolume") or 0
+        lv = p.get("lowPriceVolume") or 0
+        if hv > 0 or lv > 0:
+            buckets += 1
+        if p.get("avgLowPrice") is not None and lv > 0:
+            lows.append((p["avgLowPrice"], lv))
+        if p.get("avgHighPrice") is not None and hv > 0:
+            highs.append((p["avgHighPrice"], hv))
+    if buckets < MIN_HISTORY_BUCKETS:
+        return None
+
+    baseline_low = _weighted_avg(lows)
+    baseline_high = _weighted_avg(highs)
+
+    # Fill shares are computed on DETRENDED prices. A seller's aggressiveness
+    # is their price relative to the market at that moment, so each bucket's
+    # prices are divided by that bucket's own mid, and your prices by the
+    # current quote mid. A dump stays visible (27% under its market is a dump
+    # whenever it happened), but an item marching upward is not punished for
+    # trading above last week's absolute prices. The 1% tolerance treats
+    # prices within a tick-or-so as reachable.
+    mid_now = (buy + sell) / 2
+    low_ratios, high_ratios = [], []
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        high_price, low_price = p.get("avgHighPrice"), p.get("avgLowPrice")
+        hv = p.get("highPriceVolume") or 0
+        lv = p.get("lowPriceVolume") or 0
+        value = ((high_price or 0) * hv) + ((low_price or 0) * lv)
+        vol = (hv if high_price is not None else 0) + \
+              (lv if low_price is not None else 0)
+        if vol <= 0:
+            continue
+        bucket_mid = value / vol
+        if low_price is not None and lv > 0:
+            low_ratios.append((low_price / bucket_mid, lv))
+        if high_price is not None and hv > 0:
+            high_ratios.append((high_price / bucket_mid, hv))
+
+    low_total = sum(v for _, v in low_ratios)
+    high_total = sum(v for _, v in high_ratios)
+    buy_ratio = buy / mid_now * (1 + FILL_TOLERANCE)
+    sell_ratio = sell / mid_now * (1 - FILL_TOLERANCE)
+    buy_fill_share = (sum(v for r, v in low_ratios if r <= buy_ratio)
+                      / low_total if low_total > 0 else 0.0)
+    sell_fill_share = (sum(v for r, v in high_ratios if r >= sell_ratio)
+                       / high_total if high_total > 0 else 0.0)
+    fill_factor = max(FILL_FLOOR, min(1.0, min(buy_fill_share, sell_fill_share)))
+
+    recent = _bucket_vwap(points[-RECENT_TREND_BUCKETS:])
+    prior = _bucket_vwap(points[:-RECENT_TREND_BUCKETS])
+    trend = ((recent - prior) / prior
+             if recent is not None and prior is not None and prior > 0 else 0.0)
+
+    dislocation = ((buy - baseline_low) / baseline_low
+                   if baseline_low is not None and baseline_low > 0 else 0.0)
+
+    return HistoryView(
+        buckets=buckets,
+        baseline_low=int(round(baseline_low)) if baseline_low is not None else None,
+        baseline_high=int(round(baseline_high)) if baseline_high is not None else None,
+        buy_fill_share=buy_fill_share, sell_fill_share=sell_fill_share,
+        fill_factor=fill_factor, trend=trend,
+        momentum=momentum_factor(trend), dislocation=dislocation)
+
+
 def gp_per_slot_hour(expected_gp: float) -> float:
     """Expected gp per offer slot per hour — the metric worth maximising.
 

@@ -10,8 +10,8 @@ missing from /mapping, /5m, or /1h.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass, field, replace
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import engine
 from api import Activity, Item, Quote
@@ -50,6 +50,13 @@ class FlipRow:
     expected_gp: float       # gross profit after every discount
     gp_per_slot_hour: float  # the ranking metric
     warnings: Tuple[str, ...] = field(default=())
+    # Filled by refine_with_history for the top candidates; None = not checked
+    deep_checked: bool = False
+    fill_share: Optional[float] = None   # binding leg's share of 14d volume
+    fill_factor: Optional[float] = None  # the EV multiplier (floored)
+    trend: Optional[float] = None        # recent vs prior multi-day VWAP
+    momentum: Optional[float] = None     # the EV multiplier from trend
+    baseline_low: Optional[int] = None   # 14d volume-weighted seller price
 
 
 # Rejection reasons, in the order the gates run. Every item in /latest lands
@@ -169,6 +176,66 @@ def _evaluate(
         gp_per_slot_hour=engine.gp_per_slot_hour(expected),
         warnings=_warnings(depth, drift, affordable, qty, item.limit),
     )
+
+
+def refine_with_history(
+    rows: List[FlipRow],
+    fetch_history: Callable[[int], Optional[List[dict]]],
+    top_k: int = 15,
+) -> Tuple[List[FlipRow], int]:
+    """Re-score the top candidates against ~14 days of price history.
+
+    Only the top_k rows are checked: /timeseries is a per-item route and the
+    wiki forbids sweeping it across all items, so deep data is spent on the
+    flips that stage 1 already likes. fetch_history is injected (item_id ->
+    list of wiki timeseries buckets, or None on failure) so tests can feed
+    synthetic series. Returns the re-sorted list and how many were refined.
+    """
+    refined_rows: List[FlipRow] = []
+    refined_count = 0
+    for index, row in enumerate(rows):
+        if index >= top_k:
+            refined_rows.append(row)
+            continue
+        points = fetch_history(row.item_id)
+        view = (engine.history_view(points, row.buy, row.sell)
+                if points else None)
+        if view is None:
+            refined_rows.append(replace(row, warnings=row.warnings + (
+                "no usable 14-day history — ranked on intraday data only",)))
+            continue
+        refined_count += 1
+        expected = row.expected_gp * view.fill_factor * view.momentum
+        binding = min(view.buy_fill_share, view.sell_fill_share)
+        refined_rows.append(replace(
+            row,
+            deep_checked=True, fill_share=binding,
+            fill_factor=view.fill_factor, trend=view.trend,
+            momentum=view.momentum, baseline_low=view.baseline_low,
+            expected_gp=expected,
+            gp_per_slot_hour=engine.gp_per_slot_hour(expected),
+            warnings=row.warnings + _history_warnings(view),
+        ))
+    refined_rows.sort(key=lambda r: r.gp_per_slot_hour, reverse=True)
+    return refined_rows, refined_count
+
+
+def _history_warnings(view: "engine.HistoryView") -> Tuple[str, ...]:
+    notes = []
+    if view.dislocation <= -0.10:
+        notes.append("buy price {:.0%} below the 14-day average — only the "
+                     "dump fills there".format(abs(view.dislocation)))
+    binding = min(view.buy_fill_share, view.sell_fill_share)
+    if binding <= 0.25:
+        notes.append("only {:.0%} of 14-day volume traded at your prices"
+                     .format(binding))
+    if view.trend >= 0.03:
+        notes.append("rising {:.0%} over recent days — the signature of an "
+                     "update-driven demand shift".format(view.trend))
+    elif view.trend <= -0.03:
+        notes.append("falling {:.0%} over recent days"
+                     .format(abs(view.trend)))
+    return tuple(notes)
 
 
 def _warnings(depth: int, drift: float, affordable: int, qty: int,

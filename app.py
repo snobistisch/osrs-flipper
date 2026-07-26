@@ -143,10 +143,12 @@ def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
 def ranked_table(rows, top_n):
     df = pd.DataFrame([{
         "Item": r.name, "Buy": r.buy, "Sell": r.sell, "Margin": r.margin,
-        "ROI %": r.roi * 100, "Room": r.undercut_depth, "Limit": r.limit,
-        "Vol/1h": r.thin_volume_1h, "Qty/4h": r.qty_per_window,
-        "Tied up": r.capital_needed, "Quoted/4h": r.gross_profit,
-        "EV/slot/h": round(r.gp_per_slot_hour),
+        "ROI %": r.roi * 100, "Room": r.undercut_depth,
+        "Fill %": r.fill_share * 100 if r.deep_checked else None,
+        "Trend %": r.trend * 100 if r.deep_checked else None,
+        "Limit": r.limit, "Vol/1h": r.thin_volume_1h,
+        "Qty/4h": r.qty_per_window, "Tied up": r.capital_needed,
+        "Quoted/4h": r.gross_profit, "EV/slot/h": round(r.gp_per_slot_hour),
     } for r in rows[:top_n]])
     gp = st.column_config.NumberColumn(format="localized")
     st.dataframe(df, hide_index=True, width="stretch", column_config={
@@ -155,11 +157,16 @@ def ranked_table(rows, top_n):
         "Room": st.column_config.NumberColumn(
             help="Gp of price improvement you can afford per side. 0 means you "
                  "cannot outbid the queue."),
+        "Fill %": st.column_config.NumberColumn(
+            format="%.0f%%", help="Share of the last 14 days' volume that "
+            "traded at your prices — the last print is not the market."),
+        "Trend %": st.column_config.NumberColumn(
+            format="%.0f%%", help="Recent vs prior multi-day VWAP."),
         "ROI %": st.column_config.NumberColumn(format="%.1f%%"),
     })
     st.caption("EV/slot/h ranks the table: quoted profit discounted for queue "
-               "position, price drift and quote staleness, spread over the 4h "
-               "buy-limit window. Quoted/4h is the undiscounted best case.")
+               "position, drift, staleness, 14-day fill probability and "
+               "momentum. Blank Fill/Trend = outside the deep-checked top 15.")
 
 
 def detail_view(row):
@@ -253,6 +260,16 @@ def main():
 
     rows, funnel = filters.rank_flips(items, quotes, activity_5m, activity_1h,
                                       config, now=time.time())
+
+    def fetch_history(item_id):
+        try:
+            return client.timeseries(item_id, engine.HISTORY_TIMESTEP)
+        except api.ApiError:
+            return None
+
+    with st.spinner("Checking the top 15 against 14-day history…"):
+        rows, refined = filters.refine_with_history(rows, fetch_history, 15)
+    funnel["deep-checked vs 14d history"] = refined
     st.title("🪙 Grand Exchange Flipper")
     st.caption("  →  ".join("{:,} {}".format(v, k)
                             for k, v in funnel.items() if v))

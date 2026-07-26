@@ -10,7 +10,7 @@ Find Grand Exchange flips you can actually execute. Live prices from the
 ## The strategy
 
 A quoted margin is not profit. It is profit *if* both legs of the flip fill at
-the quoted prices, and nothing guarantees that. Three things stop it, and each
+the quoted prices, and nothing guarantees that. Four things stop it, and each
 one is a discount applied to the quoted number.
 
 ### 1. You have to get to the front of the queue
@@ -46,17 +46,38 @@ once, so "profit if I put my entire bank into this one item" is the wrong
 question. Your budget is divided across your slots, and the ranking is by what
 one slot earns per hour.
 
-### The prices themselves
+### 4. The last print is not the market
+
+A few hundred salmon dumped at 30 gp in the last minutes reads as "buy at 30"
+to every intraday number — the last trade, the 5-minute average, even the
+1-hour average while the dump is running. But over the previous two weeks,
+sellers accepted ~40 gp for virtually all volume. A large buy offer at 30
+fills against that one dumper and then sits.
+
+So the top 15 candidates get a second pass against **14 days of 6h history**
+(`/timeseries`, per-item, cached 30 minutes — never swept across all items):
+
+- **Fill probability in size**: what share of two weeks' seller volume traded
+  at your buy price, and buyer volume at your sell price. Measured on prices
+  *relative to the market of the moment*, so an item marching upward is not
+  punished for trading above last week's absolute levels — but a dump is a
+  dump whenever it happened. The binding leg multiplies EV; a price nobody
+  ever traded at keeps 5%.
+- **Momentum**: recent ~3-day VWAP versus the prior baseline. A rise with
+  volume behind it — the price signature of an update-driven demand shift —
+  earns a bounded bonus (up to ×1.25). A decline is penalised twice as hard,
+  because you hold the inventory between the legs. The tool reads price and
+  volume, not patch notes.
+- Items with under 8 traded buckets are flagged and left on intraday numbers.
+
+### The intraday prices themselves
 
 Most tools read `/latest` literally — the last single trade per side, which one
-outlier can set anywhere. Averaging alone does not fix it. A real case: lobsters
-showed a last instant-sell of 34 gp and a 5-minute average that agreed, but that
-average rested on **13 units**, while 36,170 units traded at 58 gp over the same
-hour. Buying lobsters at 34 was not something you could do.
-
-So the reference price per side is the 5-minute and 1-hour average **weighted by
-how much traded in each**, and the estimate then takes the worse of that and the
-last real trade.
+outlier can set anywhere. Averaging alone does not fix it: lobsters once showed
+a 5-minute average of 34 gp resting on **13 units**, while 36,170 units traded
+at 58 gp that hour. So the intraday reference per side is the 5-minute and
+1-hour average **weighted by how much traded in each**, and the estimate takes
+the worse of that and the last real trade.
 
 The result is a much shorter list than other flippers show. That is the point.
 
@@ -104,8 +125,9 @@ python3 journal.py stats
 - Qty/4h = min(buy limit, hourly thin-side volume ×4, slot budget ÷ buy price).
   The thin side of the book bounds throughput: a flip needs both a seller to
   fill your buy and a buyer to fill your sell.
-- Expected gp = margin × qty × queue factor × drift factor × freshness, where
-  freshness halves for every 10 minutes of quote age.
+- Expected gp = margin × qty × queue factor × drift factor × freshness ×
+  14-day fill probability × momentum, where freshness halves for every
+  10 minutes of quote age.
 - EV/slot/hour = expected gp ÷ 4, the buy-limit window. This is the ranking.
 
 The discount factors are a model, not measurements. The shape of each is argued

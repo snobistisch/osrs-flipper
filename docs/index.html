@@ -187,7 +187,7 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
      not by the margin on the screen — because a quoted margin is only profit if
      both legs of the flip actually fill.</p>
   <details class="panel" id="strategy">
-    <summary>How the ranking thinks — three reasons a quoted margin isn't profit</summary>
+    <summary>How the ranking thinks — four reasons a quoted margin isn't profit</summary>
     <h3>1. You have to get to the front of the queue</h3>
     <p>The Grand Exchange matches offers on price first, then on age: at the same
        price, an offer placed days ago has near-absolute priority over yours. So
@@ -212,11 +212,20 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
        flips, so "profit if I put my whole bank into this one item" is the wrong
        question. Your budget is split across your slots, and everything is
        ranked by what a slot earns per hour.</p>
-    <p class="dim">Prices themselves are estimated conservatively: the reference
-       price per side is the 5-minute and 1-hour average weighted by how much
-       actually traded in each, and the final estimate takes the worse of that
-       and the last real trade. A handful of cheap trades cannot set your buy
-       price.</p>
+    <h3>4. The last print is not the market</h3>
+    <p>A few hundred salmon dumped at 30 gp in the last minutes reads as "buy at
+       30" to every intraday number — while two weeks of sellers accepted 40.
+       A big offer at 30 fills against that one dumper, then sits. So the top
+       candidates are re-checked against 14 days of history: what share of the
+       market's real volume traded at your prices (measured relative to the
+       market of the moment, so a rising item isn't punished for being above
+       last week), and which way the multi-day price is moving. A dip below the
+       multi-day average collapses; a rise with volume behind it — the price
+       signature of a game-update demand shift — earns a bounded bonus.</p>
+    <p class="dim">Intraday prices are estimated conservatively too: the
+       reference per side is the 5-minute and 1-hour average weighted by how
+       much actually traded in each, and the final estimate takes the worse of
+       that and the last real trade.</p>
   </details>
   <div class="panel">
     <label for="budget">How much gp do you have to flip with?</label>
@@ -302,6 +311,8 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
           <th data-sort="margin">Margin</th>
           <th data-sort="roi">ROI</th>
           <th data-sort="depth" title="Gp of price improvement you can afford per side">Room</th>
+          <th data-sort="fillShare" title="Share of the last 14 days' volume that traded at your prices">Fill</th>
+          <th data-sort="trend" title="Recent vs prior multi-day volume-weighted price">Trend</th>
           <th data-sort="limit">Limit</th>
           <th data-sort="volume">Vol/1h</th>
           <th data-sort="qty">Qty/4h</th>
@@ -482,6 +493,128 @@ const expectedValue = (margin, qty, depth, drift, ageSeconds) =>
    100k, so the question is what a slot is worth for four hours. */
 const gpPerSlotHour = (expectedGp) => expectedGp / WINDOW_HOURS;
 
+/* ==================== multi-day history ====================
+   The last print is not the market: a few hundred salmon sold at 30 gp in
+   the last minutes looks like a buy at 30, but if two weeks of seller volume
+   went at 40, a large offer at 30 fills only against that one dumper. These
+   functions read ~14 days of 6h buckets and answer: at your prices, what
+   share of the market's real volume would have filled you, and which way is
+   it moving? */
+
+const HISTORY_TIMESTEP = "6h";
+const HISTORY_WINDOW_BUCKETS = 56;   // 14 days of 6h buckets
+const MIN_HISTORY_BUCKETS = 8;       // fewer traded buckets: refuse to judge
+const RECENT_TREND_BUCKETS = 12;     // ~3 days
+const FILL_FLOOR = 0.05;             // "never traded there" still keeps 5%
+const FILL_TOLERANCE = 0.01;         // prices within 1% count as reachable
+
+function weightedAvg(pairs) {
+  const total = pairs.reduce((s, [, v]) => s + v, 0);
+  if (total <= 0) return null;
+  return pairs.reduce((s, [p, v]) => s + p * v, 0) / total;
+}
+
+function bucketVwap(points) {
+  const pairs = [];
+  for (const p of points) {
+    const hv = p.highPriceVolume || 0, lv = p.lowPriceVolume || 0;
+    const value = (p.avgHighPrice || 0) * hv + (p.avgLowPrice || 0) * lv;
+    const vol = (p.avgHighPrice != null ? hv : 0) +
+                (p.avgLowPrice != null ? lv : 0);
+    if (vol > 0) pairs.push([value / vol, vol]);
+  }
+  return weightedAvg(pairs);
+}
+
+/* A rise with volume behind it is the price signature of an update-driven
+   demand shift — mild reward. A decline means you hold depreciating
+   inventory between the legs — harsher penalty. Judgement-tuned. */
+function momentumFactor(trend) {
+  const m = 1 + (trend >= 0 ? 1.5 * trend : 3.0 * trend);
+  return Math.max(0.5, Math.min(1.25, m));
+}
+
+/* Mirrors engine.history_view in the Python engine — keep them in step. */
+function historyView(rawPoints, buy, sell) {
+  const points = rawPoints.slice(-HISTORY_WINDOW_BUCKETS)
+    .filter((p) => p && typeof p === "object");
+  let buckets = 0;
+  const lows = [], highs = [], lowRatios = [], highRatios = [];
+  for (const p of points) {
+    const hv = p.highPriceVolume || 0, lv = p.lowPriceVolume || 0;
+    if (hv > 0 || lv > 0) buckets++;
+    if (p.avgLowPrice != null && lv > 0) lows.push([p.avgLowPrice, lv]);
+    if (p.avgHighPrice != null && hv > 0) highs.push([p.avgHighPrice, hv]);
+    const value = (p.avgHighPrice || 0) * hv + (p.avgLowPrice || 0) * lv;
+    const vol = (p.avgHighPrice != null ? hv : 0) +
+                (p.avgLowPrice != null ? lv : 0);
+    if (vol <= 0) continue;
+    const bucketMid = value / vol;
+    if (p.avgLowPrice != null && lv > 0) {
+      lowRatios.push([p.avgLowPrice / bucketMid, lv]);
+    }
+    if (p.avgHighPrice != null && hv > 0) {
+      highRatios.push([p.avgHighPrice / bucketMid, hv]);
+    }
+  }
+  if (buckets < MIN_HISTORY_BUCKETS) return null;
+
+  const baselineLow = weightedAvg(lows);
+  const baselineHigh = weightedAvg(highs);
+
+  // Detrended fill shares: a seller's aggressiveness is their price relative
+  // to the market at that moment. A dump stays visible whenever it happened;
+  // an item marching upward is not punished for trading above last week's
+  // absolute prices.
+  const midNow = (buy + sell) / 2;
+  const buyRatio = (buy / midNow) * (1 + FILL_TOLERANCE);
+  const sellRatio = (sell / midNow) * (1 - FILL_TOLERANCE);
+  const lowTotal = lowRatios.reduce((s, [, v]) => s + v, 0);
+  const highTotal = highRatios.reduce((s, [, v]) => s + v, 0);
+  const buyFillShare = lowTotal > 0
+    ? lowRatios.reduce((s, [r, v]) => s + (r <= buyRatio ? v : 0), 0) / lowTotal
+    : 0;
+  const sellFillShare = highTotal > 0
+    ? highRatios.reduce((s, [r, v]) => s + (r >= sellRatio ? v : 0), 0) / highTotal
+    : 0;
+  const fillFactor = Math.max(FILL_FLOOR,
+    Math.min(1, Math.min(buyFillShare, sellFillShare)));
+
+  const recent = bucketVwap(points.slice(-RECENT_TREND_BUCKETS));
+  const prior = bucketVwap(points.slice(0, -RECENT_TREND_BUCKETS));
+  const trend = (recent != null && prior != null && prior > 0)
+    ? (recent - prior) / prior : 0;
+
+  const dislocation = (baselineLow != null && baselineLow > 0)
+    ? (buy - baselineLow) / baselineLow : 0;
+
+  return {
+    buckets,
+    baselineLow: baselineLow != null ? Math.round(baselineLow) : null,
+    baselineHigh: baselineHigh != null ? Math.round(baselineHigh) : null,
+    buyFillShare, sellFillShare, fillFactor, trend,
+    momentum: momentumFactor(trend), dislocation,
+  };
+}
+
+function historyWarnings(view) {
+  const notes = [];
+  const pct = (x) => `${Math.round(Math.abs(x) * 100)}%`;
+  if (view.dislocation <= -0.10) {
+    notes.push(`buy price ${pct(view.dislocation)} below the 14-day average — only the dump fills there`);
+  }
+  const binding = Math.min(view.buyFillShare, view.sellFillShare);
+  if (binding <= 0.25) {
+    notes.push(`only ${pct(binding)} of 14-day volume traded at your prices`);
+  }
+  if (view.trend >= 0.03) {
+    notes.push(`rising ${pct(view.trend)} over recent days — the signature of an update-driven demand shift`);
+  } else if (view.trend <= -0.03) {
+    notes.push(`falling ${pct(view.trend)} over recent days`);
+  }
+  return notes;
+}
+
 const capitalPerSlot = (capital, slots) =>
   Math.max(1, Math.floor(capital / Math.max(1, slots)));
 
@@ -585,14 +718,67 @@ async function fetchMapping() {
   return items;
 }
 
+/* Per-item route: used for the detail chart and the top-K refinement only,
+   never swept across all items. localStorage keeps series across visits so a
+   re-ranking does not refetch what the 6h buckets cannot have changed. */
+const TIMESERIES_TTL = 1_800_000;
+
 const fetchTimeseries = (id, step) =>
-  cached(`ts:${id}:${step}`, 120_000, async () => {
+  cached(`ts:${id}:${step}`, TIMESERIES_TTL, async () => {
+    const storageKey = `osrs-flipper.ts.${step}.${id}`;
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const stored = JSON.parse(raw);
+        if (Date.now() - stored.at < TIMESERIES_TTL) return stored.data;
+      }
+    } catch { /* corrupt cache: refetch below */ }
     const payload = await getJson(`/timeseries?id=${id}&timestep=${step}`);
     if (!payload || !Array.isArray(payload.data)) {
       throw new Error("/timeseries: response has no data list");
     }
+    try {
+      localStorage.setItem(storageKey,
+        JSON.stringify({ at: Date.now(), data: payload.data }));
+    } catch { /* quota full: fine, memory cache still holds it */ }
     return payload.data;
   });
+
+/* Re-score the top candidates against 14 days of history, a few at a time. */
+const DEEP_TOP_K = 15;
+const DEEP_CONCURRENCY = 4;
+
+async function refineTopRows(rows) {
+  const targets = rows.slice(0, DEEP_TOP_K);
+  let cursor = 0;
+  const workers = Array.from({ length: DEEP_CONCURRENCY }, async () => {
+    while (cursor < targets.length) {
+      const row = targets[cursor++];
+      let view = null;
+      try {
+        view = historyView(await fetchTimeseries(row.id, HISTORY_TIMESTEP),
+                           row.buy, row.sell);
+      } catch { /* fetch failed: leave the row on intraday data */ }
+      if (view == null) {
+        row.warnings = [...row.warnings,
+          "no usable 14-day history — ranked on intraday data only"];
+        continue;
+      }
+      row.deep = true;
+      row.fillShare = Math.min(view.buyFillShare, view.sellFillShare);
+      row.fillFactor = view.fillFactor;
+      row.trend = view.trend;
+      row.momentum = view.momentum;
+      row.baselineLow = view.baselineLow;
+      row.expected = row.expected * view.fillFactor * view.momentum;
+      row.perSlotHour = gpPerSlotHour(row.expected);
+      row.warnings = [...row.warnings, ...historyWarnings(view)];
+    }
+  });
+  await Promise.all(workers);
+  rows.sort((a, b) => b.perSlotHour - a.perSlotHour);
+  return targets.filter((r) => r.deep).length;
+}
 
 /* ==================== ranking ==================== */
 
@@ -697,11 +883,11 @@ function rankFlips(items, quotes, act5m, act1h, config, now) {
 const state = {
   capital: null,
   rows: [],
-  sortKey: "score",
+  sortKey: "perSlotHour",
   sortDesc: true,
   selected: null,
   timestep: "1h",
-  loading: false,
+  gen: 0,          // generation counter: stale async work discards itself
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -730,8 +916,7 @@ function syncFilterLabels() {
 }
 
 async function loadAndRender() {
-  if (state.loading) return;
-  state.loading = true;
+  const gen = ++state.gen;
   const status = $("#status");
   status.className = "small dim";
   status.textContent = "Loading live prices…";
@@ -741,18 +926,29 @@ async function loadAndRender() {
     ]);
     const { rows, funnel } = rankFlips(
       items, quotes, act5m, act1h, readConfig(), Date.now() / 1000);
+    if (gen !== state.gen) return;          // a newer run superseded this one
     state.rows = rows;
-    status.textContent = Object.entries(funnel)
+    const funnelText = Object.entries(funnel)
       .filter(([, v]) => v > 0)
       .map(([k, v]) => `${num(v)} ${k}`)
       .join("  →  ");
+    status.textContent = funnelText + "  ·  checking the top " +
+      Math.min(DEEP_TOP_K, rows.length) + " against 14-day history…";
     renderTable();
+    const refined = await refineTopRows(rows);
+    if (gen !== state.gen) return;
+    status.textContent = funnelText +
+      `  →  ${refined} deep-checked vs 14-day history`;
+    renderTable();
+    if (state.selected != null) {
+      const row = state.rows.find((r) => r.id === state.selected);
+      if (row) showDetail(row.id);
+    }
   } catch (err) {
+    if (gen !== state.gen) return;
     status.className = "small err";
     status.textContent = "Could not load prices: " + err.message +
       ". The wiki API may be busy — try Refresh in a moment.";
-  } finally {
-    state.loading = false;
   }
 }
 
@@ -773,7 +969,7 @@ function renderTable() {
   const body = $("#flips tbody");
   const rows = sortedRows().slice(0, 100);
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:2rem">
+    body.innerHTML = `<tr><td colspan="14" style="text-align:center;padding:2rem">
       No flips pass these filters. Lower the minimum ROI or volume.</td></tr>`;
     $("#detail").classList.add("hidden");
     return;
@@ -787,6 +983,11 @@ function renderTable() {
       <td class="pos">${num(r.margin)}</td>
       <td>${(r.roi * 100).toFixed(1)}%</td>
       <td class="${r.depth === 0 ? "bad" : ""}">${num(r.depth)}</td>
+      <td class="${r.deep && r.fillShare <= 0.25 ? "bad" : ""}">${
+        r.deep ? Math.round(r.fillShare * 100) + "%" : "—"}</td>
+      <td class="${r.deep && r.trend <= -0.03 ? "bad" : ""}">${
+        r.deep ? (r.trend >= 0 ? "+" : "−") +
+        Math.round(Math.abs(r.trend) * 100) + "%" : "—"}</td>
       <td>${r.limit == null ? "—" : num(r.limit)}</td>
       <td>${num(r.volume)}</td>
       <td>${num(r.qty)}</td>
@@ -836,8 +1037,19 @@ function showDetail(id) {
     `Price drift keeps ${pct(df)} — ${Math.abs(row.drift) < 0.005
       ? "market is flat" : `moving ${(row.drift * 100).toFixed(1)}% between the 1h and 5m averages`}.`,
     `Quote freshness keeps ${pct(ff)} — last trade ${row.age}s ago.`,
-    `Expected: <strong>${num(Math.round(row.expected))} gp</strong> per window, <strong>${num(Math.round(row.perSlotHour))} gp</strong> per slot-hour.`,
   ];
+  if (row.deep) {
+    lines.push(
+      `14-day fill keeps ${pct(row.fillFactor)} — ${pct(row.fillShare)} of two weeks' volume traded at your prices${
+        row.baselineLow != null ? ` (sellers averaged ${num(row.baselineLow)} gp)` : ""}.`,
+      `Momentum ${row.momentum >= 1 ? "adds" : "keeps"} ${pct(row.momentum)} — multi-day price ${
+        Math.abs(row.trend) < 0.005 ? "is flat"
+        : (row.trend > 0 ? "rising " : "falling ") + pct(row.trend)}.`);
+  } else {
+    lines.push("Not deep-checked against 14-day history (outside the top 15).");
+  }
+  lines.push(
+    `Expected: <strong>${num(Math.round(row.expected))} gp</strong> per window, <strong>${num(Math.round(row.perSlotHour))} gp</strong> per slot-hour.`);
   $("#d-notes").innerHTML = lines.map((l) => `<li>${l}</li>`).join("");
   loadChart();
 }
