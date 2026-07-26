@@ -26,6 +26,55 @@
   --grid: #4a3d2b;
   --good: #6ec96e;
 }
+#tabs {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.6rem;
+}
+.tab {
+  background: var(--panel-dark);
+  color: var(--text-dim);
+  border: 2px solid var(--edge);
+  border-radius: 3px;
+  padding: 0.45rem 0.9rem;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+.tab:hover { border-color: var(--edge-light); color: var(--text); }
+.tab.on {
+  background: var(--panel);
+  color: var(--gold);
+  border-color: var(--gold);
+}
+.tag {
+  display: inline-block;
+  white-space: nowrap;
+  font-size: 0.78em;
+  line-height: 1.4;
+  padding: 0 0.3em;
+  border-radius: 2px;
+  background: var(--panel-dark);
+  border: 1px solid var(--grid);
+}
+.tag + .tag { margin-left: 0.2em; }
+.tag-CRASH, .tag-PUMPED { border-color: var(--sell); color: #ffb59a; }
+.tag-DIP, .tag-SUPPLY_DROP { border-color: #b8862f; color: var(--gold); }
+.tag-DIPPED_STABLE, .tag-MERCH { border-color: var(--good); color: var(--good); }
+.tag-SUPPLY_CRUNCH { border-color: var(--sell); color: var(--gold-bright); }
+.hold-btn {
+  background: var(--panel-dark);
+  color: var(--text-dim);
+  border: 1px solid var(--grid);
+  border-radius: 2px;
+  padding: 0 0.4em;
+  font: inherit;
+  font-size: 0.82em;
+  cursor: pointer;
+}
+.hold-btn:hover { border-color: var(--gold); color: var(--gold); }
+#tab-blurb { margin: 0 0 0.8rem; max-width: 70ch; }
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -366,9 +415,17 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
 
   <main id="main">
     <h1>🪙 Grand Exchange Flipper</h1>
+
+    <div id="tabs" role="tablist">
+      <button class="tab on" data-tab="flip" role="tab">🔄 Flip</button>
+      <button class="tab" data-tab="merch" role="tab">📈 Merch</button>
+      <button class="tab" data-tab="crash" role="tab">🔍 Crash</button>
+    </div>
+    <p class="small dim" id="tab-blurb"></p>
+
     <div id="status" class="small dim"></div>
 
-    <div class="table-wrap">
+    <div class="table-wrap" id="flip-wrap">
       <table id="flips">
         <thead><tr>
           <th data-sort="name">Item</th>
@@ -383,19 +440,46 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
           <th data-sort="pFill" title="Chance both legs clear inside four hours">P(fill)</th>
           <th data-sort="alchDistance" title="How far the buy price sits above the high alchemy value. Negative means alching pays more than the market — a guaranteed exit.">Alch</th>
           <th data-sort="fillShare" title="Share of the last 14 days' volume that traded at your prices">Fill</th>
+          <th data-sort="volumeRatio" title="Units traded this hour against the 14-day average hourly rate. 15x means something is happening; 0.2x means the item has gone quiet.">Vol</th>
+          <th data-sort="tags" title="What kind of item this is, and whether its price is standing away from its own 14-day median">Type</th>
           <th data-sort="rawPerSlotHour" title="The score before shrinkage">Measured</th>
           <th data-sort="perSlotHour" title="Expected gp per offer slot per hour, after every discount and after shrinkage">EV/slot/h</th>
         </tr></thead>
         <tbody></tbody>
       </table>
     </div>
-    <p class="small dim"><strong>EV/slot/h</strong> is the ranking metric:
+    <p class="small dim" id="flip-note"><strong>EV/slot/h</strong> is the ranking metric:
       expected profit divided by the time the slot is actually occupied, then
       shrunk toward the market average by an amount set by how much volume the
       estimate rests on. A wide <strong>Measured</strong>-to-EV gap means the
       measured number was mostly the thinness of the data behind it.
       <strong>Round trip</strong> is why a small quick flip can beat a large
       slow one. Click a row for price history and where its profit went.</p>
+
+    <div class="table-wrap hidden" id="merch-wrap">
+      <table id="merch">
+        <thead><tr id="merch-head"></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="small dim hidden" id="merch-note"></p>
+
+    <section id="portfolio" class="hidden">
+      <h2>📊 Holdings</h2>
+      <div class="table-wrap">
+        <table id="holdings">
+          <thead><tr>
+            <th>Item</th><th>Qty</th><th>Paid</th><th>Net now</th>
+            <th>P&amp;L</th><th>Held</th><th></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="small dim">Valued at what a sale would actually net: the price
+        buyers are bidding, minus GE tax. Marking to the instant-buy price and
+        ignoring the tax is how a losing position reads as a winning one.
+        Stored in this browser only — clearing site data clears it.</p>
+    </section>
 
     <section id="detail" class="hidden">
       <h2 id="d-name"></h2>
@@ -530,6 +614,38 @@ const CAL = {
   update_risk_lead_hours: 6.0,
   score_noise_scale: 3.0,          // CALIBRATE: sampling noise on a log score
   score_noise_floor: 0.35,         // CALIBRATE: noise no volume removes
+
+  /* Merching — a different horizon from everything above: weeks of holding
+     rather than hours of flipping. See merch.py for the reasoning; these
+     values are checked against engine.Calibration by test_docs_port.py. */
+  merch_min_r2: 0.10,
+  merch_min_annual_pct: 8.0,
+  // Far above the 2.0 used for mean reversion, and measured rather than
+  // cautious: on simulated price series with NO trend at all, |t| >= 1.5 calls
+  // 61% of pure noise a trend, |t| >= 2.5 calls 42%, |t| >= 5.0 calls 16%.
+  merch_trend_t: 5.0,
+  merch_entry_threshold: -0.03,
+  merch_botted_penalty: 0.60,
+
+  /* Crash detection. Depth is the quote mid against the 14-day median:
+     negative is below it. Deep AND loud is a crash; a quiet slide of the same
+     depth is a different animal, with no forced seller to wait out. */
+  crash_depth: -0.35,
+  crash_volume_spike: 3.0,
+  dip_depth: -0.20,
+  dip_volume_spike: 2.0,
+  quiet_dip_depth: -0.30,
+  quiet_volume_ratio: 1.50,
+  pumped_elevation: 0.15,
+  pumped_volume_ratio: 0.30,
+  volume_baseline_percentile: 0.70,
+
+  /* Supply crunch, measured against the rest of the market rather than in
+     absolute terms — see marketVolumeDrift. */
+  supply_crunch_decline: -0.80,
+  supply_drop_decline: -0.50,
+  raid_catch_up_gp: 10000000,
+
   horizon_hours: WINDOW_HOURS,
 };
 
@@ -739,7 +855,9 @@ function ols(xs, ys) {
   const dof = n - 2;
   const residualVariance = dof > 0 ? rss / dof : 0;
   const stderr = residualVariance > 0 ? Math.sqrt(residualVariance / sxx) : 0;
-  return { intercept, slope, residualVariance, n,
+  // slopeStderr is exposed so computeTrend can widen it for autocorrelated
+  // residuals; tStat here is the uncorrected one the OU fit wants.
+  return { intercept, slope, residualVariance, n, slopeStderr: stderr,
            tStat: stderr > 0 ? slope / stderr : 0 };
 }
 
@@ -1049,7 +1167,8 @@ function median(values) {
    at 40, a large offer at 30 fills only against that one dumper. */
 
 const HISTORY_TIMESTEP = "6h";
-const HISTORY_BUCKET_DAYS = 6 / HOURS_PER_DAY;
+const HISTORY_BUCKET_HOURS = 6;
+const HISTORY_BUCKET_DAYS = HISTORY_BUCKET_HOURS / HOURS_PER_DAY;
 const HISTORY_WINDOW_BUCKETS = 56;   // 14 days of 6h buckets
 const MIN_HISTORY_BUCKETS = 8;       // fewer traded buckets: refuse to judge
 const RECENT_TREND_BUCKETS = 12;     // ~3 days
@@ -1078,10 +1197,11 @@ function historyView(rawPoints, buy, sell) {
   const points = rawPoints.slice(-HISTORY_WINDOW_BUCKETS)
     .filter((p) => p && typeof p === "object");
   let buckets = 0;
+  const volumes = [];
   const lows = [], highs = [], lowRatios = [], highRatios = [], mids = [];
   for (const p of points) {
     const hv = p.highPriceVolume || 0, lv = p.lowPriceVolume || 0;
-    if (hv > 0 || lv > 0) buckets++;
+    if (hv > 0 || lv > 0) { buckets++; volumes.push(hv + lv); }
     if (p.avgLowPrice != null && lv > 0) lows.push([p.avgLowPrice, lv]);
     if (p.avgHighPrice != null && hv > 0) highs.push([p.avgHighPrice, hv]);
     const value = (p.avgHighPrice || 0) * hv + (p.avgLowPrice || 0) * lv;
@@ -1136,6 +1256,11 @@ function historyView(rawPoints, buy, sell) {
     elevation, volatility,
     ou: fitOU(mids, HISTORY_BUCKET_DAYS),
     regimeScore: regimeShift(mids),
+    // Mean total volume per 6h bucket. The crash badge needs a baseline to
+    // measure today's activity against; engine.history_view already returns
+    // this and the port was missing it.
+    meanVolume: volumes.length
+      ? volumes.reduce((a, b) => a + b, 0) / volumes.length : 0,
   };
 }
 
@@ -1172,6 +1297,417 @@ function historyWarnings(view) {
 
 const capitalPerSlot = (capital, slots) =>
   Math.max(1, Math.floor(capital / Math.max(1, slots)));
+
+/* ==================== merch: long-horizon signals ====================
+
+   Mirrors merch.py. Everything above answers "is this worth flipping in the
+   next four hours". This answers "is this worth buying and holding for weeks",
+   which is a different question on a different scale, and the two numbers are
+   never added together.
+
+   Read one thing here if nothing else: noiseProbability. A year of daily
+   prices with no trend in it at all still wanders far enough to look like a
+   40%/yr riser, and without that number the trend column is a machine for
+   producing confident nonsense. */
+
+const TREND_TIMESTEP = "24h";
+const TREND_WINDOW_POINTS = 365;
+const TREND_MIN_POINTS = 30;
+const ANNUALISED_REPORT_CAP = 999;
+const ANNUALISED_SCORE_CAP = 200;
+const MEDIAN_WINDOW_DAYS = 14;
+const VOLUME_BASELINE_DAYS = 30;
+const VOLUME_RECENT_DAYS = 30;
+const VOLUME_LOOKBACK_DAYS = 180;
+const MIN_BASKET_FOR_DRIFT = 8;
+const DAYS_PER_YEAR = 365;
+
+const UPTREND = "UPTREND", DOWNTREND = "DOWNTREND", SIDEWAYS = "SIDEWAYS";
+
+/* Volume-weighted mid of one bucket, or whichever side traded. */
+function pointMid(p) {
+  if (!p || typeof p !== "object") return null;
+  const hv = p.highPriceVolume || 0, lv = p.lowPriceVolume || 0;
+  const value = (p.avgHighPrice || 0) * hv + (p.avgLowPrice || 0) * lv;
+  const vol = (p.avgHighPrice != null ? hv : 0) + (p.avgLowPrice != null ? lv : 0);
+  if (vol > 0) return value / vol;
+  if (p.avgHighPrice != null && p.avgLowPrice != null) {
+    return (p.avgHighPrice + p.avgLowPrice) / 2;
+  }
+  return p.avgHighPrice != null ? p.avgHighPrice : (p.avgLowPrice ?? null);
+}
+
+/* Survival curve of |t| for series with NO trend, measured over 3,000
+   simulated driftless random walks of 365 days (test_merch.py regenerates and
+   checks it). Scale-free: repeating it at 1.2%, 2.1% and 3.5% daily volatility
+   moves it under a point, because slope and standard error both scale with
+   volatility. It turns an unreadable statistic into a sentence. */
+const NOISE_SURVIVAL = [
+  [0, 1.00], [1, 0.73], [1.5, 0.61], [2, 0.51], [2.5, 0.42], [3, 0.35],
+  [4, 0.24], [5, 0.16], [6, 0.12], [8, 0.06], [10, 0.03], [12, 0.01],
+  [15, 0.006], [20, 0.001],
+];
+
+function noiseProbability(tStat) {
+  const t = Math.abs(tStat);
+  let [prevT, prevP] = NOISE_SURVIVAL[0];
+  for (const [threshold, share] of NOISE_SURVIVAL) {
+    if (t <= threshold) {
+      if (threshold === prevT) return share;
+      return prevP + ((t - prevT) / (threshold - prevT)) * (share - prevP);
+    }
+    prevT = threshold; prevP = share;
+  }
+  return NOISE_SURVIVAL[NOISE_SURVIVAL.length - 1][1];
+}
+
+/* Textbook OLS standard errors assume independent residuals. Prices are not:
+   today's distance from the trend line is nearly yesterday's. Uncorrected, a
+   pure random walk comes out at |t| of thirty and everything looks trending.
+   The standard AR(1) inflation by sqrt((1+rho)/(1-rho)) is the cheap version of
+   Newey-West, and this is a label rather than a wager. Only positive rho
+   inflates: negative rho would claim extra precision. */
+function autocorrelationRobustT(slope, slopeStderr, residuals) {
+  const n = residuals.length;
+  const naive = slopeStderr > 0 ? slope / slopeStderr : 0;
+  if (slopeStderr <= 0 || n < 3) return naive;
+  let denominator = 0, numerator = 0;
+  for (let i = 0; i < n; i++) denominator += residuals[i] * residuals[i];
+  if (denominator <= 0) return naive;
+  for (let i = 1; i < n; i++) numerator += residuals[i] * residuals[i - 1];
+  const rho = Math.max(0, Math.min(0.99, numerator / denominator));
+  return slope / (slopeStderr * Math.sqrt((1 + rho) / (1 - rho)));
+}
+
+function trendDirection(tStat, annualisedPct) {
+  if (tStat >= CAL.merch_trend_t && annualisedPct >= CAL.merch_min_annual_pct) {
+    return UPTREND;
+  }
+  if (tStat <= -CAL.merch_trend_t && annualisedPct <= -CAL.merch_min_annual_pct) {
+    return DOWNTREND;
+  }
+  return SIDEWAYS;
+}
+
+/* Fit a trend through 24h buckets. Log prices, so the slope is a growth rate
+   that means the same on a 5 gp herb and a 60m wand. The regressor is elapsed
+   days from each bucket's own timestamp: untraded days are dropped, and using
+   the array index would silently compress those gaps and steepen the slope. */
+function computeTrend(points) {
+  const usable = [];
+  for (const p of points.slice(-TREND_WINDOW_POINTS)) {
+    const mid = pointMid(p);
+    const ts = p && typeof p === "object" ? p.timestamp : null;
+    if (mid == null || mid <= 0 || ts == null) continue;
+    usable.push([Number(ts), Number(mid)]);
+  }
+  if (usable.length < TREND_MIN_POINTS) return null;
+  usable.sort((a, b) => a[0] - b[0]);
+
+  const t0 = usable[0][0];
+  const xs = usable.map(([ts]) => (ts - t0) / 86400);
+  const ys = usable.map(([, mid]) => Math.log(mid));
+  const fit = ols(xs, ys);
+  if (!fit) return null;
+
+  const residuals = xs.map((x, i) => ys[i] - (fit.intercept + fit.slope * x));
+  const meanY = ys.reduce((a, b) => a + b, 0) / ys.length;
+  const ssTot = ys.reduce((s, y) => s + (y - meanY) ** 2, 0);
+  const ssRes = residuals.reduce((s, r) => s + r * r, 0);
+  const rSquared = ssTot > 0 ? 1 - ssRes / ssTot : 0;
+
+  const tStat = autocorrelationRobustT(fit.slope, fit.slopeStderr, residuals);
+  const annualised = Math.max(-100, Math.min(ANNUALISED_REPORT_CAP,
+    (Math.exp(fit.slope * DAYS_PER_YEAR) - 1) * 100));
+  const deviation = Math.exp(ys[ys.length - 1] -
+    (fit.intercept + fit.slope * xs[xs.length - 1])) - 1;
+  const ups = ys.slice(1).filter((y, i) => y > ys[i]).length;
+
+  return {
+    slopePerDay: fit.slope, intercept: fit.intercept, rSquared, tStat,
+    annualisedPct: annualised, deviation,
+    consistency: ys.length > 1 ? ups / (ys.length - 1) : 0,
+    n: usable.length, direction: trendDirection(tStat, annualised),
+    noiseProbability: noiseProbability(tStat),
+  };
+}
+
+/* Zero unless it is rising. The rate is discounted by how much of the price
+   movement the trend actually explains: 30%/yr at R2 0.8 is a better hold than
+   60%/yr at R2 0.15, where the price mostly wandered and finished higher. */
+function merchScore(trend, buyLimit, botted) {
+  if (!trend || trend.direction !== UPTREND) return 0;
+  if (trend.rSquared < CAL.merch_min_r2) return 0;
+  const base = Math.min(trend.annualisedPct, ANNUALISED_SCORE_CAP) * trend.rSquared;
+  const entryBonus = trend.deviation < CAL.merch_entry_threshold
+    ? Math.min(0.5, -trend.deviation * 3) : 0;
+  const limitBonus = buyLimit > 1 ? Math.min(0.3, Math.log10(buyLimit) / 20) : 0;
+  const penalty = botted ? CAL.merch_botted_penalty : 0;
+  return base * Math.max(0, 1 + entryBonus + limitBonus - penalty);
+}
+
+/* Only fires on uptrends: "cheap against its own trend" is not a reason to buy
+   something whose trend is down. */
+function entrySignal(price, trend, median14d) {
+  if (!trend || trend.direction !== UPTREND) return null;
+  if (trend.deviation < CAL.merch_entry_threshold) {
+    return { kind: "PULLBACK", strength: Math.abs(trend.deviation),
+      message: `${Math.round(-trend.deviation * 100)}% below its own trend line` };
+  }
+  if (median14d && price < median14d * 0.95) {
+    return { kind: "BELOW_MEDIAN", strength: (median14d - price) / median14d,
+      message: `${Math.round((1 - price / median14d) * 100)}% below the 14-day median` };
+  }
+  return null;
+}
+
+/* The final 24h bucket does not measure the same thing as the ones before it,
+   so every volume calculation drops it.
+
+   Verified against the API on 2026-07-26 by cross-checking /timeseries at 24h
+   against the same item at 6h: for every historical day the 24h bucket's
+   volume equals the FIRST 6h bucket of that day exactly, not the day's total,
+   which is about four times larger. The most recent bucket is the exception
+   and does carry the whole day. Prices behave the same way and that is
+   harmless — a consistent daily sample within ~2% of the daily mean — but the
+   volumes are not comparable, and leaving the last one in reports an 8x spike
+   on every item in the game at once. */
+const VOLUME_SKIP_LAST = 1;
+
+function comparableVolumePoints(points) {
+  const usable = points.filter((p) => p && typeof p === "object");
+  return usable.length > VOLUME_SKIP_LAST ? usable.slice(0, -VOLUME_SKIP_LAST) : [];
+}
+
+function latestComparableVolume(points) {
+  const usable = comparableVolumePoints(points);
+  if (!usable.length) return null;
+  const last = usable[usable.length - 1];
+  return (last.highPriceVolume || 0) + (last.lowPriceVolume || 0);
+}
+
+/* Normal daily volume lately — a percentile, because a mean is dragged up by
+   the very spike the ratio exists to detect. Trailing month only: total volume
+   in the game drifts a long way over a year, and a year-long baseline reports
+   every item in a quiet market as trading suspiciously thin. */
+function volumeBaseline(points, days = VOLUME_BASELINE_DAYS) {
+  const volumes = [];
+  for (const p of comparableVolumePoints(points).slice(-days)) {
+    const total = (p.highPriceVolume || 0) + (p.lowPriceVolume || 0);
+    if (total > 0) volumes.push(total);
+  }
+  if (!volumes.length) return null;
+  volumes.sort((a, b) => a - b);
+  const index = Math.floor(volumes.length * CAL.volume_baseline_percentile);
+  return volumes[Math.min(index, volumes.length - 1)];
+}
+
+function volumeRatio(current, baseline) {
+  if (!baseline || baseline <= 0 || current == null) return 1;
+  return current / baseline;
+}
+
+function volumeChange(points, recentDays = VOLUME_RECENT_DAYS,
+                      lookbackDays = VOLUME_LOOKBACK_DAYS) {
+  const daily = comparableVolumePoints(points)
+    .map((p) => (p.highPriceVolume || 0) + (p.lowPriceVolume || 0));
+  if (daily.length < lookbackDays + Math.floor(recentDays / 2)) return null;
+  const recent = daily.slice(-recentDays);
+  const start = Math.max(0, daily.length - lookbackDays - Math.floor(recentDays / 2));
+  const past = daily.slice(start, start + recentDays);
+  if (!recent.length || !past.length) return null;
+  const pastMean = past.reduce((a, b) => a + b, 0) / past.length;
+  if (pastMean <= 0) return null;
+  return (recent.reduce((a, b) => a + b, 0) / recent.length - pastMean) / pastMean;
+}
+
+/* Trade volume across the game is not constant. Measured over a year on live
+   data, every watchlist item — blood runes, diamonds and raid uniques alike —
+   was down between 50% and 86%. Read absolutely that says the whole game is in
+   a supply crunch, which is another way of saying the measurement was never
+   about supply. The median of a basket is the market; what survives dividing
+   it out belongs to the item. */
+function marketVolumeDrift(changes) {
+  const usable = changes.filter((c) => c != null);
+  if (usable.length < MIN_BASKET_FOR_DRIFT) return null;
+  return median(usable);
+}
+
+function relativeVolumeChange(raw, drift) {
+  if (raw == null || drift == null || drift <= -1) return null;
+  return (1 + raw) / (1 + drift) - 1;
+}
+
+const CRASH = "CRASH", DIP = "DIP", DIPPED_STABLE = "DIPPED_STABLE",
+      PUMPED = "PUMPED", SUPPLY_CRUNCH = "SUPPLY_CRUNCH",
+      SUPPLY_DROP = "SUPPLY_DROP";
+
+const BADGE_LABELS = {
+  [CRASH]: "🔴 CRASH", [DIP]: "🟠 DIP", [DIPPED_STABLE]: "🟢 DIPPED",
+  [PUMPED]: "🔴 PUMPED", [SUPPLY_CRUNCH]: "🔥 SUPPLY CRUNCH",
+  [SUPPLY_DROP]: "⚠️ SUPPLY DROP", BOTTED: "🤖 BOTTED", MERCH: "📈 MERCH",
+  RAID: "🏛️ RAID",
+};
+
+/* Nothing fires through a regime shift: a level that moved because the game
+   changed has not crashed, there is no median left to revert to, and calling
+   it a crash is how you buy an item Jagex just made obtainable in bulk.
+   The order of the tests is the specification — deep-and-quiet is checked
+   before shallow-and-loud because it is the better buy, not the lesser one. */
+function crashSignal(depth, volRatio, regimeScore = 0) {
+  if (depth == null) return null;
+  if (regimeScore >= CAL.regime_shift_threshold) return null;
+  if (depth <= CAL.crash_depth && volRatio >= CAL.crash_volume_spike) {
+    return { kind: CRASH, score: 5, depth, volumeRatio: volRatio };
+  }
+  if (depth <= CAL.quiet_dip_depth && volRatio <= CAL.quiet_volume_ratio) {
+    return { kind: DIPPED_STABLE, score: 4, depth, volumeRatio: volRatio };
+  }
+  if (depth <= CAL.dip_depth && volRatio >= CAL.dip_volume_spike) {
+    return { kind: DIP, score: 3, depth, volumeRatio: volRatio };
+  }
+  if (depth >= CAL.pumped_elevation && volRatio <= CAL.pumped_volume_ratio) {
+    return { kind: PUMPED, score: -3, depth, volumeRatio: volRatio };
+  }
+  return null;
+}
+
+/* Rank crashed items by how tradable the recovery is, not by how far it fell.
+   A 70% collapse you cannot buy into is worth less than a 25% dip on something
+   that trades all day. */
+function recoveryScore(signal, fillShare = 0, meanReverting = false) {
+  if (!signal || signal.score <= 0) return 0;
+  return Math.abs(signal.depth) * 100 * Math.max(0.05, fillShare) *
+    (meanReverting ? 1.5 : 1) * (signal.score / 5);
+}
+
+function supplyCrunchBadge(relativeChange) {
+  if (relativeChange == null) return null;
+  if (relativeChange <= CAL.supply_crunch_decline) return SUPPLY_CRUNCH;
+  if (relativeChange <= CAL.supply_drop_decline) return SUPPLY_DROP;
+  return null;
+}
+
+/* Raid uniques whose supply depends on how many people still run that raid.
+   Verified against /mapping: every id is tradeable and has a buy limit. The
+   Leagues "Corrupted" variants are deliberately absent — no buy limit, never
+   in /latest, because they cannot be traded at all. */
+const RAID_UNIQUE_IDS = new Set([
+  20997, 21006, 21012, 21018, 21021, 21024, 21034, 21047, 21079,
+  13652, 22324, 22477, 22486, 22978, 26219, 27277,
+]);
+
+/* The subset nobody at the content they gate can do without. */
+const PVM_MUST_HAVE_IDS = new Set([20997, 21034, 21079, 22486, 27277]);
+
+function raidCycleScore(itemId, price, relativeVolumeChange6m, trend) {
+  if (!RAID_UNIQUE_IDS.has(itemId)) return 0;
+  if (relativeVolumeChange6m == null ||
+      relativeVolumeChange6m > CAL.supply_drop_decline) return 0;
+  const catchUp = price < CAL.raid_catch_up_gp ? 1.5
+    : price < CAL.raid_catch_up_gp * 5 ? 1.0 : 0.5;
+  const essential = PVM_MUST_HAVE_IDS.has(itemId) ? 1.3 : 1.0;
+  let base = Math.abs(relativeVolumeChange6m) * 100 * catchUp * essential;
+  if (trend && trend.annualisedPct > 0) base += trend.annualisedPct / 10;
+  return base;
+}
+
+/* A free-to-play item cheap enough that no human farms it for the gp, with a
+   buy limit high enough that the supply is industrial. Neither condition means
+   much alone. */
+const BOTTED_MAX_PRICE = 100;
+const BOTTED_MIN_LIMIT = 10000;
+
+const isBotted = (buyPrice, members, buyLimit) =>
+  !members && (buyLimit || 0) >= BOTTED_MIN_LIMIT && buyPrice < BOTTED_MAX_PRICE;
+
+/* Tags for one item. Order is stable so table cells do not jump around. */
+function classifyItem(itemId, buyPrice, members, buyLimit, trend, crash, supply) {
+  const tags = [];
+  if (isBotted(buyPrice, members, buyLimit)) tags.push("BOTTED");
+  if (trend && trend.direction === UPTREND && trend.rSquared >= CAL.merch_min_r2) {
+    tags.push("MERCH");
+  }
+  if (RAID_UNIQUE_IDS.has(itemId)) tags.push("RAID");
+  if (supply) tags.push(supply);
+  if (crash) tags.push(crash.kind);
+  return tags;
+}
+
+/* Everything derivable from one year of 24h buckets, in one fetch.
+
+   This measures the median a price stands away from, which engine's
+   historyView also measures, and gets a slightly different number: 14 daily
+   buckets here against 56 six-hourly ones there. That is not drift to fix. The
+   flip path needs six-hour resolution for fill times; the merch path needs a
+   year of context and must not cost a second request per item to get it. */
+function dailyView(points, price = null) {
+  const traded = points.filter((p) => p && typeof p === "object" && (pointMid(p) || 0) > 0);
+  const mids = traded.map(pointMid);
+  const trend = computeTrend(points);
+  const median14d = mids.length ? median(mids.slice(-MEDIAN_WINDOW_DAYS)) : null;
+  const current = price != null ? price : (mids.length ? mids[mids.length - 1] : null);
+  const depth = current != null && median14d > 0
+    ? (current - median14d) / median14d : null;
+
+  const volumeToday = latestComparableVolume(points);
+  const baseline = volumeBaseline(points);
+  const ratio = volumeRatio(volumeToday, baseline);
+
+  return {
+    days: traded.length, trend,
+    price: current != null ? Math.round(current) : null,
+    median14d: median14d ? Math.round(median14d) : null,
+    depth, volumeToday, volumeBaseline: baseline, volumeRatio: ratio,
+    volumeChange6m: volumeChange(points),
+    crash: crashSignal(depth, ratio),
+    // Filled by applyMarketContext: unknowable from one item alone, so it
+    // stays null rather than defaulting to something reassuring.
+    volumeChangeRelative: null, marketDrift: null, supply: null,
+  };
+}
+
+/* Second pass: divide out the market-wide volume move, then badge supply. Has
+   to be a second pass, because the market estimate is the median across every
+   item analysed and no single item can see it. */
+function applyMarketContext(views) {
+  const drift = marketVolumeDrift(
+    Object.values(views).map((v) => v.volumeChange6m));
+  for (const view of Object.values(views)) {
+    view.marketDrift = drift;
+    view.volumeChangeRelative = relativeVolumeChange(view.volumeChange6m, drift);
+    view.supply = supplyCrunchBadge(view.volumeChangeRelative);
+  }
+  return views;
+}
+
+/* Ids only — no names, no prices, no trend figures. Names come from /mapping
+   and everything else is computed. A hardcoded price is wrong the day after it
+   is written. */
+const WATCHLIST = [
+  [565, "PvM magic demand; the cleanest long trend on the list"],
+  [560, "Same demand curve as blood runes, lower unit price"],
+  [536, "Prayer training sink; nothing else replaces it"],
+  [13441, "Best combo food in the game; cooked, not raw"],
+  [385, "PvM food staple below anglerfish"],
+  [28924, "Sunfire splinters: newer sink, momentum flattening"],
+  [5952, "Zulrah and CoX consumable; steady drain"],
+  [1601, "Crafting and bolt tips; f2p, constant demand"],
+  [11212, "Blowpipe and bow ammo; crashed hard from its peak"],
+  [221, "Herblore secondary; cheap with a high limit"],
+  [21079, "Augury scroll; supply falls as CoX empties out"],
+  [21034, "Rigour scroll; same thesis, higher entry price"],
+  [21047, "Cheapest raid scroll; smallest position to take"],
+  [26219, "ToA unique still in its supply phase"],
+  [22477, "ToB hilt; deeply crashed, volume gone"],
+  [13652, "Dragon claws; cheapest in years on collapsed volume"],
+  [22978, "Hydra and dragon slayer weapon; volume gone"],
+  [21012, "Dragon hunter crossbow; same story as the lance"],
+  [22324, "ToB rapier; bottom-fishing candidate"],
+  [21006, "CoX wand; best mage weapon at its price"],
+  [11804, "Bandos godsword; BGS spec is still the PvM opener"],
+];
+const THESIS_BY_ID = Object.fromEntries(WATCHLIST);
 
 /* ==================== api client ====================
    The wiki's acceptable-use policy asks for a descriptive User-Agent, but
@@ -1274,6 +1810,143 @@ const fetchTimeseries = (id, step) =>
     } catch { /* quota full: fine, memory cache still holds it */ }
     return payload.data;
   });
+
+/* ---- year-long history, for the merch and crash tabs ----
+
+   A 24h series is 365 points and about 40 KB, so the watchlist is roughly
+   850 KB — an order of magnitude past what belongs in localStorage next to the
+   /mapping cache. IndexedDB holds it instead, capped and pruned oldest-first,
+   and every failure path falls back to memory rather than breaking the tab:
+   private-browsing modes refuse to open a database at all. */
+
+const TREND_DB_NAME = "osrs-flipper";
+const TREND_STORE = "trends";
+const TREND_TTL = 6 * 3600 * 1000;      // a 24h bucket cannot move faster
+const TREND_CACHE_MAX_BYTES = 3_000_000;
+
+const trendMemory = new Map();
+let trendDbPromise = null;
+
+function openTrendDb() {
+  if (trendDbPromise) return trendDbPromise;
+  trendDbPromise = new Promise((resolve) => {
+    let request;
+    try {
+      request = indexedDB.open(TREND_DB_NAME, 1);
+    } catch {
+      resolve(null); return;             // no IndexedDB at all
+    }
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(TREND_STORE)) {
+        db.createObjectStore(TREND_STORE, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+    request.onblocked = () => resolve(null);
+  });
+  return trendDbPromise;
+}
+
+function idbRequest(request) {
+  return new Promise((resolve) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+  });
+}
+
+async function readTrendCache(id) {
+  const memo = trendMemory.get(id);
+  if (memo && Date.now() - memo.at < TREND_TTL) return memo.data;
+  const db = await openTrendDb();
+  if (!db) return null;
+  try {
+    const store = db.transaction(TREND_STORE, "readonly").objectStore(TREND_STORE);
+    const row = await idbRequest(store.get(id));
+    if (row && Date.now() - row.at < TREND_TTL) {
+      trendMemory.set(id, { at: row.at, data: row.data });
+      return row.data;
+    }
+  } catch { /* a broken transaction is a cache miss, not an error */ }
+  return null;
+}
+
+async function writeTrendCache(id, data) {
+  trendMemory.set(id, { at: Date.now(), data });
+  const db = await openTrendDb();
+  if (!db) return;
+  try {
+    const store = db.transaction(TREND_STORE, "readwrite").objectStore(TREND_STORE);
+    store.put({ id, at: Date.now(), bytes: JSON.stringify(data).length, data });
+  } catch { /* quota or a closed db: memory still holds it for this session */ }
+}
+
+/* Keep the store under the cap by dropping the oldest entries. Runs once after
+   a watchlist load rather than on every write, so it costs one transaction. */
+async function pruneTrendCache() {
+  const db = await openTrendDb();
+  if (!db) return;
+  try {
+    const store = db.transaction(TREND_STORE, "readwrite").objectStore(TREND_STORE);
+    const rows = await idbRequest(store.getAll());
+    if (!rows) return;
+    let total = rows.reduce((sum, row) => sum + (row.bytes || 0), 0);
+    if (total <= TREND_CACHE_MAX_BYTES) return;
+    rows.sort((a, b) => a.at - b.at);
+    for (const row of rows) {
+      if (total <= TREND_CACHE_MAX_BYTES) break;
+      store.delete(row.id);
+      total -= row.bytes || 0;
+    }
+  } catch { /* nothing to do: the cap is a courtesy, not a correctness rule */ }
+}
+
+async function fetchTrendSeries(id) {
+  const cached = await readTrendCache(id);
+  if (cached) return cached;
+  const payload = await getJson(`/timeseries?id=${id}&timestep=${TREND_TIMESTEP}`);
+  if (!payload || !Array.isArray(payload.data)) {
+    throw new Error("/timeseries: response has no data list");
+  }
+  await writeTrendCache(id, payload.data);
+  return payload.data;
+}
+
+/* Load the whole watchlist at the same concurrency the deep check uses. One
+   item's history failing must not cost the other twenty. */
+async function loadWatchlist(quotes, items) {
+  const ids = WATCHLIST.map(([id]) => id);
+  const views = {};
+  const problems = [];
+  let cursor = 0;
+  const workers = Array.from({ length: DEEP_CONCURRENCY }, async () => {
+    while (cursor < ids.length) {
+      const id = ids[cursor++];
+      const item = items[id];
+      if (!item) { problems.push(`${id}: not in /mapping`); continue; }
+      const quote = quotes[id];
+      const price = quote && quote.high && quote.low
+        ? (quote.high + quote.low) / 2 : null;
+      try {
+        const points = await fetchTrendSeries(id);
+        const view = dailyView(points, price);
+        view.id = id;
+        view.name = item.name;
+        view.members = item.members;
+        view.limit = item.limit;
+        view.thesis = THESIS_BY_ID[id];
+        views[id] = view;
+      } catch (err) {
+        problems.push(`${item.name}: ${err.message}`);
+      }
+    }
+  });
+  await Promise.all(workers);
+  applyMarketContext(views);
+  pruneTrendCache();
+  return { views: Object.values(views), problems };
+}
 
 /* ==================== the pipeline ====================
 
@@ -1402,6 +2075,12 @@ function screen(items, quotes, act5m, act1h, config, now) {
       listAt: taxBoundaryUndercut(sell, exempt),
       tax: geTax(sell, exempt), exempt, margin, roi: roi(buy, sell, exempt),
       limit: item.limit, volume: thinVolume, qty, drift, ofi, age, depth,
+      members: item.members,
+      // Both sides, so it can be compared against the 14-day average bucket
+      // volume on the same footing. `volume` above is the thin side, which is
+      // the right number for fill times and the wrong one for a spike ratio.
+      volume1hTotal: highVol1h + lowVol1h,
+      volumeRatio: null, crash: null, tags: [],
       capitalNeeded: breakdown.capitalNeeded, gross: breakdown.rawProfit,
       buySeconds: breakdown.buySeconds, sellSeconds: breakdown.sellSeconds,
       totalSeconds: breakdown.totalSeconds, pFill: breakdown.pFill,
@@ -1412,6 +2091,8 @@ function screen(items, quotes, act5m, act1h, config, now) {
       deep: false, warnings: [],
     };
     row.warnings = flipWarnings(row, breakdown, affordable, exempt);
+    // Only the tags that need no history. The deep check adds the rest.
+    row.tags = classifyItem(id, buy, item.members, item.limit, null, null, null);
     rows.push(row);
   }
   const shrinkage = shrinkScores(rows);
@@ -1485,6 +2166,16 @@ async function refineTopRows(rows, config, now) {
         ? view.ou.halfLifeDays * HOURS_PER_DAY : null;
       row.ouLevel = view.ou ? Math.round(view.ou.levelGp) : null;
       row.regimeScore = view.regimeScore;
+      // Crash context, from data the deep check already paid for. The baseline
+      // is the 14-day average bucket converted to an hourly rate, so both
+      // sides of the ratio are units per hour.
+      const baselineHourly = view.meanVolume / HISTORY_BUCKET_HOURS;
+      row.volumeRatio = volumeRatio(row.volume1hTotal, baselineHourly);
+      row.crash = crashSignal(view.elevation, row.volumeRatio, view.regimeScore);
+      row.recoveryScore = recoveryScore(row.crash, view.fillShare,
+                                        Boolean(view.ou && view.ou.meanReverting));
+      row.tags = classifyItem(row.id, row.buy, row.members, row.limit,
+                              null, row.crash, null);
       row.warnings = [...row.warnings, ...historyWarnings(view)];
     }
   });
@@ -1526,6 +2217,14 @@ const state = {
   selected: null,
   timestep: "1h",
   gen: 0,          // generation counter: stale async work discards itself
+  tab: "flip",
+  merchRows: [],   // the watchlist, once the Merch tab has been opened
+  merchState: "idle",   // idle | loading | ready | failed
+  merchSort: "merchScore",
+  merchDesc: true,
+  quotes: null,    // kept so the portfolio can be valued without a refetch
+  items: null,
+  exemptIds: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -1582,6 +2281,12 @@ async function loadAndRender() {
     // read live rather than hardcoded.
     const rune = quotes[NATURE_RUNE_ID];
     state.natureCost = rune && rune.high > 0 ? rune.high : NATURE_RUNE_FALLBACK;
+    state.items = items;
+    state.quotes = quotes;
+    // The holdings table values a sale net of tax, so it needs the exempt set.
+    state.exemptIds = new Set(Object.keys(items)
+      .filter((id) => items[id].exempt).map(Number));
+    renderPortfolio();
 
     const config = readConfig();
     const now = Date.now() / 1000;
@@ -1626,7 +2331,10 @@ function show(allRows, config, statusText) {
   $("#status").textContent = statusText +
     (hiddenText ? `  ·  hidden by your filters: ${hiddenText}` : "");
   renderTable();
-  if (state.selected != null) {
+  // The crash view is a different reading of these same rows, so a refresh
+  // has to redraw it too.
+  if (state.tab === "crash") renderMerchTable();
+  if (state.tab === "flip" && state.selected != null) {
     const row = state.rows.find((r) => r.id === state.selected);
     if (row) showDetail(row.id);
   }
@@ -1645,7 +2353,15 @@ function sortedRows() {
   });
 }
 
-const TABLE_COLUMNS = 14;
+const TABLE_COLUMNS = 16;
+
+/* Badge markup, shared by the flip table and the merch/crash table. */
+function tagHtml(tags) {
+  if (!tags || !tags.length) return '<span class="dim">—</span>';
+  return tags.map((tag) =>
+    `<span class="tag tag-${tag}">${escapeHtml(BADGE_LABELS[tag] || tag)}</span>`
+  ).join("");
+}
 
 function renderTable() {
   const body = $("#flips tbody");
@@ -1675,6 +2391,9 @@ function renderTable() {
         : (r.alchDistance >= 0 ? "+" : "−") + Math.round(Math.abs(r.alchDistance) * 100) + "%"}</td>
       <td class="${r.deep && r.fillShare <= 0.25 ? "bad" : ""}">${
         r.deep ? Math.round(r.fillShare * 100) + "%" : "—"}</td>
+      <td class="${r.volumeRatio != null && r.volumeRatio >= CAL.dip_volume_spike ? "pos" : ""}">${
+        r.volumeRatio == null ? "—" : r.volumeRatio.toFixed(1) + "×"}</td>
+      <td>${tagHtml(r.tags)}</td>
       <td class="dim">${num(Math.round(r.rawPerSlotHour))}</td>
       <td class="pos"><strong>${num(Math.round(r.perSlotHour))}</strong></td>
     </tr>`).join("");
@@ -1687,8 +2406,292 @@ function renderTable() {
 }
 
 function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) =>
+  return String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ==================== tabs ====================
+
+   Three tabs, not four. The spec this was built from also wanted an "All" tab
+   showing every column at once; the badge and volume columns now live on the
+   Flip table, so "All" would have been the Flip tab with a longer header. */
+
+const TAB_BLURB = {
+  flip: "Ranked by expected gp per offer slot per hour. Buy, undercut, sell, " +
+        "repeat — the horizon is hours.",
+  merch: "A year of daily prices per item, for positions held over weeks. " +
+         "Read the Noise column before the Trend column: a headline +50%/yr " +
+         "that four in ten trendless items would also show is not a finding.",
+  crash: "Items trading well away from their own 14-day median, ranked by how " +
+         "tradable the recovery is rather than by how far they fell. Covers " +
+         "the candidates the flip ranking deep-checked, not every item in " +
+         "the game — scanning all of them would mean per-item polling the " +
+         "wiki asks people not to do.",
+};
+
+const MERCH_COLUMNS = [
+  { key: "name", label: "Item", cell: (v) =>
+      `${escapeHtml(v.name)}${v.thesis
+        ? ` <span class="flag" title="${escapeHtml(v.thesis)}">?</span>` : ""}` },
+  { key: "price", label: "Price", cell: (v) => v.price == null ? "—" : num(v.price) },
+  { key: "annualisedPct", label: "Trend/yr",
+    title: "Compounded from a least-squares fit through a year of log prices",
+    cell: (v) => !v.trend ? "—" :
+      `<span class="${v.trend.annualisedPct >= 0 ? "pos" : "bad"}">${
+        v.trend.annualisedPct >= 0 ? "+" : ""}${Math.round(v.trend.annualisedPct)}%</span>` },
+  { key: "rSquared", label: "R²",
+    title: "How much of the price movement the trend line explains",
+    cell: (v) => v.trend ? v.trend.rSquared.toFixed(2) : "—" },
+  { key: "noise", label: "Noise",
+    title: "Share of items with NO trend that would look at least this trendy. Read this first.",
+    cell: (v) => !v.trend ? "—" :
+      `<span class="${v.trend.noiseProbability > 0.25 ? "bad" : "pos"}">${
+        Math.round(v.trend.noiseProbability * 100)}%</span>` },
+  { key: "depth", label: "vs 14d",
+    title: "Current price against its own 14-day median",
+    cell: (v) => v.depth == null ? "—" :
+      `<span class="${v.depth < 0 ? "bad" : ""}">${v.depth >= 0 ? "+" : ""}${
+        Math.round(v.depth * 100)}%</span>` },
+  { key: "volumeRatio", label: "Vol",
+    title: "Today's volume against its normal recent level",
+    cell: (v) => v.volumeRatio.toFixed(1) + "×" },
+  { key: "volumeChangeRelative", label: "Supply",
+    title: "Volume against six months ago, with the market-wide move divided out",
+    cell: (v) => v.volumeChangeRelative == null ? "—" :
+      `${v.volumeChangeRelative >= 0 ? "+" : ""}${
+        Math.round(v.volumeChangeRelative * 100)}%` },
+  { key: "tags", label: "Type", cell: (v) => tagHtml(
+      classifyItem(v.id, v.price || 0, v.members, v.limit, v.trend, v.crash, v.supply)) },
+  { key: "merchScore", label: "Merch",
+    title: "Annual rate discounted by how much of the movement the trend explains. Zero unless rising.",
+    cell: (v) => {
+      const score = merchScore(v.trend, v.limit, isBotted(v.price || 0, v.members, v.limit));
+      return score > 0 ? `<strong class="pos">${Math.round(score)}</strong>`
+                       : '<span class="dim">—</span>';
+    } },
+  { key: "hold", label: "", cell: (v) =>
+      `<button class="hold-btn" data-hold="${v.id}">+ hold</button>` },
+];
+
+function merchSortValue(view, key) {
+  switch (key) {
+    case "name": return view.name;
+    case "price": return view.price;
+    case "annualisedPct": return view.trend ? view.trend.annualisedPct : null;
+    case "rSquared": return view.trend ? view.trend.rSquared : null;
+    // Low noise is good, so sorting "descending" has to put low first.
+    case "noise": return view.trend ? -view.trend.noiseProbability : null;
+    case "depth": return view.depth;
+    case "volumeRatio": return view.volumeRatio;
+    case "volumeChangeRelative": return view.volumeChangeRelative;
+    case "tags": return view.crash ? view.crash.score : 0;
+    case "recovery": return view.recovery || 0;
+    case "merchScore":
+      return merchScore(view.trend, view.limit,
+                        isBotted(view.price || 0, view.members, view.limit));
+    default: return null;
+  }
+}
+
+function selectTab(tab) {
+  state.tab = tab;
+  document.querySelectorAll("#tabs .tab")
+    .forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
+  $("#tab-blurb").textContent = TAB_BLURB[tab];
+  const flip = tab === "flip";
+  $("#flip-wrap").classList.toggle("hidden", !flip);
+  $("#flip-note").classList.toggle("hidden", !flip);
+  $("#merch-wrap").classList.toggle("hidden", flip);
+  $("#merch-note").classList.toggle("hidden", flip);
+  $("#portfolio").classList.toggle("hidden", tab !== "merch");
+  if (flip) {
+    $("#detail").classList.toggle("hidden", state.selected == null);
+    renderTable();
+    return;
+  }
+  $("#detail").classList.add("hidden");
+  if (tab === "merch") {
+    state.merchSort = "merchScore";
+    loadMerchTab();
+    renderPortfolio();
+  } else {
+    state.merchSort = "recovery";
+    renderMerchTable();
+  }
+}
+
+/* The Merch tab is the only thing in the app that fetches per item, so it does
+   it once, on demand, and never as part of a price refresh. */
+async function loadMerchTab() {
+  if (state.merchState === "loading") return;
+  if (state.merchState === "ready") { renderMerchTable(); return; }
+  state.merchState = "loading";
+  renderMerchTable();
+  try {
+    const [items, quotes] = await Promise.all([fetchMapping(), fetchLatest()]);
+    state.items = items;
+    state.quotes = quotes;
+    const { views, problems } = await loadWatchlist(quotes, items);
+    state.merchRows = views;
+    state.merchProblems = problems;
+    state.merchState = "ready";
+  } catch (err) {
+    state.merchState = "failed";
+    state.merchError = err.message;
+  }
+  renderMerchTable();
+  renderPortfolio();
+}
+
+function renderMerchTable() {
+  const head = $("#merch-head");
+  const body = $("#merch tbody");
+  const note = $("#merch-note");
+  const crashTab = state.tab === "crash";
+
+  if (crashTab) {
+    // The crash view reads the deep-checked flip rows, which already carry a
+    // 14-day median, a volume ratio and a regime score.
+    const rows = state.rows
+      .filter((r) => r.crash && r.crash.score > 0)
+      .sort((a, b) => (b.recoveryScore || 0) - (a.recoveryScore || 0));
+    head.innerHTML = ["Item", "Buy", "vs 14d", "Vol", "Fill", "Reverts",
+                      "Type", "Recovery"]
+      .map((label) => `<th>${label}</th>`).join("");
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:2rem">
+        Nothing among the deep-checked candidates is standing far enough from
+        its own median to call. That is the normal state of the market.</td></tr>`;
+      note.textContent = "";
+      return;
+    }
+    body.innerHTML = rows.map((r) => `
+      <tr data-id="${r.id}">
+        <td>${escapeHtml(r.name)}</td>
+        <td>${num(r.buy)}</td>
+        <td class="bad">${Math.round(r.crash.depth * 100)}%</td>
+        <td class="${r.volumeRatio >= CAL.dip_volume_spike ? "pos" : ""}">${r.volumeRatio.toFixed(1)}×</td>
+        <td>${Math.round(r.fillShare * 100)}%</td>
+        <td>${r.meanReverting ? "yes" : "no"}</td>
+        <td>${tagHtml(r.tags)}</td>
+        <td class="pos"><strong>${Math.round(r.recoveryScore)}</strong></td>
+      </tr>`).join("");
+    note.textContent = "Recovery ranks depth by how much of it you can " +
+      "actually trade: a 70% collapse nobody deals in scores below a 25% dip " +
+      "on a liquid item that mean-reverts.";
+    return;
+  }
+
+  head.innerHTML = MERCH_COLUMNS.map((col) =>
+    `<th data-msort="${col.key}"${col.title ? ` title="${escapeHtml(col.title)}"` : ""}>${col.label}</th>`
+  ).join("");
+
+  if (state.merchState === "loading") {
+    body.innerHTML = `<tr><td colspan="${MERCH_COLUMNS.length}" style="text-align:center;padding:2rem">
+      Fetching a year of daily prices for ${WATCHLIST.length} items…</td></tr>`;
+    note.textContent = "";
+    return;
+  }
+  if (state.merchState === "failed") {
+    body.innerHTML = `<tr><td colspan="${MERCH_COLUMNS.length}" style="text-align:center;padding:2rem">
+      Could not load history: ${escapeHtml(state.merchError || "unknown error")}</td></tr>`;
+    return;
+  }
+
+  const dir = state.merchDesc ? -1 : 1;
+  const rows = [...state.merchRows].sort((a, b) => {
+    const x = merchSortValue(a, state.merchSort);
+    const y = merchSortValue(b, state.merchSort);
+    if (typeof x === "string") return x.localeCompare(y) * dir;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (x - y) * dir;
+  });
+
+  body.innerHTML = rows.map((v) => `<tr data-merch-id="${v.id}">${
+    MERCH_COLUMNS.map((col) => `<td>${col.cell(v)}</td>`).join("")}</tr>`).join("");
+
+  const drift = rows.length ? rows[0].marketDrift : null;
+  note.textContent = drift == null
+    ? "Supply needs a basket of items to judge; with this few there is no way " +
+      "to tell an item going quiet from the whole market going quiet."
+    : `Market-wide volume moved ${drift >= 0 ? "+" : ""}${Math.round(drift * 100)}% ` +
+      `over six months. The Supply column has that divided out, so it shows ` +
+      `only what belongs to the item.`;
+  if (state.merchProblems && state.merchProblems.length) {
+    note.textContent += `  ·  no history for: ${state.merchProblems.join(", ")}`;
+  }
+}
+
+/* ==================== holdings ====================
+   localStorage, because a position is worth remembering between visits and
+   there is no backend to remember it in. */
+
+const HOLDINGS_KEY = "osrs-flipper.holdings.v1";
+
+function loadHoldings() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(HOLDINGS_KEY) || "[]");
+    return Array.isArray(raw) ? raw : [];
+  } catch { return []; }
+}
+
+function saveHoldings(list) {
+  try { localStorage.setItem(HOLDINGS_KEY, JSON.stringify(list)); }
+  catch { /* quota or private mode: the table still works for this session */ }
+}
+
+function addHolding(id) {
+  const view = state.merchRows.find((v) => v.id === id);
+  if (!view || view.price == null) return;
+  const qty = prompt(`How many ${view.name} are you holding?`, "1");
+  if (qty == null) return;
+  const price = prompt(`What did you pay per item?`, String(view.price));
+  if (price == null) return;
+  let parsedQty, parsedPrice;
+  try {
+    parsedQty = Math.max(1, Math.round(Number(qty.replace(/[,\s]/g, ""))));
+    parsedPrice = parseGp(price);
+  } catch { return; }
+  if (!Number.isFinite(parsedQty) || !Number.isFinite(parsedPrice)) return;
+  const list = loadHoldings();
+  list.push({ id, name: view.name, qty: parsedQty, buy: parsedPrice,
+              at: Date.now() });
+  saveHoldings(list);
+  renderPortfolio();
+}
+
+function renderPortfolio() {
+  const body = $("#holdings tbody");
+  const list = loadHoldings();
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="7" class="dim" style="text-align:center;padding:1.2rem">
+      Nothing held. Use "+ hold" on a row after you buy it.</td></tr>`;
+    return;
+  }
+  const quotes = state.quotes || {};
+  let total = 0;
+  body.innerHTML = list.map((h, index) => {
+    const quote = quotes[h.id];
+    // Value at what a sale nets: what buyers are bidding, minus GE tax.
+    const current = quote && quote.low ? quote.low : h.buy;
+    const exempt = state.exemptIds ? state.exemptIds.has(h.id) : false;
+    const net = netRevenue(current, exempt);
+    const pnl = (net - h.buy) * h.qty;
+    total += pnl;
+    const days = (Date.now() - h.at) / 86400000;
+    return `<tr>
+      <td>${escapeHtml(h.name)}</td>
+      <td>${num(h.qty)}</td>
+      <td>${num(h.buy)}</td>
+      <td>${num(net)}</td>
+      <td class="${pnl >= 0 ? "pos" : "bad"}">${pnl >= 0 ? "+" : "−"}${formatGp(Math.abs(Math.round(pnl)))}</td>
+      <td>${days < 1 ? "today" : Math.round(days) + "d"}</td>
+      <td><button class="hold-btn" data-drop="${index}">sold</button></td>
+    </tr>`;
+  }).join("") + `<tr><td colspan="4"><strong>Total</strong></td>
+      <td class="${total >= 0 ? "pos" : "bad"}"><strong>${total >= 0 ? "+" : "−"}${
+        formatGp(Math.abs(Math.round(total)))}</strong></td><td colspan="2"></td></tr>`;
 }
 
 function showDetail(id) {
@@ -2030,6 +3033,41 @@ $("#flips tbody").addEventListener("click", (event) => {
   if (tr) showDetail(Number(tr.dataset.id));
 });
 
+$("#tabs").addEventListener("click", (event) => {
+  const btn = event.target.closest("button[data-tab]");
+  if (btn) selectTab(btn.dataset.tab);
+});
+
+$("#merch thead").addEventListener("click", (event) => {
+  const th = event.target.closest("th[data-msort]");
+  if (!th) return;
+  const key = th.dataset.msort;
+  if (state.merchSort === key) state.merchDesc = !state.merchDesc;
+  else { state.merchSort = key; state.merchDesc = key !== "name"; }
+  renderMerchTable();
+});
+
+$("#merch tbody").addEventListener("click", (event) => {
+  const hold = event.target.closest("button[data-hold]");
+  if (hold) { addHolding(Number(hold.dataset.hold)); return; }
+  // Clicking a crash row jumps back to the flip table with it selected, so the
+  // price chart and the score breakdown are one click away.
+  const row = event.target.closest("tr[data-id]");
+  if (row && state.tab === "crash") {
+    selectTab("flip");
+    showDetail(Number(row.dataset.id));
+  }
+});
+
+$("#holdings tbody").addEventListener("click", (event) => {
+  const drop = event.target.closest("button[data-drop]");
+  if (!drop) return;
+  const list = loadHoldings();
+  list.splice(Number(drop.dataset.drop), 1);
+  saveHoldings(list);
+  renderPortfolio();
+});
+
 $("#d-steps").addEventListener("click", (event) => {
   const btn = event.target.closest("button[data-step]");
   if (!btn) return;
@@ -2040,6 +3078,7 @@ $("#d-steps").addEventListener("click", (event) => {
 });
 
 syncFilterLabels();
+$("#tab-blurb").textContent = TAB_BLURB.flip;
 $("#budget").focus();
 </script>
 </body>

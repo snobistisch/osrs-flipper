@@ -35,6 +35,14 @@ MAPPING_MAX_AGE = 24 * 3600
 TIMESERIES_TTL = 1800    # per-item history moves slowly at 6h buckets
 TIMESTEPS = ("5m", "1h", "6h", "24h")
 
+# Per-item history also caches to DISK, keyed by timestep. The in-memory cache
+# above is useless to anything run from cron: each invocation is a new process
+# and starts empty, so a job polling every 15 minutes would refetch the whole
+# watchlist every time — precisely the per-item polling the wiki asks people
+# not to do. The TTLs are the bucket sizes: a 24h bucket cannot change more
+# than once a day, so re-reading it hourly learns nothing.
+TIMESERIES_DISK_TTL = {"5m": 300, "1h": 900, "6h": 1800, "24h": 21600}
+
 
 class ApiError(Exception):
     """The wiki API was unreachable or returned something unusable."""
@@ -210,8 +218,50 @@ class WikiClient:
         if timestep not in TIMESTEPS:
             raise ValueError("timestep must be one of {}".format(list(TIMESTEPS)))
         key = "ts:{}:{}".format(item_id, timestep)
-        return self._cached(key, TIMESERIES_TTL,
-                            lambda: self._fetch_timeseries(item_id, timestep))
+        return self._cached(
+            key, TIMESERIES_TTL,
+            lambda: self._timeseries_from_disk(item_id, timestep))
+
+    def _timeseries_path(self, item_id: int, timestep: str) -> Path:
+        return self.cache_dir / "timeseries" / timestep / "{}.json".format(item_id)
+
+    def _timeseries_from_disk(self, item_id: int, timestep: str) -> List[dict]:
+        """Disk layer under the memory cache, so cron runs do not refetch.
+
+        A stale or corrupt file is treated as a miss rather than an error: the
+        worst case is one extra request, and failing a whole scan because a
+        cache file was truncated by a killed process would be worse.
+        """
+        path = self._timeseries_path(item_id, timestep)
+        ttl = TIMESERIES_DISK_TTL.get(timestep, TIMESERIES_TTL)
+        try:
+            with path.open(encoding="utf-8") as handle:
+                stored = json.load(handle)
+            if time.time() - stored["at"] < ttl:
+                return [row for row in stored["data"] if isinstance(row, dict)]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
+        data = self._fetch_timeseries(item_id, timestep)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump({"at": time.time(), "data": data}, handle)
+            temporary.replace(path)
+        except OSError:
+            pass                      # read-only disk: the fetch still worked
+        return data
+
+    def cached_timeseries_age(self, item_id: int,
+                              timestep: str) -> Optional[float]:
+        """Seconds since this item's history was written, or None if absent."""
+        try:
+            with self._timeseries_path(item_id, timestep).open(
+                    encoding="utf-8") as handle:
+                return time.time() - json.load(handle)["at"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
 
     def _fetch_timeseries(self, item_id: int, timestep: str) -> List[dict]:
         payload = self._get("/timeseries", {"id": item_id, "timestep": timestep})

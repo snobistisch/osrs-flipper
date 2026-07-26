@@ -196,6 +196,76 @@ class Calibration:
     # declaring genuine 3x differences to be noise.
     score_noise_floor: float = 0.35
 
+    # -- merching (see merch.py) --------------------------------------------
+    # These govern a different horizon from everything above: weeks of holding
+    # rather than hours of flipping. They live here anyway, because "every free
+    # parameter in one place" is worth more than a tidy split by module.
+    #
+    # How much of the price movement the trend has to explain before the label
+    # is allowed to mean anything. Below this the item wandered and finished
+    # higher. CALIBRATE: from how often an UPTREND label survives the next
+    # quarter.
+    merch_min_r2: float = 0.10
+    # Annual rate a trend must clear in either direction. Statistical
+    # significance is not enough on 365 points — a 2%/yr drift clears any t.
+    merch_min_annual_pct: float = 8.0
+    # |t| on the daily slope, after the autocorrelation correction in
+    # merch._autocorrelation_robust_t. It is far above the 2.0 used for mean
+    # reversion, and that is not timidity — it is measured. A year of daily
+    # prices with NO drift at all still wanders far enough to show an apparent
+    # annual trend of tens of percent. Simulating driftless random walks:
+    #
+    #     |t| >= 1.5   61% of pure noise labelled a trend
+    #     |t| >= 2.5   42%
+    #     |t| >= 5.0   16%
+    #     |t| >= 8.0    6%
+    #
+    # The curve is scale-free — repeating it at 1.2%, 2.1% and 3.5% daily
+    # volatility moves it by under a point — so one threshold serves every item.
+    # At the 2.1% median volatility measured across the watchlist, |t| >= 5.0
+    # finds 34% of genuine +73%/yr trends, 58% of +150%/yr, and 89% of +334%/yr.
+    #
+    # That low power on modest trends is not a defect to tune away. It is what
+    # a year of daily prices can support, and the honest consequence is that
+    # several watchlist items with headline rates near +50%/yr are reported as
+    # SIDEWAYS: 40% of trendless items would look exactly that trendy. Every
+    # item still carries merch.Trend.noise_probability so the user sees the
+    # strength rather than only the verdict. test_merch.py locks both the
+    # false-positive rate and the survival curve.
+    merch_trend_t: float = 5.0
+    # How far under its own trend line an item must sit to call it an entry.
+    merch_entry_threshold: float = -0.03
+    # Discount on a bot-supplied item's merch score. The supply curve is a
+    # script, not a player, and it answers a price rise by producing more.
+    # CALIBRATE.
+    merch_botted_penalty: float = 0.60
+
+    # -- crash detection ----------------------------------------------------
+    # Depth is HistoryView.elevation: negative means below the 14-day median.
+    # A crash is deep AND loud; a quiet slide of the same depth is classified
+    # separately because there is no forced seller to wait out.
+    crash_depth: float = -0.35
+    crash_volume_spike: float = 3.0
+    dip_depth: float = -0.20
+    dip_volume_spike: float = 2.0
+    quiet_dip_depth: float = -0.30
+    quiet_volume_ratio: float = 1.50
+    # The mirror image: trading well above its median on thin volume, which is
+    # what a pump looks like from the outside.
+    pumped_elevation: float = 0.15
+    pumped_volume_ratio: float = 0.30
+    # Percentile of daily volume taken as "normal". A mean would be dragged up
+    # by the very spike the ratio exists to detect.
+    volume_baseline_percentile: float = 0.70
+
+    # -- supply crunch ------------------------------------------------------
+    # Fractional change in traded volume against six months earlier.
+    supply_crunch_decline: float = -0.80
+    supply_drop_decline: float = -0.50
+    # Below this price the pool of players who can fund the catch-up is much
+    # larger, which is what makes the thesis work faster. CALIBRATE.
+    raid_catch_up_gp: float = 10_000_000.0
+
     # -- horizon ------------------------------------------------------------
     horizon_hours: float = float(WINDOW_HOURS)
 

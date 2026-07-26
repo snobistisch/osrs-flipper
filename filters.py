@@ -115,6 +115,12 @@ class FlipRow:
     half_life_hours: Optional[float] = None
     ou_level: Optional[int] = None       # OU long-run level, in gp
     regime_score: Optional[float] = None
+    # Both sides of the book this hour, and the 14-day average bucket volume.
+    # The crash badge compares the two as rates, so it needs the total rather
+    # than thin_volume_1h — that one is the right number for fill times and the
+    # wrong one for a spike ratio.
+    volume_1h_total: int = 0
+    history_mean_volume: Optional[float] = None
 
     # Capital allocation, filled by allocate()
     allocated_capital: Optional[int] = None
@@ -292,6 +298,7 @@ def _evaluate(
         tax=engine.ge_tax(sell, tax_exempt), margin=margin,
         roi=engine.roi(buy, sell, tax_exempt),
         limit=item.limit, thin_volume_1h=thin_volume, qty_per_window=qty,
+        volume_1h_total=int(high_vol_1h + low_vol_1h),
         capital_needed=breakdown.capital_needed,
         gross_profit=breakdown.raw_profit, undercut_depth=depth,
         drift=drift, ofi=ofi, quote_age=age, tax_exempt=tax_exempt,
@@ -449,6 +456,8 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         half_life_hours=view.half_life_hours,
         ou_level=int(round(view.ou.level_gp)) if view.ou is not None else None,
         regime_score=view.regime_score,
+        volume_1h_total=row.volume_1h_total,
+        history_mean_volume=view.mean_volume,
         warnings=row.warnings + _history_warnings(view),
     )
 
