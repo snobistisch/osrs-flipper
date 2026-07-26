@@ -107,12 +107,15 @@ def _evaluate(
     thin_volume = min(high_vol_1h, low_vol_1h)
     if thin_volume < config.min_thin_volume_1h:
         return "volume too thin"
-    buy, sell = engine.executable_prices(
-        quote.low, quote.high,
+    ref_low = engine.reference_price(
         act_5m.avg_low if act_5m else None,
+        act_5m.low_volume if act_5m else 0,
+        act_1h.avg_low if act_1h else None, low_vol_1h)
+    ref_high = engine.reference_price(
         act_5m.avg_high if act_5m else None,
-        act_1h.avg_low if act_1h else None,
-        act_1h.avg_high if act_1h else None)
+        act_5m.high_volume if act_5m else 0,
+        act_1h.avg_high if act_1h else None, high_vol_1h)
+    buy, sell = engine.executable_prices(quote.low, quote.high, ref_low, ref_high)
     tax_exempt = item_id in engine.TAX_EXEMPT_ITEM_IDS
     margin = engine.net_margin(buy, sell, tax_exempt)
     item_roi = engine.roi(buy, sell, tax_exempt)

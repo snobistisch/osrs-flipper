@@ -71,34 +71,48 @@ class GpParsingTests(unittest.TestCase):
         self.assertEqual(engine.format_gp(50_000_000), "50m")
 
 
-class ExecutablePriceTests(unittest.TestCase):
-    def test_conservative_blend_with_5m_averages(self):
-        # buy at the higher of (latest low, avg low); sell at the lower of
-        # (latest high, avg high) — a one-off spike cannot inflate the margin
-        self.assertEqual(
-            engine.executable_prices(100, 200, avg_low_5m=110, avg_high_5m=160,
-                                     avg_low_1h=90, avg_high_1h=150),
-            (110, 160))
+class ReferencePriceTests(unittest.TestCase):
+    def test_thin_5m_bucket_barely_moves_the_estimate(self):
+        # the real Lobster case: 13 units at 34 vs 36,170 units at 58
+        self.assertEqual(engine.reference_price(34, 13, 58, 36_170), 58)
 
-    def test_1h_average_fills_a_silent_5m_bucket(self):
-        self.assertEqual(
-            engine.executable_prices(100, 200, avg_low_5m=None, avg_high_5m=None,
-                                     avg_low_1h=90, avg_high_1h=150),
-            (100, 150))
+    def test_busy_5m_bucket_pulls_the_estimate(self):
+        # equal volume on both buckets: the midpoint
+        self.assertEqual(engine.reference_price(40, 1_000, 60, 1_000), 50)
+
+    def test_1h_alone_when_5m_is_silent(self):
+        self.assertEqual(engine.reference_price(None, 0, 58, 36_170), 58)
+
+    def test_5m_alone_when_1h_is_missing(self):
+        self.assertEqual(engine.reference_price(34, 500, None, 0), 34)
+
+    def test_zero_volume_on_both_falls_back_to_a_price(self):
+        # priced at some point, nothing traded: no weighting possible
+        self.assertEqual(engine.reference_price(34, 0, 58, 0), 34)
+        self.assertEqual(engine.reference_price(None, 0, 58, 0), 58)
+
+    def test_no_data_at_all(self):
+        self.assertIsNone(engine.reference_price(None, 0, None, 0))
+
+
+class ExecutablePriceTests(unittest.TestCase):
+    def test_pessimistic_side_per_book_side(self):
+        # buy at the higher of (latest low, ref low); sell at the lower of
+        # (latest high, ref high) — a one-off spike cannot inflate the margin
+        self.assertEqual(engine.executable_prices(100, 200, 110, 160), (110, 160))
+
+    def test_latest_kept_when_it_is_the_pessimistic_one(self):
+        self.assertEqual(engine.executable_prices(100, 200, 90, 250), (100, 200))
 
     def test_sides_fall_back_independently(self):
-        self.assertEqual(
-            engine.executable_prices(100, 200, avg_low_5m=120, avg_high_5m=None,
-                                     avg_low_1h=90, avg_high_1h=150),
-            (120, 150))
+        self.assertEqual(engine.executable_prices(100, 200, 120, None), (120, 200))
 
-    def test_latest_stands_alone_without_averages(self):
+    def test_latest_stands_alone_without_references(self):
         self.assertEqual(engine.executable_prices(100, 200), (100, 200))
 
     def test_estimates_can_cross_on_a_dead_spread(self):
-        # avg low above avg high: the ROI gate downstream rejects this
-        buy, sell = engine.executable_prices(100, 200, avg_low_5m=180,
-                                             avg_high_5m=120)
+        # ref low above ref high: the ROI gate downstream rejects this
+        buy, sell = engine.executable_prices(100, 200, 180, 120)
         self.assertGreater(buy, sell)
 
 

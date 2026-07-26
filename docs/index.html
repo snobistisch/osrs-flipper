@@ -1,0 +1,934 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OSRS Grand Exchange Flipper</title>
+<meta name="description" content="Live Old School RuneScape Grand Exchange flip finder. Margins after GE tax, filtered for data freshness and traded volume.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🪙</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #282017;
+  --panel: #3a2f23;
+  --panel-dark: #332a1f;
+  --edge: #14100b;
+  --edge-light: #6b5b40;
+  --gold: #ffb83f;
+  --gold-bright: #ffe97f;
+  --value: #ffff00;
+  --text: #ece5d8;
+  --text-dim: #c9b998;
+  --buy: #3987e5;
+  --sell: #d95926;
+  --grid: #4a3d2b;
+  --good: #6ec96e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+h1, h2, h3 {
+  font-family: Cinzel, "Times New Roman", serif;
+  color: var(--gold);
+  text-shadow: 2px 2px 0 var(--edge);
+  letter-spacing: 0.03em;
+  margin: 0 0 0.5rem;
+}
+h1 { font-size: clamp(1.6rem, 4vw, 2.4rem); }
+h2 { font-size: 1.3rem; }
+a { color: var(--gold); }
+button {
+  background: linear-gradient(#4a3d2b, #382e20);
+  color: var(--gold);
+  border: 2px solid var(--edge);
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px var(--edge-light);
+  font: inherit;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+button:hover { border-color: var(--gold); color: var(--gold-bright); }
+input[type="text"], select {
+  background: var(--panel-dark);
+  color: var(--text);
+  border: 2px solid var(--edge);
+  box-shadow: inset 0 0 0 1px var(--edge-light);
+  border-radius: 3px;
+  font: inherit;
+  padding: 0.5rem 0.7rem;
+  width: 100%;
+}
+input[type="range"] { width: 100%; accent-color: var(--gold); }
+input[type="checkbox"] { accent-color: var(--gold); width: 1rem; height: 1rem; }
+.panel {
+  background: var(--panel);
+  border: 2px solid var(--edge);
+  box-shadow: inset 0 0 0 1px var(--edge-light);
+  border-radius: 4px;
+  padding: 1rem 1.2rem;
+}
+.hidden { display: none !important; }
+.dim { color: var(--text-dim); }
+.small { font-size: 0.85rem; }
+
+/* -- budget gate -- */
+#gate { max-width: 620px; margin: 8vh auto; padding: 0 1rem; }
+#gate p { color: var(--text-dim); }
+#gate .panel { margin-top: 1.5rem; }
+#gate label { display: block; font-weight: 600; margin-bottom: 0.5rem; }
+#gate .row { display: flex; gap: 0.6rem; margin-top: 0.9rem; flex-wrap: wrap; }
+#gate .row button { flex: 1; min-width: 120px; }
+.preset { font-weight: 400 !important; font-size: 0.9rem; padding: 0.35rem 0.6rem !important; }
+.presets { display: flex; gap: 0.4rem; margin-top: 0.6rem; flex-wrap: wrap; }
+#gate-error { color: #ff8a7a; margin-top: 0.7rem; min-height: 1.2rem; }
+
+/* -- app shell -- */
+#app { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+#side {
+  background: var(--panel-dark);
+  border-right: 3px solid var(--edge);
+  padding: 1.2rem;
+}
+#main { padding: 1.2rem 1.5rem 3rem; min-width: 0; }
+.field { margin-bottom: 1.1rem; }
+.field label { display: block; font-size: 0.9rem; color: var(--text-dim); }
+.field .val { color: var(--gold); font-weight: 600; }
+.budget-box { margin-bottom: 1.2rem; }
+.budget-box .amount {
+  font-size: 1.8rem; color: var(--value); text-shadow: 1px 1px 0 var(--edge);
+  font-family: Cinzel, serif;
+}
+.checkline { display: flex; align-items: center; gap: 0.5rem; }
+
+/* -- table -- */
+.table-wrap { overflow-x: auto; border: 2px solid var(--edge); border-radius: 4px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: 0.45rem 0.7rem; text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+thead th {
+  background: var(--panel-dark);
+  color: var(--gold);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  user-select: none;
+  position: sticky;
+  top: 0;
+  border-bottom: 2px solid var(--edge);
+}
+thead th:hover { color: var(--gold-bright); }
+tbody tr { background: var(--panel); cursor: pointer; border-bottom: 1px solid #2c241a; }
+tbody tr:nth-child(even) { background: #362c20; }
+tbody tr:hover { background: #4a3d2b; }
+tbody tr.selected { background: #57482f; box-shadow: inset 3px 0 0 var(--gold); }
+td.pos { color: var(--good); }
+
+/* -- detail -- */
+.metrics { display: flex; gap: 2.5rem; flex-wrap: wrap; margin: 1rem 0 1.2rem; }
+.metric .label { font-size: 0.85rem; color: var(--text-dim); }
+.metric .value {
+  font-size: 1.7rem; color: var(--value); text-shadow: 1px 1px 0 var(--edge);
+  font-family: Cinzel, serif;
+}
+.metric .sub { font-size: 0.85rem; color: var(--text-dim); }
+.steps { display: flex; gap: 0.4rem; margin: 0.8rem 0; flex-wrap: wrap; }
+.steps button.on { background: #5a4a30; color: var(--gold-bright); border-color: var(--gold); }
+.legend { display: flex; gap: 1.2rem; font-size: 0.85rem; margin-bottom: 0.4rem; flex-wrap: wrap; }
+.swatch { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 0.35rem; vertical-align: baseline; }
+.chart-box { position: relative; }
+svg { display: block; width: 100%; height: auto; }
+#tip {
+  position: absolute; pointer-events: none; background: var(--edge);
+  border: 1px solid var(--edge-light); border-radius: 3px; padding: 0.4rem 0.6rem;
+  font-size: 0.82rem; white-space: nowrap; opacity: 0; transition: opacity 0.1s;
+  z-index: 5;
+}
+footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
+#status { min-height: 1.4rem; }
+.err { color: #ff8a7a; }
+@media (max-width: 820px) {
+  #app { grid-template-columns: 1fr; }
+  #side { border-right: none; border-bottom: 3px solid var(--edge); }
+}
+</style>
+</head>
+<body>
+
+<!-- ============ budget gate ============ -->
+<section id="gate">
+  <h1>🪙 Grand Exchange Flipper</h1>
+  <p>Live flip finder for Old School RuneScape, built on the OSRS Wiki real-time
+     prices API. Margins are shown after GE tax, capped by buy limits and real
+     traded volume, and priced conservatively — so a single outlier trade can't
+     make a dead item look profitable.</p>
+  <div class="panel">
+    <label for="budget">How much gp do you have to flip with?</label>
+    <input type="text" id="budget" placeholder="e.g. 250k, 1.5m or 1,000,000"
+           autocomplete="off" inputmode="text">
+    <div class="presets">
+      <button class="preset" data-gp="100k">100k</button>
+      <button class="preset" data-gp="1m">1m</button>
+      <button class="preset" data-gp="10m">10m</button>
+      <button class="preset" data-gp="100m">100m</button>
+    </div>
+    <div id="gate-error" role="alert"></div>
+    <div class="row"><button id="start">Start flipping</button></div>
+  </div>
+  <footer>
+    Free-to-play items by default; members items are one checkbox away.
+    Not affiliated with Jagex or the OSRS Wiki.
+  </footer>
+</section>
+
+<!-- ============ app ============ -->
+<div id="app" class="hidden">
+  <aside id="side">
+    <div class="budget-box">
+      <div class="label dim small">Budget</div>
+      <div class="amount" id="budget-label">—</div>
+      <button id="change-budget">Change budget</button>
+    </div>
+    <h2>Filters</h2>
+    <div class="field">
+      <label for="f-age">Max quote age <span class="val" id="f-age-v"></span></label>
+      <input type="range" id="f-age" min="30" max="3600" step="30" value="300">
+      <div class="small dim">Age of the older side of the quote. Wide margins on
+        stale quotes are dead items.</div>
+    </div>
+    <div class="field">
+      <label for="f-vol">Min volume / hour <span class="val" id="f-vol-v"></span></label>
+      <input type="range" id="f-vol" min="0" max="2000" step="10" value="120">
+      <div class="small dim">Units traded on the quieter side of the book.</div>
+    </div>
+    <div class="field">
+      <label for="f-roi">Min ROI after tax <span class="val" id="f-roi-v"></span></label>
+      <input type="range" id="f-roi" min="0" max="100" step="1" value="10">
+    </div>
+    <div class="field checkline">
+      <input type="checkbox" id="f-members">
+      <label for="f-members" style="margin:0">Include members items</label>
+    </div>
+    <div class="field">
+      <button id="refresh">Refresh prices</button>
+      <div class="small dim" style="margin-top:0.5rem">Refetches at most once per
+        30 s, per the wiki's usage policy.</div>
+    </div>
+  </aside>
+
+  <main id="main">
+    <h1>🪙 Grand Exchange Flipper</h1>
+    <div id="status" class="small dim"></div>
+
+    <div class="table-wrap">
+      <table id="flips">
+        <thead><tr>
+          <th data-sort="name">Item</th>
+          <th data-sort="buy">Buy</th>
+          <th data-sort="sell">Sell</th>
+          <th data-sort="tax">Tax</th>
+          <th data-sort="margin">Margin</th>
+          <th data-sort="roi">ROI</th>
+          <th data-sort="limit">Limit</th>
+          <th data-sort="volume">Vol/1h</th>
+          <th data-sort="qty">Qty/4h</th>
+          <th data-sort="profit">GP/4h</th>
+          <th data-sort="age">Age</th>
+          <th data-sort="score">Score</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="small dim">Buy and Sell are conservative fill estimates. The
+      reference price per side is the 5-minute and 1-hour average weighted by
+      how much actually traded in each, so a handful of cheap trades can't set
+      your buy price; the estimate then takes the worse of that and the last
+      real trade. Click a row for price history.</p>
+
+    <section id="detail" class="hidden">
+      <h2 id="d-name"></h2>
+      <div class="metrics">
+        <div class="metric">
+          <div class="label">Est. buy → sell</div>
+          <div class="value" id="d-prices"></div>
+          <div class="sub" id="d-raw"></div>
+        </div>
+        <div class="metric">
+          <div class="label">Margin after tax</div>
+          <div class="value" id="d-margin"></div>
+          <div class="sub" id="d-roi"></div>
+        </div>
+        <div class="metric">
+          <div class="label">Est. profit / 4h window</div>
+          <div class="value" id="d-profit"></div>
+          <div class="sub" id="d-qty"></div>
+        </div>
+      </div>
+      <div class="steps" id="d-steps">
+        <button data-step="5m">5m</button>
+        <button data-step="1h" class="on">1h</button>
+        <button data-step="6h">6h</button>
+        <button data-step="24h">24h</button>
+      </div>
+      <div class="legend">
+        <span><span class="swatch" style="background:var(--buy)"></span>Instant-buy (your sell fills here)</span>
+        <span><span class="swatch" style="background:var(--sell)"></span>Instant-sell (your buy fills here)</span>
+      </div>
+      <div class="chart-box" id="chart-box">
+        <div id="chart"></div>
+        <div id="tip"></div>
+      </div>
+      <p class="small dim">A structural margin shows both lines running parallel
+        with steady volume. A one-off spike shows one line jumping on a single
+        near-zero-volume bucket.</p>
+    </section>
+
+    <footer>
+      Prices from the <a href="https://prices.runescape.wiki" target="_blank"
+      rel="noopener">OSRS Wiki real-time prices API</a>. Estimates only — flip at
+      your own risk. <a href="https://github.com/snobistisch/osrs-flipper"
+      target="_blank" rel="noopener">Source on GitHub</a>.
+    </footer>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+/* ==================== engine: pure flip math ====================
+   Mirrors engine.py so the browser and the Python CLI rank identically.
+   Tax rules as of the 29 May 2025 update. */
+
+const TAX_RATE = 0.02;
+const TAX_CAP = 5_000_000;
+const TAX_EXEMPT_IDS = new Set([13190]);   // Old school bond
+const HOUR_BUCKETS_PER_WINDOW = 4;         // 4h buy-limit window / 1h bucket
+const MAX_CASH_STACK = 2_147_483_647;
+const FRESHNESS_HALF_LIFE = 600;           // seconds
+
+const geTax = (sell, exempt) =>
+  exempt ? 0 : Math.min(TAX_CAP, Math.floor(sell * TAX_RATE));
+
+const netMargin = (buy, sell, exempt) => sell - geTax(sell, exempt) - buy;
+
+const roi = (buy, sell, exempt) => netMargin(buy, sell, exempt) / buy;
+
+/* Volume-weighted reference price for one side of the book.
+   The 5-minute average is fresher, but it can rest on a handful of trades: 13
+   units dumped cheap will set it as readily as 13,000 will. The 1-hour average
+   has real volume behind it but lags. Weighting each bucket by its own traded
+   volume lets a busy 5-minute bucket move the estimate while a tiny one barely
+   budges it. Returns null when neither bucket ever traded. */
+function referencePrice(avg5m, vol5m, avg1h, vol1h) {
+  const parts = [[avg5m, vol5m], [avg1h, vol1h]]
+    .filter(([avg, vol]) => avg != null && vol > 0);
+  if (!parts.length) return avg5m ?? avg1h;   // priced, but nothing traded
+  const totalVolume = parts.reduce((sum, [, vol]) => sum + vol, 0);
+  const weighted = parts.reduce((sum, [avg, vol]) => sum + avg * vol, 0);
+  return Math.round(weighted / totalVolume);
+}
+
+/* /latest is the single most recent trade per side, so one outlier offer can
+   set it anywhere. Take the pessimistic combination per side: buy at the
+   HIGHER of (last instant-sell, reference low), sell at the LOWER of (last
+   instant-buy, reference high). */
+function executablePrices(latestLow, latestHigh, refLow, refHigh) {
+  return [
+    refLow == null ? latestLow : Math.max(latestLow, refLow),
+    refHigh == null ? latestHigh : Math.min(latestHigh, refHigh),
+  ];
+}
+
+/* A flip needs both sides of the book: someone instant-selling to fill your
+   buy, someone instant-buying to fill your sell. The thin side bounds it. */
+const windowVolume = (highVol, lowVol, buckets) =>
+  Math.min(highVol, lowVol) * buckets;
+
+function flippableQty(buyLimit, volume, affordable) {
+  let qty = volume;
+  if (buyLimit != null) qty = Math.min(qty, buyLimit);
+  if (affordable != null) qty = Math.min(qty, affordable);
+  return Math.max(qty, 0);
+}
+
+const freshness = (ageSeconds) =>
+  ageSeconds <= 0 ? 1 : Math.pow(0.5, ageSeconds / FRESHNESS_HALF_LIFE);
+
+const score = (profitWindow, ageSeconds) => profitWindow * freshness(ageSeconds);
+
+/* Parse gp the way players write it: '250k', '1.5m', '2b', '1,000,000'. */
+function parseGp(text) {
+  let s = String(text).trim().toLowerCase().replace(/[,_\s]/g, "");
+  if (s.endsWith("gp")) s = s.slice(0, -2);
+  if (!s) throw new Error("empty amount");
+  let multiplier = 1;
+  const suffixes = { k: 1e3, m: 1e6, b: 1e9 };
+  const last = s.slice(-1);
+  if (last in suffixes) { multiplier = suffixes[last]; s = s.slice(0, -1); }
+  // decimals only make sense together with a k/m/b suffix
+  const pattern = multiplier > 1 ? /^\d+(\.\d+)?$/ : /^\d+$/;
+  if (!pattern.test(s)) throw new Error("not a gp amount");
+  const amount = Math.round(parseFloat(s) * multiplier);
+  if (!(amount > 0)) throw new Error("amount must be positive");
+  return amount;
+}
+
+function formatGp(amount) {
+  for (const [suffix, size] of [["b", 1e9], ["m", 1e6], ["k", 1e3]]) {
+    if (amount >= size) {
+      return (amount / size).toFixed(1).replace(/\.0$/, "") + suffix;
+    }
+  }
+  return amount.toLocaleString("en-US");
+}
+
+const num = (n) => n.toLocaleString("en-US");
+
+/* ==================== api client ====================
+   The wiki's acceptable-use policy asks for a descriptive User-Agent, but
+   browsers forbid scripts from setting that header, so this client identifies
+   itself the only way it can: bulk endpoints only, never per-item polling,
+   and never more than once per 30 seconds. /mapping is cached for a day. */
+
+const BASE = "https://prices.runescape.wiki/api/v1/osrs";
+const LATEST_TTL = 30_000;
+const INTERVAL_TTL = { "5m": 60_000, "1h": 300_000 };
+const MAPPING_TTL = 24 * 3600 * 1000;
+const MAPPING_KEY = "osrs-flipper.mapping.v1";
+
+const memo = new Map();
+
+async function getJson(path) {
+  const res = await fetch(BASE + path, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`${path} returned HTTP ${res.status}`);
+  return res.json();
+}
+
+async function cached(key, ttl, fetcher) {
+  const hit = memo.get(key);
+  if (hit && Date.now() - hit.at < ttl) return hit.value;
+  const value = await fetcher();
+  memo.set(key, { at: Date.now(), value });
+  return value;
+}
+
+const fetchLatest = () => cached("latest", LATEST_TTL, async () => {
+  const payload = await getJson("/latest");
+  if (!payload || typeof payload.data !== "object") {
+    throw new Error("/latest: response has no data object");
+  }
+  return payload.data;
+});
+
+const fetchInterval = (step) => cached(step, INTERVAL_TTL[step], async () => {
+  const payload = await getJson("/" + step);
+  if (!payload || typeof payload.data !== "object") {
+    throw new Error(`/${step}: response has no data object`);
+  }
+  return payload.data;
+});
+
+/* Only the fields the ranking needs are kept, so the cache fits comfortably
+   in localStorage (the full /mapping payload is several MB). */
+async function fetchMapping() {
+  try {
+    const raw = localStorage.getItem(MAPPING_KEY);
+    if (raw) {
+      const stored = JSON.parse(raw);
+      if (Date.now() - stored.at < MAPPING_TTL) return stored.items;
+    }
+  } catch { /* corrupt or unavailable cache: refetch below */ }
+
+  const list = await getJson("/mapping");
+  if (!Array.isArray(list)) throw new Error("/mapping: expected a list");
+  const items = {};
+  for (const row of list) {
+    if (!row || typeof row.id !== "number" || typeof row.name !== "string") continue;
+    items[row.id] = {
+      name: row.name,
+      members: Boolean(row.members),
+      limit: typeof row.limit === "number" ? row.limit : null,
+    };
+  }
+  try {
+    localStorage.setItem(MAPPING_KEY, JSON.stringify({ at: Date.now(), items }));
+  } catch { /* quota exceeded: fine, we just refetch next visit */ }
+  return items;
+}
+
+const fetchTimeseries = (id, step) =>
+  cached(`ts:${id}:${step}`, 120_000, async () => {
+    const payload = await getJson(`/timeseries?id=${id}&timestep=${step}`);
+    if (!payload || !Array.isArray(payload.data)) {
+      throw new Error("/timeseries: response has no data list");
+    }
+    return payload.data;
+  });
+
+/* ==================== ranking ==================== */
+
+function rankFlips(items, quotes, act5m, act1h, config, now) {
+  const rows = [];
+  const funnel = {
+    "in /latest": 0, "no mapping entry": 0, "members-only": 0,
+    "null price side": 0, "quote too old": 0, "volume too thin": 0,
+    "roi too low": 0, "cannot afford one": 0, "passed": 0,
+  };
+
+  for (const [rawId, quote] of Object.entries(quotes)) {
+    funnel["in /latest"]++;
+    const id = Number(rawId);
+    const item = items[id];
+    if (!item) { funnel["no mapping entry"]++; continue; }
+    if (item.members && !config.includeMembers) { funnel["members-only"]++; continue; }
+
+    const { high, low, highTime, lowTime } = quote || {};
+    if (high == null || low == null || highTime == null || lowTime == null || low <= 0) {
+      funnel["null price side"]++; continue;
+    }
+    const age = Math.round(now - Math.min(highTime, lowTime));
+    if (age > config.maxQuoteAge) { funnel["quote too old"]++; continue; }
+
+    const a1h = act1h[id];
+    const highVol1h = a1h?.highPriceVolume ?? 0;
+    const lowVol1h = a1h?.lowPriceVolume ?? 0;
+    const thinVolume = Math.min(highVol1h, lowVol1h);
+    if (thinVolume < config.minVolume1h) { funnel["volume too thin"]++; continue; }
+
+    const a5m = act5m[id];
+    const refLow = referencePrice(
+      a5m?.avgLowPrice ?? null, a5m?.lowPriceVolume ?? 0,
+      a1h?.avgLowPrice ?? null, lowVol1h);
+    const refHigh = referencePrice(
+      a5m?.avgHighPrice ?? null, a5m?.highPriceVolume ?? 0,
+      a1h?.avgHighPrice ?? null, highVol1h);
+    const [buy, sell] = executablePrices(low, high, refLow, refHigh);
+
+    const exempt = TAX_EXEMPT_IDS.has(id);
+    const itemRoi = roi(buy, sell, exempt);
+    if (itemRoi < config.minRoi) { funnel["roi too low"]++; continue; }
+
+    const affordable = Math.floor(config.capital / buy);
+    if (affordable === 0) { funnel["cannot afford one"]++; continue; }
+
+    const margin = netMargin(buy, sell, exempt);
+    const qty = flippableQty(
+      item.limit,
+      windowVolume(highVol1h, lowVol1h, HOUR_BUCKETS_PER_WINDOW),
+      affordable);
+    const profit = margin * qty;
+
+    funnel["passed"]++;
+    rows.push({
+      id, name: item.name, buy, sell, latestLow: low, latestHigh: high,
+      tax: geTax(sell, exempt), margin, roi: itemRoi, limit: item.limit,
+      volume: thinVolume, qty, profit, age, score: score(profit, age),
+    });
+  }
+  rows.sort((a, b) => b.score - a.score);
+  return { rows, funnel };
+}
+
+/* ==================== state & rendering ==================== */
+
+const state = {
+  capital: null,
+  rows: [],
+  sortKey: "score",
+  sortDesc: true,
+  selected: null,
+  timestep: "1h",
+  loading: false,
+};
+
+const $ = (sel) => document.querySelector(sel);
+
+function readConfig() {
+  return {
+    capital: state.capital,
+    includeMembers: $("#f-members").checked,
+    maxQuoteAge: Number($("#f-age").value),
+    minVolume1h: Number($("#f-vol").value),
+    minRoi: Number($("#f-roi").value) / 1000,   // slider is tenths of a percent
+  };
+}
+
+function syncFilterLabels() {
+  $("#f-age-v").textContent = $("#f-age").value + " s";
+  $("#f-vol-v").textContent = num(Number($("#f-vol").value));
+  $("#f-roi-v").textContent = (Number($("#f-roi").value) / 10).toFixed(1) + " %";
+}
+
+async function loadAndRender() {
+  if (state.loading) return;
+  state.loading = true;
+  const status = $("#status");
+  status.className = "small dim";
+  status.textContent = "Loading live prices…";
+  try {
+    const [items, quotes, act5m, act1h] = await Promise.all([
+      fetchMapping(), fetchLatest(), fetchInterval("5m"), fetchInterval("1h"),
+    ]);
+    const { rows, funnel } = rankFlips(
+      items, quotes, act5m, act1h, readConfig(), Date.now() / 1000);
+    state.rows = rows;
+    status.textContent = Object.entries(funnel)
+      .filter(([, v]) => v > 0)
+      .map(([k, v]) => `${num(v)} ${k}`)
+      .join("  →  ");
+    renderTable();
+  } catch (err) {
+    status.className = "small err";
+    status.textContent = "Could not load prices: " + err.message +
+      ". The wiki API may be busy — try Refresh in a moment.";
+  } finally {
+    state.loading = false;
+  }
+}
+
+function sortedRows() {
+  const key = state.sortKey;
+  const dir = state.sortDesc ? -1 : 1;
+  return [...state.rows].sort((a, b) => {
+    const x = a[key], y = b[key];
+    if (typeof x === "string") return x.localeCompare(y) * dir;
+    // null buy limits sort last regardless of direction
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (x - y) * dir;
+  });
+}
+
+function renderTable() {
+  const body = $("#flips tbody");
+  const rows = sortedRows().slice(0, 100);
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:2rem">
+      No flips pass these filters. Lower the minimum ROI or volume.</td></tr>`;
+    $("#detail").classList.add("hidden");
+    return;
+  }
+  body.innerHTML = rows.map((r) => `
+    <tr data-id="${r.id}"${state.selected === r.id ? ' class="selected"' : ""}>
+      <td>${escapeHtml(r.name)}</td>
+      <td>${num(r.buy)}</td>
+      <td>${num(r.sell)}</td>
+      <td>${num(r.tax)}</td>
+      <td class="pos">${num(r.margin)}</td>
+      <td>${(r.roi * 100).toFixed(1)}%</td>
+      <td>${r.limit == null ? "—" : num(r.limit)}</td>
+      <td>${num(r.volume)}</td>
+      <td>${num(r.qty)}</td>
+      <td class="pos">${num(r.profit)}</td>
+      <td>${r.age}s</td>
+      <td>${num(Math.round(r.score))}</td>
+    </tr>`).join("");
+
+  if (state.selected != null && !rows.some((r) => r.id === state.selected)) {
+    // the selected item dropped out of the current filter set
+    $("#detail").classList.add("hidden");
+    state.selected = null;
+  }
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function showDetail(id) {
+  const row = state.rows.find((r) => r.id === id);
+  if (!row) return;
+  state.selected = id;
+  renderTable();
+  $("#detail").classList.remove("hidden");
+  $("#d-name").textContent = row.name;
+  $("#d-prices").textContent = `${num(row.buy)} → ${num(row.sell)}`;
+  $("#d-raw").textContent =
+    `raw quote ${num(row.latestLow)} → ${num(row.latestHigh)} gp`;
+  $("#d-margin").textContent = num(row.margin) + " gp";
+  $("#d-roi").textContent =
+    `${(row.roi * 100).toFixed(1)}% ROI · ${num(row.tax)} gp tax`;
+  $("#d-profit").textContent = num(row.profit) + " gp";
+  $("#d-qty").textContent = `${num(row.qty)} units per 4h window`;
+  loadChart();
+}
+
+async function loadChart() {
+  const chart = $("#chart");
+  chart.innerHTML = `<p class="small dim">Loading price history…</p>`;
+  try {
+    const data = await fetchTimeseries(state.selected, state.timestep);
+    const points = data.filter((d) => d && d.timestamp != null);
+    if (!points.length) {
+      chart.innerHTML = `<p class="small dim">The wiki has no ${state.timestep}
+        history for this item.</p>`;
+      return;
+    }
+    chart.innerHTML = renderChart(points);
+    wireChartHover(points);
+  } catch (err) {
+    chart.innerHTML = `<p class="small err">Could not load history: ${
+      escapeHtml(err.message)}</p>`;
+  }
+}
+
+/* Inline SVG: price lines on top, volume bars beneath, sharing an x scale. */
+const CHART = { w: 900, h: 300, volH: 110, padL: 62, padR: 12, padT: 12, padB: 26 };
+
+function chartScales(points) {
+  const times = points.map((d) => d.timestamp);
+  const t0 = Math.min(...times), t1 = Math.max(...times);
+  const prices = [];
+  for (const d of points) {
+    if (d.avgHighPrice != null) prices.push(d.avgHighPrice);
+    if (d.avgLowPrice != null) prices.push(d.avgLowPrice);
+  }
+  const pMin = prices.length ? Math.min(...prices) : 0;
+  const pMax = prices.length ? Math.max(...prices) : 1;
+  const pad = (pMax - pMin) * 0.08 || Math.max(1, pMax * 0.02);
+  const lo = Math.max(0, pMin - pad), hi = pMax + pad;
+  const { w, h, padL, padR, padT, padB } = CHART;
+  return {
+    t0, t1, lo, hi,
+    x: (t) => padL + (t1 === t0 ? 0 : (t - t0) / (t1 - t0)) * (w - padL - padR),
+    y: (p) => padT + (hi === lo ? 0.5 : (hi - p) / (hi - lo)) * (h - padT - padB),
+  };
+}
+
+function renderChart(points) {
+  const s = chartScales(points);
+  const { w, h, volH, padL, padR, padT, padB } = CHART;
+
+  const line = (key, color) => {
+    const segments = [];
+    let current = [];
+    for (const d of points) {
+      if (d[key] == null) {                    // gap: no trades in this bucket
+        if (current.length > 1) segments.push(current);
+        current = [];
+      } else {
+        current.push(`${s.x(d.timestamp).toFixed(1)},${s.y(d[key]).toFixed(1)}`);
+      }
+    }
+    if (current.length > 1) segments.push(current);
+    return segments.map((pts) =>
+      `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}"
+         stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`).join("");
+  };
+
+  const ticks = 4;
+  const gridLines = Array.from({ length: ticks + 1 }, (_, i) => {
+    const p = s.lo + (s.hi - s.lo) * (i / ticks);
+    const y = s.y(p).toFixed(1);
+    return `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}"
+              stroke="var(--grid)" stroke-width="1"/>
+            <text x="${padL - 8}" y="${y}" fill="var(--text-dim)" font-size="12"
+              text-anchor="end" dominant-baseline="middle">${num(Math.round(p))}</text>`;
+  }).join("");
+
+  const timeLabels = Array.from({ length: 5 }, (_, i) => {
+    const t = s.t0 + (s.t1 - s.t0) * (i / 4);
+    const anchor = i === 0 ? "start" : i === 4 ? "end" : "middle";
+    return `<text x="${s.x(t).toFixed(1)}" y="${h - 6}" fill="var(--text-dim)"
+              font-size="12" text-anchor="${anchor}">${timeLabel(t)}</text>`;
+  }).join("");
+
+  const maxVol = Math.max(1, ...points.map((d) =>
+    Math.max(d.highPriceVolume || 0, d.lowPriceVolume || 0)));
+  const barW = Math.max(1, (w - padL - padR) / points.length / 2 - 0.5);
+  const bars = points.map((d) => {
+    const x = s.x(d.timestamp);
+    const bar = (vol, color, offset) => {
+      if (!vol) return "";
+      const barH = (vol / maxVol) * (volH - 30);
+      return `<rect x="${(x + offset).toFixed(1)}" y="${(volH - 20 - barH).toFixed(1)}"
+                width="${barW.toFixed(1)}" height="${barH.toFixed(1)}"
+                fill="${color}" opacity="0.9"/>`;
+    };
+    return bar(d.highPriceVolume, "var(--buy)", -barW - 0.5) +
+           bar(d.lowPriceVolume, "var(--sell)", 0.5);
+  }).join("");
+
+  return `
+    <svg viewBox="0 0 ${w} ${h}" role="img" id="price-svg"
+         aria-label="Price history: instant-buy and instant-sell averages">
+      ${gridLines}
+      ${line("avgHighPrice", "var(--buy)")}
+      ${line("avgLowPrice", "var(--sell)")}
+      ${timeLabels}
+      <line id="crosshair" x1="0" y1="${padT}" x2="0" y2="${h - padB}"
+            stroke="#898781" stroke-width="1" opacity="0"/>
+      <circle id="dot-high" r="4" fill="var(--buy)" opacity="0"/>
+      <circle id="dot-low" r="4" fill="var(--sell)" opacity="0"/>
+      <rect x="${padL}" y="${padT}" width="${w - padL - padR}"
+            height="${h - padT - padB}" fill="transparent" id="hit"/>
+    </svg>
+    <svg viewBox="0 0 ${w} ${volH}" role="img" aria-label="Traded volume per bucket">
+      <text x="${padL - 8}" y="14" fill="var(--text-dim)" font-size="12"
+        text-anchor="end">${num(maxVol)}</text>
+      <line x1="${padL}" y1="${volH - 20}" x2="${w - padR}" y2="${volH - 20}"
+        stroke="var(--grid)" stroke-width="1"/>
+      <text x="${padL - 8}" y="${volH - 20}" fill="var(--text-dim)" font-size="12"
+        text-anchor="end" dominant-baseline="middle">0</text>
+      ${bars}
+    </svg>`;
+}
+
+function timeLabel(unixSeconds) {
+  const d = new Date(unixSeconds * 1000);
+  if (state.timestep === "5m" || state.timestep === "1h") {
+    return d.toLocaleString("en-GB",
+      { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  }
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
+function wireChartHover(points) {
+  const svg = $("#price-svg");
+  if (!svg) return;
+  const tip = $("#tip");
+  const box = $("#chart-box");
+  const s = chartScales(points);
+  const crosshair = svg.querySelector("#crosshair");
+  const dotHigh = svg.querySelector("#dot-high");
+  const dotLow = svg.querySelector("#dot-low");
+
+  const hide = () => {
+    tip.style.opacity = 0;
+    crosshair.setAttribute("opacity", 0);
+    dotHigh.setAttribute("opacity", 0);
+    dotLow.setAttribute("opacity", 0);
+  };
+
+  svg.addEventListener("pointermove", (event) => {
+    const rect = svg.getBoundingClientRect();
+    const svgX = ((event.clientX - rect.left) / rect.width) * CHART.w;
+    let nearest = points[0], best = Infinity;
+    for (const d of points) {
+      const dist = Math.abs(s.x(d.timestamp) - svgX);
+      if (dist < best) { best = dist; nearest = d; }
+    }
+    const x = s.x(nearest.timestamp);
+    crosshair.setAttribute("x1", x);
+    crosshair.setAttribute("x2", x);
+    crosshair.setAttribute("opacity", 1);
+
+    const place = (dot, value) => {
+      if (value == null) { dot.setAttribute("opacity", 0); return; }
+      dot.setAttribute("cx", x);
+      dot.setAttribute("cy", s.y(value));
+      dot.setAttribute("opacity", 1);
+    };
+    place(dotHigh, nearest.avgHighPrice);
+    place(dotLow, nearest.avgLowPrice);
+
+    const fmt = (v) => v == null ? "no trades" : num(v) + " gp";
+    tip.innerHTML = `<strong>${timeLabel(nearest.timestamp)}</strong><br>
+      <span class="swatch" style="background:var(--buy)"></span>
+        ${fmt(nearest.avgHighPrice)} · ${num(nearest.highPriceVolume || 0)} units<br>
+      <span class="swatch" style="background:var(--sell)"></span>
+        ${fmt(nearest.avgLowPrice)} · ${num(nearest.lowPriceVolume || 0)} units`;
+    tip.style.opacity = 1;
+
+    const boxRect = box.getBoundingClientRect();
+    const left = event.clientX - boxRect.left + 14;
+    tip.style.left = Math.min(left, boxRect.width - tip.offsetWidth - 8) + "px";
+    tip.style.top = (event.clientY - boxRect.top + 14) + "px";
+  });
+  svg.addEventListener("pointerleave", hide);
+}
+
+/* ==================== wiring ==================== */
+
+function startApp(capital) {
+  state.capital = capital;
+  $("#gate").classList.add("hidden");
+  $("#app").classList.remove("hidden");
+  $("#budget-label").textContent = formatGp(capital) + " gp";
+  $("#budget-label").title = num(capital) + " gp";
+  loadAndRender();
+}
+
+function submitBudget() {
+  const error = $("#gate-error");
+  try {
+    const capital = parseGp($("#budget").value);
+    if (capital > MAX_CASH_STACK) {
+      error.textContent =
+        "That's more than the max cash stack (2,147,483,647 gp).";
+      return;
+    }
+    error.textContent = "";
+    startApp(capital);
+  } catch {
+    error.textContent = "Enter an amount like 250k, 1.5m or 1,000,000.";
+  }
+}
+
+$("#start").addEventListener("click", submitBudget);
+$("#budget").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") submitBudget();
+});
+document.querySelectorAll(".preset").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    $("#budget").value = btn.dataset.gp;
+    submitBudget();
+  });
+});
+
+$("#change-budget").addEventListener("click", () => {
+  $("#app").classList.add("hidden");
+  $("#gate").classList.remove("hidden");
+  $("#budget").value = "";
+  $("#budget").focus();
+});
+
+let filterTimer = null;
+["#f-age", "#f-vol", "#f-roi"].forEach((sel) => {
+  $(sel).addEventListener("input", () => {
+    syncFilterLabels();
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(loadAndRender, 200);
+  });
+});
+$("#f-members").addEventListener("change", loadAndRender);
+$("#refresh").addEventListener("click", loadAndRender);
+
+document.querySelectorAll("#flips thead th").forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (state.sortKey === key) state.sortDesc = !state.sortDesc;
+    else { state.sortKey = key; state.sortDesc = key !== "name"; }
+    renderTable();
+  });
+});
+
+$("#flips tbody").addEventListener("click", (event) => {
+  const tr = event.target.closest("tr[data-id]");
+  if (tr) showDetail(Number(tr.dataset.id));
+});
+
+$("#d-steps").addEventListener("click", (event) => {
+  const btn = event.target.closest("button[data-step]");
+  if (!btn) return;
+  state.timestep = btn.dataset.step;
+  document.querySelectorAll("#d-steps button")
+    .forEach((b) => b.classList.toggle("on", b === btn));
+  loadChart();
+});
+
+syncFilterLabels();
+$("#budget").focus();
+</script>
+</body>
+</html>

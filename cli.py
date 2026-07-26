@@ -56,10 +56,11 @@ def print_table(rows, funnel, opts):
                   r.thin_volume_1h, r.qty_per_window, r.profit_per_window,
                   r.quote_age, r.score))
     print()
-    print("BUY/SELL = conservative estimates: buy = max(last insta-sell, 5m avg "
-          "low), sell = min(last insta-buy, 5m avg high); the 1h avg stands in "
-          "when the 5m bucket is silent. QTY/4H = min(buy limit, 1h thin-side "
-          "volume x4, capital//buy). SCORE = GP/4H halved per 10 min of quote age.")
+    print("BUY/SELL = conservative estimates. Reference price per side = the 5m "
+          "and 1h averages weighted by each bucket's own traded volume; the "
+          "estimate is the worse of that and the last real trade. QTY/4H = "
+          "min(buy limit, 1h thin-side volume x4, capital//buy). SCORE = GP/4H "
+          "halved per 10 min of quote age.")
 
 
 def main(argv=None):

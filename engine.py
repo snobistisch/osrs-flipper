@@ -59,27 +59,42 @@ def format_gp(amount: int) -> str:
     return "{:,}".format(amount)
 
 
+def reference_price(
+    avg_5m: Optional[int], volume_5m: int,
+    avg_1h: Optional[int], volume_1h: int,
+) -> Optional[int]:
+    """Volume-weighted reference price for one side of the book.
+
+    The 5-minute average is fresher, but it can rest on a handful of trades:
+    13 units dumped cheap will set it as readily as 13,000 will. The 1-hour
+    average has real volume behind it but lags. Weighting each bucket by its
+    own traded volume lets a busy 5-minute bucket move the estimate while a
+    tiny one barely budges it. Returns None when neither side ever traded.
+    """
+    parts = [(avg, vol) for avg, vol in ((avg_5m, volume_5m), (avg_1h, volume_1h))
+             if avg is not None and vol > 0]
+    if not parts:
+        # priced at some point but nothing traded in either bucket
+        return avg_5m if avg_5m is not None else avg_1h
+    total_volume = sum(vol for _, vol in parts)
+    return int(round(sum(avg * vol for avg, vol in parts) / total_volume))
+
+
 def executable_prices(
     latest_low: int,
     latest_high: int,
-    avg_low_5m: Optional[int] = None,
-    avg_high_5m: Optional[int] = None,
-    avg_low_1h: Optional[int] = None,
-    avg_high_1h: Optional[int] = None,
+    ref_low: Optional[int] = None,
+    ref_high: Optional[int] = None,
 ) -> Tuple[int, int]:
     """Conservative (buy, sell) estimate for what will actually fill.
 
     /latest is the single most recent trade per side, so one outlier offer can
-    set it anywhere. The interval averages are volume-weighted but lag. Take
-    the pessimistic combination per side: you buy at the HIGHER of (last
-    instant-sell, recent average low) and sell at the LOWER of (last
-    instant-buy, recent average high). The 5m average is preferred; the 1h
-    average only stands in when the 5m bucket had no trades on that side.
+    set it anywhere. Take the pessimistic combination per side: you buy at the
+    HIGHER of (last instant-sell, reference low) and sell at the LOWER of
+    (last instant-buy, reference high).
     """
-    avg_low = avg_low_5m if avg_low_5m is not None else avg_low_1h
-    avg_high = avg_high_5m if avg_high_5m is not None else avg_high_1h
-    buy = latest_low if avg_low is None else max(latest_low, avg_low)
-    sell = latest_high if avg_high is None else min(latest_high, avg_high)
+    buy = latest_low if ref_low is None else max(latest_low, ref_low)
+    sell = latest_high if ref_high is None else min(latest_high, ref_high)
     return buy, sell
 
 

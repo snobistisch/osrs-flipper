@@ -108,21 +108,21 @@ class GateTests(unittest.TestCase):
 
 class PricingTests(unittest.TestCase):
     def test_spike_in_latest_cannot_inflate_the_margin(self):
-        # last insta-buy spiked to 1,400 but the 5m average says 1,250:
+        # last insta-buy spiked to 1,400 but both averages say 1,250:
         # the sell estimate is 1,250, and the raw quote is kept for display
         rows, _ = rank({1: item()}, {1: quote(high=1_400, low=950)},
                        {1: act_5m(avg_high=1_250, avg_low=950)},
-                       {1: act_1h()})
+                       {1: act_1h(avg_high=1_250, avg_low=950)})
         row = rows[0]
         self.assertEqual((row.buy, row.sell), (950, 1_250))
         self.assertEqual((row.latest_low, row.latest_high), (950, 1_400))
         self.assertEqual(row.margin, 275)
         self.assertEqual(row.tax, 25)
 
-    def test_optimistic_stale_low_is_raised_to_the_average(self):
+    def test_optimistic_stale_low_is_raised_to_the_reference(self):
         rows, _ = rank({1: item()}, {1: quote(high=1_250, low=900)},
                        {1: act_5m(avg_high=1_250, avg_low=950)},
-                       {1: act_1h()})
+                       {1: act_1h(avg_high=1_250, avg_low=950)})
         self.assertEqual(rows[0].buy, 950)
 
     def test_1h_average_used_when_5m_bucket_is_silent(self):
@@ -130,6 +130,31 @@ class PricingTests(unittest.TestCase):
                        {},
                        {1: act_1h(avg_high=1_250, avg_low=950)})
         self.assertEqual(rows[0].sell, 1_250)
+
+    def test_thin_5m_bucket_cannot_set_the_buy_price(self):
+        # the real Lobster case: /latest and a 13-unit 5m bucket both say the
+        # buy side is 34, but 36,170 units traded at 58 in the last hour.
+        # Buying at 34 is not executable, so the flip must be rejected.
+        rows, funnel = rank(
+            {1: item(name="Lobster")},
+            {1: quote(high=50, low=34)},
+            {1: act_5m(avg_high=50, high_volume=25_396,
+                       avg_low=34, low_volume=13)},
+            {1: act_1h(avg_high=70, high_volume=125_764,
+                       avg_low=58, low_volume=36_170)},
+            min_thin_volume_1h=100)
+        self.assertEqual(rows, [])
+        self.assertEqual(funnel["roi too low"], 1)
+
+    def test_busy_5m_bucket_still_moves_the_estimate(self):
+        # same volume in both buckets: the reference is the midpoint, so a
+        # genuinely moving market is tracked rather than ignored
+        rows, _ = rank({1: item()}, {1: quote(high=1_400, low=900)},
+                       {1: act_5m(avg_high=1_200, high_volume=1_000,
+                                  avg_low=1_000, low_volume=1_000)},
+                       {1: act_1h(avg_high=1_300, high_volume=1_000,
+                                  avg_low=900, low_volume=1_000)})
+        self.assertEqual((rows[0].buy, rows[0].sell), (950, 1_250))
 
 
 class PassingRowTests(unittest.TestCase):
