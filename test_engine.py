@@ -139,17 +139,105 @@ class VolumeAndQtyTests(unittest.TestCase):
         self.assertEqual(engine.flippable_qty(0, 1_440), 0)
 
 
-class ScoreTests(unittest.TestCase):
+class FreshnessTests(unittest.TestCase):
     def test_fresh_data_keeps_full_confidence(self):
         self.assertEqual(engine.freshness(0), 1.0)
 
     def test_confidence_halves_at_half_life(self):
         self.assertAlmostEqual(engine.freshness(600), 0.5)
 
-    def test_staler_data_scores_lower(self):
-        fresh = engine.score(10_000, age_seconds=30)
-        stale = engine.score(10_000, age_seconds=3_000)
+
+class UndercutDepthTests(unittest.TestCase):
+    def test_air_rune_has_no_room_to_queue_jump(self):
+        # 5/6 is a one-tick spread: improving means buying at 6 to sell at 5
+        self.assertEqual(engine.undercut_depth(5, 6), 0)
+
+    def test_wide_spread_gives_room(self):
+        # Leather 173/192: bidding 180 to sell at 185 clears 2 gp after tax
+        self.assertEqual(engine.undercut_depth(173, 192), 7)
+        self.assertEqual(engine.net_margin(180, 185), 2)
+
+    def test_depth_shrinks_as_the_spread_closes(self):
+        self.assertGreater(engine.undercut_depth(100, 140),
+                           engine.undercut_depth(100, 120))
+
+    def test_negative_margin_has_no_depth(self):
+        self.assertEqual(engine.undercut_depth(200, 100), 0)
+
+    def test_every_step_of_depth_stays_profitable(self):
+        buy, sell = 173, 192
+        depth = engine.undercut_depth(buy, sell)
+        self.assertGreater(engine.net_margin(buy + depth, sell - depth), 0)
+        self.assertLessEqual(engine.net_margin(buy + depth + 1,
+                                               sell - depth - 1), 0)
+
+    def test_tax_exempt_item_gets_more_room(self):
+        self.assertGreater(engine.undercut_depth(4_800_000, 5_000_000,
+                                                 tax_exempt=True),
+                           engine.undercut_depth(4_800_000, 5_000_000))
+
+
+class QueueFactorTests(unittest.TestCase):
+    def test_no_room_is_heavily_discounted(self):
+        self.assertEqual(engine.queue_factor(0), 0.15)
+
+    def test_more_room_captures_more_of_the_margin(self):
+        self.assertLess(engine.queue_factor(1), engine.queue_factor(5))
+        self.assertLess(engine.queue_factor(5), engine.queue_factor(20))
+
+    def test_deep_room_approaches_the_full_margin(self):
+        self.assertGreater(engine.queue_factor(30), 0.99)
+
+
+class DriftTests(unittest.TestCase):
+    def test_flat_market_is_undiscounted(self):
+        self.assertEqual(engine.price_drift(100, 100), 0.0)
+        self.assertEqual(engine.drift_factor(0.0), 1.0)
+
+    def test_falling_market_penalised_harder_than_rising(self):
+        self.assertLess(engine.drift_factor(-0.05), engine.drift_factor(0.05))
+
+    def test_drift_factor_has_a_floor(self):
+        self.assertEqual(engine.drift_factor(-10.0), 0.2)
+
+    def test_missing_bucket_means_no_drift_signal(self):
+        self.assertEqual(engine.price_drift(None, 100), 0.0)
+        self.assertEqual(engine.price_drift(100, None), 0.0)
+
+
+class ExpectedValueTests(unittest.TestCase):
+    def test_every_discount_reduces_the_quoted_profit(self):
+        gross = 275 * 100
+        ev = engine.expected_value(275, 100, depth=8, drift=0.0, age_seconds=60)
+        self.assertLess(ev, gross)
+        self.assertGreater(ev, 0)
+
+    def test_queue_room_dominates_a_thin_spread(self):
+        # a 1 gp margin on 50,000 units with no undercut room, against a
+        # 16 gp margin on 4,000 units with room: the second is worth more
+        air_rune = engine.expected_value(1, 50_000, depth=0, drift=0.0,
+                                         age_seconds=60)
+        leather = engine.expected_value(16, 4_000, depth=8, drift=0.0,
+                                        age_seconds=60)
+        self.assertGreater(leather, air_rune)
+
+    def test_staler_data_lowers_expected_value(self):
+        fresh = engine.expected_value(100, 100, 5, 0.0, age_seconds=30)
+        stale = engine.expected_value(100, 100, 5, 0.0, age_seconds=3_000)
         self.assertGreater(fresh, stale)
+
+
+class SlotTests(unittest.TestCase):
+    def test_gp_per_slot_hour_spreads_over_the_window(self):
+        self.assertEqual(engine.gp_per_slot_hour(40_000), 10_000)
+
+    def test_capital_splits_across_slots(self):
+        self.assertEqual(engine.capital_per_slot(3_000_000, 3), 1_000_000)
+        self.assertEqual(engine.capital_per_slot(1_000_000, 8), 125_000)
+
+    def test_capital_per_slot_never_zero(self):
+        self.assertEqual(engine.capital_per_slot(2, 8), 1)
+        self.assertEqual(engine.capital_per_slot(1_000, 0), 1_000)
 
 
 if __name__ == "__main__":

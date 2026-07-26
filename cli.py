@@ -1,6 +1,7 @@
 """Ranked flips as a plain terminal table.
 
-Usage: python3 cli.py [--capital N] [--max-age S] [--min-vol N] [--min-roi F]
+Usage: python3 cli.py [--capital N] [--slots N] [--max-age S] [--min-vol N]
+                      [--min-roi F] [--min-depth N] [--members]
 """
 from __future__ import annotations
 
@@ -9,58 +10,73 @@ import sys
 import time
 
 import api
+import engine
 import filters
 
 
 def parse_args(argv):
-    p = argparse.ArgumentParser(description="Rank F2P GE flips from live wiki prices")
-    p.add_argument("--capital", type=int, default=1_000_000,
-                   help="gp available to invest (default 1,000,000)")
+    p = argparse.ArgumentParser(
+        description="Rank GE flips by expected gp per offer slot per hour")
+    p.add_argument("--capital", type=engine.parse_gp, default=1_000_000,
+                   help="gp available across all slots, e.g. 250k or 1.5m")
+    p.add_argument("--slots", type=int, default=engine.F2P_SLOTS,
+                   help="concurrent GE offers: 3 free-to-play, 8 members")
     p.add_argument("--max-age", type=int, default=300,
-                   help="max seconds since the OLDER of the two quotes (default 300)")
+                   help="max seconds since the OLDER of the two quotes")
     p.add_argument("--min-vol", type=int, default=120,
-                   help="min units traded on the thin side per 1h (default 120)")
+                   help="min units traded on the thin side per 1h")
     p.add_argument("--min-roi", type=float, default=0.01,
-                   help="min net ROI per flip, e.g. 0.01 = 1%% (default 0.01)")
+                   help="min net ROI per flip, e.g. 0.01 = 1%%")
+    p.add_argument("--min-depth", type=int, default=1,
+                   help="min gp of undercut room; 0 shows flips you cannot "
+                        "queue-jump, like one-tick rune spreads")
     p.add_argument("--members", action="store_true",
                    help="include members-only items")
-    p.add_argument("--top", type=int, default=20, help="rows to show (default 20)")
+    p.add_argument("--top", type=int, default=20, help="rows to show")
     return p.parse_args(argv)
 
 
 def config_from(opts) -> filters.FilterConfig:
     return filters.FilterConfig(
-        capital=opts.capital, include_members=opts.members,
+        capital=opts.capital, slots=opts.slots, include_members=opts.members,
         max_quote_age=opts.max_age, min_thin_volume_1h=opts.min_vol,
-        min_roi=opts.min_roi)
+        min_roi=opts.min_roi, min_undercut_depth=opts.min_depth)
 
 
 def print_table(rows, funnel, opts):
-    print("Filters: capital {:,} gp | quote age <= {}s | thin-side vol >= {}/1h "
-          "| ROI >= {:.1%}".format(opts.capital, opts.max_age, opts.min_vol, opts.min_roi))
+    per_slot = engine.capital_per_slot(opts.capital, opts.slots)
+    print("Budget {} gp across {} slots = {} gp per flip | quote age <= {}s | "
+          "vol >= {}/1h | ROI >= {:.1%} | undercut room >= {} gp".format(
+              engine.format_gp(opts.capital), opts.slots,
+              engine.format_gp(per_slot), opts.max_age, opts.min_vol,
+              opts.min_roi, opts.min_depth))
     print("Funnel:  " + "  ->  ".join(
         "{} {}".format(v, k) for k, v in funnel.items() if v))
     print()
     if not rows:
-        print("No flips pass the current filters. Loosen --min-roi or --min-vol.")
+        print("No flips pass the current filters. Lower --min-roi, --min-vol, "
+              "or --min-depth.")
         return
-    header = ("{:<28} {:>10} {:>10} {:>7} {:>7} {:>6} {:>6} {:>6} {:>7} "
-              "{:>11} {:>5} {:>11}")
-    print(header.format("ITEM", "BUY", "SELL", "TAX", "MARGIN", "ROI",
-                        "LIMIT", "V/1H", "QTY/4H", "GP/4H", "AGE", "SCORE"))
+
+    header = "{:<26} {:>9} {:>9} {:>7} {:>6} {:>6} {:>7} {:>7} {:>11} {:>11}"
+    print(header.format("ITEM", "BUY", "SELL", "MARGIN", "ROI", "ROOM",
+                        "QTY/4H", "TIED UP", "QUOTED/4H", "EV/SLOT/H"))
     for r in rows[:opts.top]:
-        print("{:<28.28} {:>10,} {:>10,} {:>7,} {:>7,} {:>6.1%} {:>6} {:>6,} "
-              "{:>7,} {:>11,} {:>4}s {:>11,.0f}".format(
-                  r.name, r.buy, r.sell, r.tax, r.margin, r.roi,
-                  "{:,}".format(r.limit) if r.limit is not None else "?",
-                  r.thin_volume_1h, r.qty_per_window, r.profit_per_window,
-                  r.quote_age, r.score))
+        print("{:<26.26} {:>9,} {:>9,} {:>7,} {:>5.1f}% {:>6,} {:>7,} {:>7} "
+              "{:>11,} {:>11,.0f}".format(
+                  r.name, r.buy, r.sell, r.margin, r.roi * 100,
+                  r.undercut_depth, r.qty_per_window,
+                  engine.format_gp(r.capital_needed), r.gross_profit,
+                  r.gp_per_slot_hour))
+        for note in r.warnings:
+            print("{:<26} {}".format("", "· " + note))
     print()
-    print("BUY/SELL = conservative estimates. Reference price per side = the 5m "
-          "and 1h averages weighted by each bucket's own traded volume; the "
-          "estimate is the worse of that and the last real trade. QTY/4H = "
-          "min(buy limit, 1h thin-side volume x4, capital//buy). SCORE = GP/4H "
-          "halved per 10 min of quote age.")
+    print("ROOM = gp of price improvement you can afford per side and still "
+          "profit. The GE fills by price first, then by offer age, so with no "
+          "room you wait behind offers that may be days old.")
+    print("EV/SLOT/H = expected gp per offer slot per hour: the quoted profit "
+          "discounted for queue position, price drift and quote staleness. "
+          "QUOTED/4H is the undiscounted best case.")
 
 
 def main(argv=None):

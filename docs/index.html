@@ -84,6 +84,13 @@ input[type="checkbox"] { accent-color: var(--gold); width: 1rem; height: 1rem; }
 #gate { max-width: 620px; margin: 8vh auto; padding: 0 1rem; }
 #gate p { color: var(--text-dim); }
 #gate .panel { margin-top: 1.5rem; }
+#strategy summary {
+  cursor: pointer; color: var(--gold); font-weight: 600;
+  font-family: Cinzel, serif;
+}
+#strategy[open] summary { margin-bottom: 0.8rem; }
+#strategy h3 { font-size: 1rem; margin: 1rem 0 0.3rem; }
+#strategy p { margin: 0 0 0.6rem; font-size: 0.92rem; }
 #gate label { display: block; font-weight: 600; margin-bottom: 0.5rem; }
 #gate .row { display: flex; gap: 0.6rem; margin-top: 0.9rem; flex-wrap: wrap; }
 #gate .row button { flex: 1; min-width: 120px; }
@@ -132,6 +139,14 @@ tbody tr:nth-child(even) { background: #362c20; }
 tbody tr:hover { background: #4a3d2b; }
 tbody tr.selected { background: #57482f; box-shadow: inset 3px 0 0 var(--gold); }
 td.pos { color: var(--good); }
+td.bad { color: #ff8a7a; }
+.flag {
+  display: inline-block; background: #6b4a1e; color: var(--gold-bright);
+  border-radius: 3px; padding: 0 0.4rem; font-size: 0.78rem; font-weight: 700;
+  cursor: help;
+}
+.notes { margin: 0.6rem 0 0; padding-left: 1.1rem; color: var(--text-dim); }
+.notes li { margin-bottom: 0.2rem; }
 
 /* -- detail -- */
 .metrics { display: flex; gap: 2.5rem; flex-wrap: wrap; margin: 1rem 0 1.2rem; }
@@ -168,9 +183,41 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
 <section id="gate">
   <h1>🪙 Grand Exchange Flipper</h1>
   <p>Live flip finder for Old School RuneScape, built on the OSRS Wiki real-time
-     prices API. Margins are shown after GE tax, capped by buy limits and real
-     traded volume, and priced conservatively — so a single outlier trade can't
-     make a dead item look profitable.</p>
+     prices API. It ranks by <strong>expected gp per offer slot per hour</strong>,
+     not by the margin on the screen — because a quoted margin is only profit if
+     both legs of the flip actually fill.</p>
+  <details class="panel" id="strategy">
+    <summary>How the ranking thinks — three reasons a quoted margin isn't profit</summary>
+    <h3>1. You have to get to the front of the queue</h3>
+    <p>The Grand Exchange matches offers on price first, then on age: at the same
+       price, an offer placed days ago has near-absolute priority over yours. So
+       there are two ways to get filled — outbid the queue, or wait in it.</p>
+    <p>That is why air runes are a trap. Quoted at 5 buy / 6 sell, the 1 gp
+       margin looks like a 20% return on 50,000 units. But to jump the queue you
+       would have to buy at 6 and sell at 5, which loses money. You have zero
+       room to compete, so you are stuck behind thousands of offers and bots for
+       a margin of one coin. Every item gets an <strong>undercut room</strong>
+       number: how much price improvement it can afford per side. Zero means you
+       cannot influence whether you fill, and the ranking discounts it to 15% of
+       its quoted profit. By default those flips are filtered out entirely.</p>
+    <h3>2. Your offer fills when you least want it to</h3>
+    <p>A resting buy offer fills fastest exactly when the price is falling —
+       someone is dumping into it — and then your sell leg is stranded above the
+       market. Passive orders are selected against. The tool compares the
+       5-minute and 1-hour averages to detect drift, and penalises a falling
+       market harder than a rising one, because you are the one holding
+       inventory between the two legs.</p>
+    <h3>3. Slots are scarcer than gold</h3>
+    <p>Free-to-play has three GE slots, members eight. You cannot run fifty
+       flips, so "profit if I put my whole bank into this one item" is the wrong
+       question. Your budget is split across your slots, and everything is
+       ranked by what a slot earns per hour.</p>
+    <p class="dim">Prices themselves are estimated conservatively: the reference
+       price per side is the 5-minute and 1-hour average weighted by how much
+       actually traded in each, and the final estimate takes the worse of that
+       and the last real trade. A handful of cheap trades cannot set your buy
+       price.</p>
+  </details>
   <div class="panel">
     <label for="budget">How much gp do you have to flip with?</label>
     <input type="text" id="budget" placeholder="e.g. 250k, 1.5m or 1,000,000"
@@ -196,9 +243,26 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
     <div class="budget-box">
       <div class="label dim small">Budget</div>
       <div class="amount" id="budget-label">—</div>
+      <div class="small dim" id="per-slot">—</div>
       <button id="change-budget">Change budget</button>
     </div>
+    <div class="field">
+      <label for="f-slots">GE offer slots</label>
+      <select id="f-slots">
+        <option value="3" selected>3 — free-to-play</option>
+        <option value="8">8 — members</option>
+      </select>
+      <div class="small dim">Slots are the real bottleneck. Your budget is
+        split across them, because you flip several items at once.</div>
+    </div>
     <h2>Filters</h2>
+    <div class="field">
+      <label for="f-depth">Min undercut room <span class="val" id="f-depth-v"></span></label>
+      <input type="range" id="f-depth" min="0" max="50" step="1" value="1">
+      <div class="small dim">Gp of price improvement you can afford per side.
+        At 0 you cannot outbid anyone and just wait in the queue — that's the
+        air rune trap. Set to "off" to see those flips anyway.</div>
+    </div>
     <div class="field">
       <label for="f-age">Max quote age <span class="val" id="f-age-v"></span></label>
       <input type="range" id="f-age" min="30" max="3600" step="30" value="300">
@@ -235,24 +299,25 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
           <th data-sort="name">Item</th>
           <th data-sort="buy">Buy</th>
           <th data-sort="sell">Sell</th>
-          <th data-sort="tax">Tax</th>
           <th data-sort="margin">Margin</th>
           <th data-sort="roi">ROI</th>
+          <th data-sort="depth" title="Gp of price improvement you can afford per side">Room</th>
           <th data-sort="limit">Limit</th>
           <th data-sort="volume">Vol/1h</th>
           <th data-sort="qty">Qty/4h</th>
-          <th data-sort="profit">GP/4h</th>
-          <th data-sort="age">Age</th>
-          <th data-sort="score">Score</th>
+          <th data-sort="capitalNeeded">Tied up</th>
+          <th data-sort="gross" title="Best case: both legs fill at the quoted prices">Quoted/4h</th>
+          <th data-sort="perSlotHour" title="Expected gp per offer slot per hour, after every discount">EV/slot/h</th>
         </tr></thead>
         <tbody></tbody>
       </table>
     </div>
-    <p class="small dim">Buy and Sell are conservative fill estimates. The
-      reference price per side is the 5-minute and 1-hour average weighted by
-      how much actually traded in each, so a handful of cheap trades can't set
-      your buy price; the estimate then takes the worse of that and the last
-      real trade. Click a row for price history.</p>
+    <p class="small dim"><strong>EV/slot/h</strong> is the ranking metric: the
+      quoted profit discounted for queue position, price drift and quote
+      staleness, then spread over the four-hour buy-limit window.
+      <strong>Room</strong> is how much price improvement you can afford per
+      side — with 0 you cannot outbid anyone. Click a row for price history and
+      the reasoning behind its discount.</p>
 
     <section id="detail" class="hidden">
       <h2 id="d-name"></h2>
@@ -268,11 +333,12 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
           <div class="sub" id="d-roi"></div>
         </div>
         <div class="metric">
-          <div class="label">Est. profit / 4h window</div>
+          <div class="label">Expected / slot / hour</div>
           <div class="value" id="d-profit"></div>
           <div class="sub" id="d-qty"></div>
         </div>
       </div>
+      <ul class="notes small" id="d-notes"></ul>
       <div class="steps" id="d-steps">
         <button data-step="5m">5m</button>
         <button data-step="1h" class="on">1h</button>
@@ -312,6 +378,7 @@ const TAX_RATE = 0.02;
 const TAX_CAP = 5_000_000;
 const TAX_EXEMPT_IDS = new Set([13190]);   // Old school bond
 const HOUR_BUCKETS_PER_WINDOW = 4;         // 4h buy-limit window / 1h bucket
+const WINDOW_HOURS = 4;                    // the buy-limit window
 const MAX_CASH_STACK = 2_147_483_647;
 const FRESHNESS_HALF_LIFE = 600;           // seconds
 
@@ -363,7 +430,60 @@ function flippableQty(buyLimit, volume, affordable) {
 const freshness = (ageSeconds) =>
   ageSeconds <= 0 ? 1 : Math.pow(0.5, ageSeconds / FRESHNESS_HALF_LIFE);
 
-const score = (profitWindow, ageSeconds) => profitWindow * freshness(ageSeconds);
+/* How many gp of price improvement you can afford on each side at once while
+   the flip still profits.
+
+   The Grand Exchange matches on price first, then on offer age: at the same
+   price, offers that are days old take near-absolute priority. So there are
+   exactly two ways to get filled — outbid the queue, or wait behind a queue
+   you cannot see. Depth is how much room you have to do the first. Air runes
+   at 5/6 have depth 0: buying at 6 to sell at 5 is a guaranteed loss, so a
+   1 gp margin can only ever be won by waiting. */
+function undercutDepth(buy, sell, exempt) {
+  if (netMargin(buy, sell, exempt) <= 0) return 0;
+  let lo = 0, hi = Math.max(0, Math.floor((sell - buy) / 2) + 1);
+  while (lo < hi) {                        // binary search: margin falls with k
+    const mid = Math.ceil((lo + hi) / 2);
+    if (netMargin(buy + mid, sell - mid, exempt) > 0) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/* Fraction of the quoted margin you should expect to actually capture. Depth 0
+   keeps a small non-zero weight: those flips do sometimes fill, you just
+   cannot influence whether they do. */
+const queueFactor = (depth) =>
+  depth <= 0 ? 0.15 : 1 - Math.exp(-depth / 3);
+
+/* Recent momentum as a fraction of price. Negative means falling. */
+function priceDrift(mid5m, mid1h) {
+  if (mid5m == null || mid1h == null || mid1h <= 0) return 0;
+  return (mid5m - mid1h) / mid1h;
+}
+
+/* A resting buy offer fills fastest exactly when the price is falling —
+   someone is dumping into it — and then the sell leg is stranded above the
+   market. Falling is penalised harder than rising because you are the one
+   holding inventory between the two legs. */
+function driftFactor(drift) {
+  const penalty = drift < 0 ? 8 * Math.abs(drift) : 4 * drift;
+  return Math.max(0.2, 1 - penalty);
+}
+
+/* Expected gp from one 4-hour window. Margin times quantity is the best case,
+   where both legs fill at the quoted prices; each factor is a reason that
+   does not happen. */
+const expectedValue = (margin, qty, depth, drift, ageSeconds) =>
+  margin * qty * queueFactor(depth) * driftFactor(drift) * freshness(ageSeconds);
+
+/* Offer slots, not gp, are the binding constraint: three free-to-play, eight
+   for members. A flip holds a slot for the window whether it earns 1 gp or
+   100k, so the question is what a slot is worth for four hours. */
+const gpPerSlotHour = (expectedGp) => expectedGp / WINDOW_HOURS;
+
+const capitalPerSlot = (capital, slots) =>
+  Math.max(1, Math.floor(capital / Math.max(1, slots)));
 
 /* Parse gp the way players write it: '250k', '1.5m', '2b', '1,000,000'. */
 function parseGp(text) {
@@ -476,13 +596,40 @@ const fetchTimeseries = (id, step) =>
 
 /* ==================== ranking ==================== */
 
+/* Midpoint of a bucket, or whichever side traded if only one did. */
+function bucketMid(activity) {
+  if (!activity) return null;
+  const { avgHighPrice: high, avgLowPrice: low } = activity;
+  if (high != null && low != null) return (high + low) / 2;
+  return high != null ? high : (low ?? null);
+}
+
+/* Plain-language reasons this flip might not pay what it quotes. */
+function flipWarnings(depth, drift, affordable, qty, limit) {
+  const notes = [];
+  if (depth === 0) notes.push("no room to outbid the queue — you wait your turn");
+  else if (depth <= 2) notes.push(`only ${depth} gp of undercut room`);
+  if (drift <= -0.02) {
+    notes.push(`price falling ${(Math.abs(drift) * 100).toFixed(1)}% — your buy fills, your sell may not`);
+  } else if (drift >= 0.02) {
+    notes.push(`price rising ${(drift * 100).toFixed(1)}% — your buy may not fill`);
+  }
+  if (qty && affordable <= qty) {
+    notes.push("capital-bound, not limit-bound — a bigger slot buys more");
+  }
+  if (limit == null) notes.push("no published buy limit");
+  return notes;
+}
+
 function rankFlips(items, quotes, act5m, act1h, config, now) {
   const rows = [];
   const funnel = {
     "in /latest": 0, "no mapping entry": 0, "members-only": 0,
     "null price side": 0, "quote too old": 0, "volume too thin": 0,
-    "roi too low": 0, "cannot afford one": 0, "passed": 0,
+    "roi too low": 0, "no undercut room": 0, "cannot afford one": 0,
+    "passed": 0,
   };
+  const perSlot = capitalPerSlot(config.capital, config.slots);
 
   for (const [rawId, quote] of Object.entries(quotes)) {
     funnel["in /latest"]++;
@@ -517,7 +664,10 @@ function rankFlips(items, quotes, act5m, act1h, config, now) {
     const itemRoi = roi(buy, sell, exempt);
     if (itemRoi < config.minRoi) { funnel["roi too low"]++; continue; }
 
-    const affordable = Math.floor(config.capital / buy);
+    const depth = undercutDepth(buy, sell, exempt);
+    if (depth < config.minUndercutDepth) { funnel["no undercut room"]++; continue; }
+
+    const affordable = Math.floor(perSlot / buy);
     if (affordable === 0) { funnel["cannot afford one"]++; continue; }
 
     const margin = netMargin(buy, sell, exempt);
@@ -525,16 +675,20 @@ function rankFlips(items, quotes, act5m, act1h, config, now) {
       item.limit,
       windowVolume(highVol1h, lowVol1h, HOUR_BUCKETS_PER_WINDOW),
       affordable);
-    const profit = margin * qty;
+    const gross = margin * qty;
+    const drift = priceDrift(bucketMid(a5m), bucketMid(a1h));
+    const expected = expectedValue(margin, qty, depth, drift, age);
 
     funnel["passed"]++;
     rows.push({
       id, name: item.name, buy, sell, latestLow: low, latestHigh: high,
       tax: geTax(sell, exempt), margin, roi: itemRoi, limit: item.limit,
-      volume: thinVolume, qty, profit, age, score: score(profit, age),
+      volume: thinVolume, qty, capitalNeeded: qty * buy, gross, depth, drift,
+      age, expected, perSlotHour: gpPerSlotHour(expected),
+      warnings: flipWarnings(depth, drift, affordable, qty, item.limit),
     });
   }
-  rows.sort((a, b) => b.score - a.score);
+  rows.sort((a, b) => b.perSlotHour - a.perSlotHour);
   return { rows, funnel };
 }
 
@@ -555,10 +709,12 @@ const $ = (sel) => document.querySelector(sel);
 function readConfig() {
   return {
     capital: state.capital,
+    slots: Number($("#f-slots").value),
     includeMembers: $("#f-members").checked,
     maxQuoteAge: Number($("#f-age").value),
     minVolume1h: Number($("#f-vol").value),
     minRoi: Number($("#f-roi").value) / 1000,   // slider is tenths of a percent
+    minUndercutDepth: Number($("#f-depth").value),
   };
 }
 
@@ -566,6 +722,11 @@ function syncFilterLabels() {
   $("#f-age-v").textContent = $("#f-age").value + " s";
   $("#f-vol-v").textContent = num(Number($("#f-vol").value));
   $("#f-roi-v").textContent = (Number($("#f-roi").value) / 10).toFixed(1) + " %";
+  const depth = Number($("#f-depth").value);
+  $("#f-depth-v").textContent = depth === 0 ? "off" : depth + " gp";
+  const slots = Number($("#f-slots").value);
+  $("#per-slot").textContent = state.capital == null ? "—"
+    : formatGp(capitalPerSlot(state.capital, slots)) + " gp per flip";
 }
 
 async function loadAndRender() {
@@ -619,18 +780,19 @@ function renderTable() {
   }
   body.innerHTML = rows.map((r) => `
     <tr data-id="${r.id}"${state.selected === r.id ? ' class="selected"' : ""}>
-      <td>${escapeHtml(r.name)}</td>
+      <td>${escapeHtml(r.name)}${r.warnings.length
+        ? ` <span class="flag" title="${escapeHtml(r.warnings.join(" · "))}">!</span>` : ""}</td>
       <td>${num(r.buy)}</td>
       <td>${num(r.sell)}</td>
-      <td>${num(r.tax)}</td>
       <td class="pos">${num(r.margin)}</td>
       <td>${(r.roi * 100).toFixed(1)}%</td>
+      <td class="${r.depth === 0 ? "bad" : ""}">${num(r.depth)}</td>
       <td>${r.limit == null ? "—" : num(r.limit)}</td>
       <td>${num(r.volume)}</td>
       <td>${num(r.qty)}</td>
-      <td class="pos">${num(r.profit)}</td>
-      <td>${r.age}s</td>
-      <td>${num(Math.round(r.score))}</td>
+      <td>${formatGp(r.capitalNeeded)}</td>
+      <td class="dim">${num(r.gross)}</td>
+      <td class="pos"><strong>${num(Math.round(r.perSlotHour))}</strong></td>
     </tr>`).join("");
 
   if (state.selected != null && !rows.some((r) => r.id === state.selected)) {
@@ -658,8 +820,25 @@ function showDetail(id) {
   $("#d-margin").textContent = num(row.margin) + " gp";
   $("#d-roi").textContent =
     `${(row.roi * 100).toFixed(1)}% ROI · ${num(row.tax)} gp tax`;
-  $("#d-profit").textContent = num(row.profit) + " gp";
-  $("#d-qty").textContent = `${num(row.qty)} units per 4h window`;
+  $("#d-profit").textContent = num(Math.round(row.perSlotHour)) + " gp";
+  $("#d-qty").textContent =
+    `${num(row.qty)} units · ${formatGp(row.capitalNeeded)} gp tied up`;
+
+  // show where the quoted profit goes, factor by factor
+  const qf = queueFactor(row.depth), df = driftFactor(row.drift),
+        ff = freshness(row.age);
+  const pct = (f) => `${Math.round(f * 100)}%`;
+  const lines = [
+    `Quoted best case: <strong>${num(row.gross)} gp</strong> per 4h window if both legs fill at these prices.`,
+    `Queue position keeps ${pct(qf)} — ${row.depth === 0
+      ? "no room to outbid anyone, so you wait behind offers that may be days old"
+      : `${row.depth} gp of undercut room, enough to pay for priority`}.`,
+    `Price drift keeps ${pct(df)} — ${Math.abs(row.drift) < 0.005
+      ? "market is flat" : `moving ${(row.drift * 100).toFixed(1)}% between the 1h and 5m averages`}.`,
+    `Quote freshness keeps ${pct(ff)} — last trade ${row.age}s ago.`,
+    `Expected: <strong>${num(Math.round(row.expected))} gp</strong> per window, <strong>${num(Math.round(row.perSlotHour))} gp</strong> per slot-hour.`,
+  ];
+  $("#d-notes").innerHTML = lines.map((l) => `<li>${l}</li>`).join("");
   loadChart();
 }
 
@@ -856,6 +1035,7 @@ function startApp(capital) {
   $("#app").classList.remove("hidden");
   $("#budget-label").textContent = formatGp(capital) + " gp";
   $("#budget-label").title = num(capital) + " gp";
+  syncFilterLabels();
   loadAndRender();
 }
 
@@ -894,7 +1074,7 @@ $("#change-budget").addEventListener("click", () => {
 });
 
 let filterTimer = null;
-["#f-age", "#f-vol", "#f-roi"].forEach((sel) => {
+["#f-age", "#f-vol", "#f-roi", "#f-depth"].forEach((sel) => {
   $(sel).addEventListener("input", () => {
     syncFilterLabels();
     clearTimeout(filterTimer);
@@ -902,6 +1082,10 @@ let filterTimer = null;
   });
 });
 $("#f-members").addEventListener("change", loadAndRender);
+$("#f-slots").addEventListener("change", () => {
+  syncFilterLabels();
+  loadAndRender();
+});
 $("#refresh").addEventListener("click", loadAndRender);
 
 document.querySelectorAll("#flips thead th").forEach((th) => {

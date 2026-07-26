@@ -4,30 +4,61 @@
 your browser, nothing to install.
 
 Find Grand Exchange flips you can actually execute. Live prices from the
-[OSRS Wiki real-time price API](https://prices.runescape.wiki), filtered for
-data freshness and traded volume, with margins shown after GE tax and capped
-by buy limits and your budget.
+[OSRS Wiki real-time price API](https://prices.runescape.wiki), ranked by
+**expected gp per offer slot per hour** — not by the margin on the screen.
 
-## Why the margins here are smaller than other tools show
+## The strategy
 
-Most margin tools read the `/latest` endpoint literally. That endpoint reports
-the last single trade on each side of the book, so one outlier offer can make a
-dead item look like a 40% margin.
+A quoted margin is not profit. It is profit *if* both legs of the flip fill at
+the quoted prices, and nothing guarantees that. Three things stop it, and each
+one is a discount applied to the quoted number.
 
-Averaging fixes less than it looks. Take a real case: lobsters showed a last
-instant-sell of 34 gp, and the 5-minute average agreed — but that average rested
-on **13 units**, while 36,170 units traded at 58 gp over the same hour. Buying
-lobsters at 34 was not something you could actually do.
+### 1. You have to get to the front of the queue
 
-So the reference price for each side of the book is the 5-minute and 1-hour
-average **weighted by how much traded in each**. A busy 5-minute bucket moves
-the estimate; a 13-unit blip barely does. The final estimate then takes the
-pessimistic side: you buy at the higher of (last instant-sell, reference low)
-and sell at the lower of (last instant-buy, reference high).
+The Grand Exchange matches offers **on price first, then on offer age**. At the
+same price, an offer placed days ago has near-absolute priority over yours. So
+there are exactly two ways to get filled: outbid the queue, or wait in it.
 
-The result is a shorter list than other flippers show. That's the point — the
-entries that survive are ones where both sides of the book have real volume
-behind them.
+This is why flipping air runes is a mistake. Quoted at 5 buy / 6 sell, that
+1 gp margin reads as a 20% return across a 50,000 buy limit. But to jump the
+queue you would have to buy at 6 and sell at 5 — a guaranteed loss. You have
+**zero room to compete**, so you sit behind thousands of offers and bots for a
+margin of one coin.
+
+Every item therefore carries an **undercut room** number: how many gp of price
+improvement it can absorb on each side while still profiting. Leather at
+173/192 has 7 gp of room — bidding 180 to sell at 185 still clears 2 gp after
+tax, so you can buy priority. Air runes have 0. Flips with no room are filtered
+out by default, and score 15% of their quoted profit when you switch them on.
+
+### 2. Your offer fills when you least want it to
+
+A resting buy offer fills fastest exactly when the price is falling — someone is
+dumping into it — and then your sell leg is stranded above the market. Passive
+orders are selected against. The tool measures drift between the 1-hour and
+5-minute averages and penalises a falling market harder than a rising one,
+because you are the one holding inventory between the two legs.
+
+### 3. Slots are scarcer than gold
+
+Free-to-play has **3** GE slots, members **8**. You cannot run fifty flips at
+once, so "profit if I put my entire bank into this one item" is the wrong
+question. Your budget is divided across your slots, and the ranking is by what
+one slot earns per hour.
+
+### The prices themselves
+
+Most tools read `/latest` literally — the last single trade per side, which one
+outlier can set anywhere. Averaging alone does not fix it. A real case: lobsters
+showed a last instant-sell of 34 gp and a 5-minute average that agreed, but that
+average rested on **13 units**, while 36,170 units traded at 58 gp over the same
+hour. Buying lobsters at 34 was not something you could do.
+
+So the reference price per side is the 5-minute and 1-hour average **weighted by
+how much traded in each**, and the estimate then takes the worse of that and the
+last real trade.
+
+The result is a much shorter list than other flippers show. That is the point.
 
 ## Run it locally
 
@@ -46,8 +77,11 @@ items are a checkbox away.
 Terminal version, same numbers:
 
 ```
-python3 cli.py --capital 1000000
+python3 cli.py --capital 1m --slots 3
 ```
+
+Add `--min-depth 0` to see the flips with no undercut room and watch them rank
+at the bottom, `--members` for members items, `--slots 8` if you have them.
 
 ## Log your flips
 
@@ -67,11 +101,16 @@ python3 journal.py stats
 - Tax (29 May 2025 rules): seller pays 2% per item, rounded down, capped at
   5m. Items under 50 gp are untaxed; bonds are exempt.
 - Margin = sell estimate − tax − buy estimate.
-- Qty/4h = min(buy limit, hourly thin-side volume ×4, budget ÷ buy price).
+- Qty/4h = min(buy limit, hourly thin-side volume ×4, slot budget ÷ buy price).
   The thin side of the book bounds throughput: a flip needs both a seller to
   fill your buy and a buyer to fill your sell.
-- Score = expected 4h profit, halved for every 10 minutes of quote age.
-  Stale quotes mean dead items, not free money.
+- Expected gp = margin × qty × queue factor × drift factor × freshness, where
+  freshness halves for every 10 minutes of quote age.
+- EV/slot/hour = expected gp ÷ 4, the buy-limit window. This is the ranking.
+
+The discount factors are a model, not measurements. The shape of each is argued
+above and the constants are tuned by judgement; `journal.py` exists so you can
+check them against what you actually realise.
 
 ## Project layout
 

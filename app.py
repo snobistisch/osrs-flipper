@@ -105,12 +105,24 @@ def landing():
 
 def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
     with st.sidebar:
+        slots = st.selectbox("GE offer slots", [engine.F2P_SLOTS, engine.MEMBER_SLOTS],
+                             format_func=lambda s: "{} — {}".format(
+                                 s, "free-to-play" if s == engine.F2P_SLOTS
+                                 else "members"),
+                             help="Slots are the real bottleneck. Your budget "
+                                  "is split across them.")
         st.metric("Budget", engine.format_gp(capital) + " gp",
-                  help="{:,} gp".format(capital))
+                  delta="{} gp per flip".format(engine.format_gp(
+                      engine.capital_per_slot(capital, slots))),
+                  delta_color="off", help="{:,} gp".format(capital))
         if st.button("Change budget"):
             del st.session_state["capital"]
             st.rerun()
         st.header("Filters")
+        min_depth = st.slider("Min undercut room (gp)", 0, 50, 1,
+                              help="Price improvement you can afford per side. "
+                                   "At 0 you cannot outbid anyone and just wait "
+                                   "in the queue — the air rune trap.")
         max_age = st.slider("Max quote age (s)", 30, 3_600, 300, step=30,
                             help="Age of the OLDER of the two /latest sides. "
                                  "Wide margins on stale quotes are dead items.")
@@ -123,28 +135,31 @@ def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
         st.caption("Prices refetch at most once per 30 s "
                    "(wiki acceptable-use policy).")
     return filters.FilterConfig(
-        capital=capital, include_members=include_members,
+        capital=capital, slots=slots, include_members=include_members,
         max_quote_age=max_age, min_thin_volume_1h=min_vol,
-        min_roi=min_roi / 100), top_n
+        min_roi=min_roi / 100, min_undercut_depth=min_depth), top_n
 
 
 def ranked_table(rows, top_n):
     df = pd.DataFrame([{
-        "Item": r.name, "Buy": r.buy, "Sell": r.sell, "Tax": r.tax,
-        "Margin": r.margin, "ROI %": r.roi * 100, "Limit": r.limit,
+        "Item": r.name, "Buy": r.buy, "Sell": r.sell, "Margin": r.margin,
+        "ROI %": r.roi * 100, "Room": r.undercut_depth, "Limit": r.limit,
         "Vol/1h": r.thin_volume_1h, "Qty/4h": r.qty_per_window,
-        "GP/4h": r.profit_per_window, "Age s": r.quote_age,
-        "Score": round(r.score),
+        "Tied up": r.capital_needed, "Quoted/4h": r.gross_profit,
+        "EV/slot/h": round(r.gp_per_slot_hour),
     } for r in rows[:top_n]])
     gp = st.column_config.NumberColumn(format="localized")
     st.dataframe(df, hide_index=True, width="stretch", column_config={
-        "Buy": gp, "Sell": gp, "Tax": gp, "Margin": gp, "Limit": gp,
-        "Vol/1h": gp, "Qty/4h": gp, "GP/4h": gp, "Score": gp,
+        "Buy": gp, "Sell": gp, "Margin": gp, "Limit": gp, "Vol/1h": gp,
+        "Qty/4h": gp, "Tied up": gp, "Quoted/4h": gp, "EV/slot/h": gp,
+        "Room": st.column_config.NumberColumn(
+            help="Gp of price improvement you can afford per side. 0 means you "
+                 "cannot outbid the queue."),
         "ROI %": st.column_config.NumberColumn(format="%.1f%%"),
     })
-    st.caption("Buy/Sell are conservative fill estimates: buy = max(last "
-               "insta-sell, 5m avg low), sell = min(last insta-buy, 5m avg "
-               "high) — a single outlier trade cannot inflate a margin.")
+    st.caption("EV/slot/h ranks the table: quoted profit discounted for queue "
+               "position, price drift and quote staleness, spread over the 4h "
+               "buy-limit window. Quoted/4h is the undiscounted best case.")
 
 
 def detail_view(row):
@@ -155,9 +170,15 @@ def detail_view(row):
     mid.metric("Margin after tax", "{:,} gp".format(row.margin),
                delta="{:.1%} ROI".format(row.roi), delta_color="off",
                help="Tax on this sell price: {:,} gp".format(row.tax))
-    right.metric("Est. profit / 4h window", "{:,} gp".format(row.profit_per_window),
-                 help="{:,} units: min(buy limit, 1h thin-side volume x4, "
-                      "capital // buy price)".format(row.qty_per_window))
+    right.metric("Expected / slot / hour",
+                 "{:,} gp".format(round(row.gp_per_slot_hour)),
+                 delta="{:,} gp quoted per 4h".format(row.gross_profit),
+                 delta_color="off",
+                 help="{:,} units, {:,} gp tied up. Quoted profit is discounted "
+                      "for queue position, price drift and quote staleness."
+                      .format(row.qty_per_window, row.capital_needed))
+    for note in row.warnings:
+        st.warning(note, icon="⚠️")
 
     timestep = st.radio("Timestep", api.TIMESTEPS, index=1, horizontal=True,
                         help="5m ≈ 30h of history, 1h ≈ 15 days, 24h ≈ 1 year")
@@ -245,8 +266,8 @@ def main():
 
     st.subheader("Detail")
     row = st.selectbox("Item", rows[:top_n],
-                       format_func=lambda r: "{} — {:,} gp margin, {:,} gp/4h"
-                       .format(r.name, r.margin, r.profit_per_window))
+                       format_func=lambda r: "{} — {:,} gp margin, {:,} gp/slot/h"
+                       .format(r.name, r.margin, round(r.gp_per_slot_hour)))
     detail_view(row)
 
 
