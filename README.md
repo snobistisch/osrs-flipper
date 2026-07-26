@@ -4,9 +4,9 @@ Find Grand Exchange flips you can actually execute. Live prices from the
 [OSRS Wiki real-time price API](https://prices.runescape.wiki), ranked by
 **expected gp per offer slot per hour** — not by the margin on the screen.
 
-> **The browser version in `docs/` runs the older scoring model** and has not
-> been ported to the rebuild described below. Use `cli.py` or `app.py` for the
-> current one. See [The browser app is stale](#the-browser-app-is-stale).
+**[▶ Open the flipper](https://snobistisch.github.io/osrs-flipper/)** — runs in
+your browser, nothing to install. Same model as the Python tools; see
+[Two implementations](#two-implementations) for how they are kept in step.
 
 ## The strategy
 
@@ -156,6 +156,12 @@ narrowing the view never reorders what is left.
 
 ## Run it
 
+Nothing to install: the [hosted
+version](https://snobistisch.github.io/osrs-flipper/) is one self-contained
+HTML file and runs the same ranking. Enter a budget and it goes.
+
+For the local tools:
+
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
@@ -258,26 +264,33 @@ data could say which factor was wrong.
 | `archive.py`, `collect.py` | The private tick archive and its poller |
 | `journal.py` | Flip log and calibration diagnostics |
 | `app.py` / `cli.py` | Dashboard / terminal table |
-| `docs/index.html` | Browser app — **runs the older model**, see below |
+| `docs/index.html` | Browser app — self-contained, no build step, no deps |
 
 ```bash
-python3 -m unittest test_engine test_stats test_filters test_journal
+python3 -m unittest test_engine test_stats test_filters test_journal test_docs_port
 ```
 
 `engine.py` and `stats.py` deliberately import nothing outside the standard
 library, so the terminal tool and the whole test suite run without the venv.
 
-### The browser app is stale
+### Two implementations
 
-`docs/index.html` carries its own JavaScript port of the ranking math, because
-it runs with no Python available. It has **not** been updated for the rebuild:
-it still exempts only the bond from tax, divides by a flat four hours, applies
-the nine-factor multiplicative chain, and has no shrinkage, no fill-time model
-and no alchemy floor. Its numbers will disagree with the Python tools, and the
-Python ones are the ones to trust.
+`docs/index.html` carries its own JavaScript port of `engine.py`, `stats.py`
+and `filters.py`, because it has to run with no Python available. That
+duplication is the price of a zero-install version, and it is a real
+maintenance hazard: the port went stale once already, and the only thing
+guarding it was a README line saying "change it in both".
 
-Porting it is a self-contained piece of work. Until that happens the honest
-options are to port it or to stop publishing it.
+`test_docs_port.py` now guards the parts that rot silently — the tax-exempt
+list, every calibration constant, the history window, and the absence of
+functions the rebuild deleted. A Python test cannot execute the JavaScript, so
+formula changes still have to be made by hand in both files; what it catches is
+the class of drift that produces plausible numbers that are quietly wrong.
+
+Checked against live data, the two agree to within a fraction of a percent on
+the pre-shrinkage score, the remaining gap being that they poll `/latest`
+seconds apart. Shrunken scores drift slightly more, because shrinkage depends
+on the whole cross-section and the two runs see a marginally different one.
 
 ## API etiquette
 

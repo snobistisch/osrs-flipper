@@ -185,29 +185,29 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
 <section id="gate">
   <h1>🪙 Grand Exchange Flipper</h1>
   <!--
-    This page is a JavaScript port of an EARLIER version of engine.py and
-    filters.py. The Python tools have since been rebuilt and this port has not
-    followed. Do not treat the two as interchangeable; see the README section
-    "The browser app is stale" for the full list of what differs.
+    JavaScript port of engine.py, stats.py and filters.py, kept deliberately in
+    step with them because this page runs with no Python available. When you
+    change a formula, change it in both. test_docs_port.py checks that the
+    tax-exempt list and the calibration constants here match the Python side,
+    so those two cannot drift silently.
   -->
-  <div class="panel" style="border-color:#8a6d1f;background:#3a2f16;margin-bottom:1rem">
-    <strong>⚠️ This page runs an older version of the ranking.</strong>
-    <p style="margin:.5rem 0 0">The Python tools in this repository were rebuilt
-       and this browser port has not been updated. It still taxes ~57 tax-exempt
-       items that owe nothing, assumes every flip occupies a slot for exactly
-       four hours, ignores the high-alchemy floor, and applies no correction for
-       the fact that ranking hundreds of noisy estimates surfaces the largest
-       errors rather than the largest values. Its numbers will disagree with
-       <code>cli.py</code> and <code>app.py</code>, and those are the ones to
-       trust.</p>
-  </div>
   <p>Live flip finder for Old School RuneScape, built on the OSRS Wiki real-time
      prices API. It ranks by <strong>expected gp per offer slot per hour</strong>,
      not by the margin on the screen — because a quoted margin is only profit if
      both legs of the flip actually fill.</p>
   <details class="panel" id="strategy">
-    <summary>How the ranking thinks — four reasons a quoted margin isn't profit</summary>
-    <h3>1. You have to get to the front of the queue</h3>
+    <summary>How the ranking thinks — five reasons a quoted margin isn't profit</summary>
+    <h3>1. A slot is time, not a container</h3>
+    <p>Free-to-play has three GE slots, members eight. The binding constraint
+       is not gold, it is slots — and a slot is occupied for however long the
+       flip takes, not for a fixed window.</p>
+    <p>A flip that clears in twelve minutes for 5,000 gp earns 25,000 gp per
+       slot-hour; one that ties the slot up for four hours to make 40,000 earns
+       10,000. So fill time is modelled, not assumed: traded volume gives an
+       arrival rate, your undercut room gives the share of it you can capture,
+       and the two give an expected <strong>round trip</strong> for both legs.
+       That is the denominator of the ranking.</p>
+    <h3>2. You have to get to the front of the queue</h3>
     <p>The Grand Exchange matches offers on price first, then on age: at the same
        price, an offer placed days ago has near-absolute priority over yours. So
        there are two ways to get filled — outbid the queue, or wait in it.</p>
@@ -216,21 +216,20 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
        would have to buy at 6 and sell at 5, which loses money. You have zero
        room to compete, so you are stuck behind thousands of offers and bots for
        a margin of one coin. Every item gets an <strong>undercut room</strong>
-       number: how much price improvement it can afford per side. Zero means you
-       cannot influence whether you fill, and the ranking discounts it to 15% of
-       its quoted profit. By default those flips are filtered out entirely.</p>
-    <h3>2. Your offer fills when you least want it to</h3>
+       number: how much price improvement it can afford per side. Air runes have
+       zero. That number is not a penalty of its own — it feeds the fill rate,
+       because how far ahead of the queue you can buy your way is what
+       determines how fast you fill. Those flips are not hidden; they fill
+       slowly, and the ranking says so.</p>
+    <h3>3. Your offer fills when you least want it to</h3>
     <p>A resting buy offer fills fastest exactly when the price is falling —
        someone is dumping into it — and then your sell leg is stranded above the
-       market. Passive orders are selected against. The tool compares the
-       5-minute and 1-hour averages to detect drift, and penalises a falling
-       market harder than a rising one, because you are the one holding
-       inventory between the two legs.</p>
-    <h3>3. Slots are scarcer than gold</h3>
-    <p>Free-to-play has three GE slots, members eight. You cannot run fifty
-       flips, so "profit if I put my whole bank into this one item" is the wrong
-       question. Your budget is split across your slots, and everything is
-       ranked by what a slot earns per hour.</p>
+       market. Passive orders are selected against. Two readings of that hazard
+       are scored: <strong>order-flow imbalance</strong>, which says who is
+       being aggressive right now, and <strong>drift</strong> between the
+       5-minute and 1-hour averages, which says where the price has been going.
+       Both are penalised only in the direction that hurts someone holding
+       inventory between the legs.</p>
     <h3>4. The last print is not the market — and neither is a spike</h3>
     <p>A few hundred salmon dumped at 30 gp in the last minutes reads as "buy at
        30" to every intraday number — while two weeks of sellers accepted 40.
@@ -238,19 +237,38 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
        mirror image is the manipulation trap: an item pumped above its normal
        level shows a juicy margin exactly while a merch clan is waiting to dump
        on whoever buys it.</p>
-    <p>So the top candidates are re-checked against 14 days of history, on
-       market-making terms: what share of real volume traded at your prices,
-       how far today's quote sits above the item's 14-day median (a spike above
-       it is discounted hard — supply and demand for game commodities barely
-       move, so prices revert), and how calmly the price sits in its band. A
-       rise earns no bonus at all: from price data a genuine update-driven
-       demand shift and a pump are identical, so the tool waits for the new
-       level to settle instead of chasing it. Stable staples inside a settled
-       range — the flipper's bread and butter — is what floats to the top.</p>
+    <p>So the leading candidates are re-checked against 14 days of history.
+       What share of real volume traded at your prices is measured on
+       <em>detrended</em> prices, so a dump stays visible whenever it happened
+       but a steadily rising item is not punished for trading above last week —
+       and that share feeds the fill rate, not the profit: a price only 5% of
+       the market ever reached is not a flip earning 5% of its margin, it is a
+       flip that takes twenty times as long.</p>
+    <p>Each item also gets its own <strong>mean-reversion fit</strong> rather
+       than one rule for the whole game. "Above its two-week median" is a
+       warning on a rune and the permanent condition of a raid unique, whose
+       supply is fixed while demand grows. Where reversion is real the expected
+       return over the actual holding period is charged or credited; where it
+       is not, only a small capped trend term applies, because a rise and a
+       merch-clan pump look identical in price data. Where the price level
+       shifted mid-history — usually an update re-pricing the item — the fit
+       spans two different markets and is not trusted at all.</p>
+    <h3>5. The list itself is the biggest source of error</h3>
+    <p>Ranking noisy estimates does not surface the best items. It surfaces the
+       items whose estimation error happened to be largest and positive, and
+       that is worst exactly where the data is thinnest. Every score is
+       therefore pulled toward the market-wide average by an amount set by how
+       much volume it rests on. The table shows both numbers: <strong>Measured
+       </strong> before, <strong>EV/slot/h</strong> after. A wide gap means the
+       measured number was mostly thin data. When no difference between the
+       day's scores survives the noise, the tool says so instead of ranking
+       anyway.</p>
     <p class="dim">Intraday prices are estimated conservatively too: the
        reference per side is the 5-minute and 1-hour average weighted by how
        much actually traded in each, and the final estimate takes the worse of
-       that and the last real trade.</p>
+       that and the last real trade. Around 57 items pay no GE tax at all, and
+       the high-alchemy value puts a hard floor under the sell leg — both are
+       priced in.</p>
   </details>
   <div class="panel">
     <label for="budget">How much gp do you have to flip with?</label>
@@ -289,29 +307,34 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
       <div class="small dim">Slots are the real bottleneck. Your budget is
         split across them, because you flip several items at once.</div>
     </div>
-    <h2>Filters</h2>
+    <h2>Display filters</h2>
+    <div class="small dim" style="margin:-0.3rem 0 1rem">These hide rows.
+      Everything tradable is scored and shrunk first, so narrowing the view
+      never reorders what is left.</div>
     <div class="field">
       <label for="f-depth">Min undercut room <span class="val" id="f-depth-v"></span></label>
-      <input type="range" id="f-depth" min="0" max="50" step="1" value="1">
+      <input type="range" id="f-depth" min="0" max="50" step="1" value="0">
       <div class="small dim">Gp of price improvement you can afford per side.
-        At 0 you cannot outbid anyone and just wait in the queue — that's the
-        air rune trap. Set to "off" to see those flips anyway.</div>
+        At 0 you cannot outbid anyone and wait in the queue — the air rune
+        trap. That is now priced into the fill time rather than filtered out,
+        so leaving this off is fine.</div>
     </div>
     <div class="field">
       <label for="f-age">Max quote age <span class="val" id="f-age-v"></span></label>
-      <input type="range" id="f-age" min="30" max="3600" step="30" value="300">
-      <div class="small dim">Age of the older side of the quote. Wide margins on
-        stale quotes are dead items.</div>
+      <input type="range" id="f-age" min="0" max="3600" step="30" value="0">
+      <div class="small dim">Age of the older side of the quote. Staleness is
+        scored against the item's own volatility, so this is a preference, not
+        a correctness gate.</div>
     </div>
     <div class="field">
       <label for="f-vol">Min volume / hour <span class="val" id="f-vol-v"></span></label>
-      <input type="range" id="f-vol" min="0" max="10000" step="20" value="120">
-      <div class="small dim">Units traded on the quieter side of the book.
-        Push it up to keep only the most liquid staples.</div>
+      <input type="range" id="f-vol" min="0" max="10000" step="20" value="0">
+      <div class="small dim">Units traded on the quieter side of the book. Thin
+        volume already costs an item heavily in both fill time and shrinkage.</div>
     </div>
     <div class="field">
       <label for="f-roi">Min ROI after tax <span class="val" id="f-roi-v"></span></label>
-      <input type="range" id="f-roi" min="0" max="100" step="1" value="10">
+      <input type="range" id="f-roi" min="0" max="100" step="1" value="0">
     </div>
     <div class="field">
       <label>Price per item (gp)</label>
@@ -324,10 +347,12 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
     </div>
     <div class="field checkline">
       <input type="checkbox" id="f-taxfree">
-      <label for="f-taxfree" style="margin:0">Tax-free items only (&lt; 50 gp)</label>
+      <label for="f-taxfree" style="margin:0">Tax-free flips only</label>
     </div>
     <div class="small dim" style="margin:-0.6rem 0 1.1rem">Under 50 gp the 2%
-      GE tax rounds down to zero — the whole spread is yours.</div>
+      GE tax rounds down to zero, and around 57 items — cooked food, low-level
+      ammo, tools, teleport tablets, bonds — are exempt outright. Either way
+      the whole spread is yours.</div>
     <div class="field checkline">
       <input type="checkbox" id="f-members">
       <label for="f-members" style="margin:0">Include members items</label>
@@ -348,29 +373,29 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
         <thead><tr>
           <th data-sort="name">Item</th>
           <th data-sort="buy">Buy</th>
-          <th data-sort="sell">Sell</th>
+          <th data-sort="listAt" title="Where to place the sell offer. The GE tax rounds down, so every price inside a 50 gp band nets the seller the same — the lowest one buys queue priority for free.">Sell at</th>
           <th data-sort="margin">Margin</th>
           <th data-sort="roi">ROI</th>
-          <th data-sort="depth" title="Gp of price improvement you can afford per side">Room</th>
-          <th data-sort="fillShare" title="Share of the last 14 days' volume that traded at your prices">Fill</th>
-          <th data-sort="trend" title="Recent vs prior multi-day volume-weighted price">Trend</th>
-          <th data-sort="elevation" title="Quote vs the item's 14-day median level — high means spike/manipulation risk">Elev</th>
-          <th data-sort="limit">Limit</th>
-          <th data-sort="volume">Vol/1h</th>
-          <th data-sort="qty">Qty/4h</th>
+          <th data-sort="depth" title="Gp of price improvement you can afford per side. 0 means you cannot outbid the queue, which the fill time prices.">Room</th>
+          <th data-sort="qty">Qty</th>
           <th data-sort="capitalNeeded">Tied up</th>
-          <th data-sort="gross" title="Best case: both legs fill at the quoted prices">Quoted/4h</th>
-          <th data-sort="perSlotHour" title="Expected gp per offer slot per hour, after every discount">EV/slot/h</th>
+          <th data-sort="totalSeconds" title="Expected time for both legs at your queue position. This is the denominator of EV/slot/h.">Round trip</th>
+          <th data-sort="pFill" title="Chance both legs clear inside four hours">P(fill)</th>
+          <th data-sort="alchDistance" title="How far the buy price sits above the high alchemy value. Negative means alching pays more than the market — a guaranteed exit.">Alch</th>
+          <th data-sort="fillShare" title="Share of the last 14 days' volume that traded at your prices">Fill</th>
+          <th data-sort="rawPerSlotHour" title="The score before shrinkage">Measured</th>
+          <th data-sort="perSlotHour" title="Expected gp per offer slot per hour, after every discount and after shrinkage">EV/slot/h</th>
         </tr></thead>
         <tbody></tbody>
       </table>
     </div>
-    <p class="small dim"><strong>EV/slot/h</strong> is the ranking metric: the
-      quoted profit discounted for queue position, price drift and quote
-      staleness, then spread over the four-hour buy-limit window.
-      <strong>Room</strong> is how much price improvement you can afford per
-      side — with 0 you cannot outbid anyone. Click a row for price history and
-      the reasoning behind its discount.</p>
+    <p class="small dim"><strong>EV/slot/h</strong> is the ranking metric:
+      expected profit divided by the time the slot is actually occupied, then
+      shrunk toward the market average by an amount set by how much volume the
+      estimate rests on. A wide <strong>Measured</strong>-to-EV gap means the
+      measured number was mostly the thinness of the data behind it.
+      <strong>Round trip</strong> is why a small quick flip can beat a large
+      slow one. Click a row for price history and where its profit went.</p>
 
     <section id="detail" class="hidden">
       <h2 id="d-name"></h2>
@@ -384,6 +409,11 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
           <div class="label">Margin after tax</div>
           <div class="value" id="d-margin"></div>
           <div class="sub" id="d-roi"></div>
+        </div>
+        <div class="metric">
+          <div class="label">Round trip</div>
+          <div class="value" id="d-trip"></div>
+          <div class="sub" id="d-trip-sub"></div>
         </div>
         <div class="metric">
           <div class="label">Expected / slot / hour</div>
@@ -424,23 +454,113 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
 "use strict";
 
 /* ==================== engine: pure flip math ====================
-   Mirrors engine.py so the browser and the Python CLI rank identically.
-   Tax rules as of the 29 May 2025 update. */
+   Mirrors engine.py and stats.py so the browser and the Python tools rank
+   identically. When you change a formula, change it in both. The exempt-item
+   list below is checked against tax_exempt.json by test_docs_port.py, so that
+   one cannot drift silently.
+
+   A quoted margin is not profit. It is profit *if* both legs fill, and the
+   Grand Exchange guarantees nothing. Everything here turns a quoted margin
+   into an expected value per slot-hour, and then says how far to trust it. */
 
 const TAX_RATE = 0.02;
 const TAX_CAP = 5_000_000;
-const TAX_EXEMPT_IDS = new Set([13190]);   // Old school bond
-const HOUR_BUCKETS_PER_WINDOW = 4;         // 4h buy-limit window / 1h bucket
 const WINDOW_HOURS = 4;                    // the buy-limit window
 const MAX_CASH_STACK = 2_147_483_647;
-const FRESHNESS_HALF_LIFE = 600;           // seconds
+const SECONDS_PER_HOUR = 3600;
+const HOURS_PER_DAY = 24;
+
+/* A flip is two sequential legs sharing one window: you cannot list the sell
+   until the buy has filled. Sizing an offer against the whole window would
+   guarantee the sell leg has no time left in it. Each leg gets half. */
+const LEGS_PER_ROUND_TRIP = 2;
+
+/* Items that pay no GE tax. The wiki API publishes no flag for this, so the
+   list is maintained by hand in tax_exempt.json and mirrored here; names are
+   matched against /mapping because several item ids in circulation are wrong.
+   The previous version of this page exempted exactly one item, the bond, and
+   charged the other ~56 a 2% they do not owe — which is most of the spread on
+   a 200 gp lobster. */
+const EXEMPT_IDS = new Set([13190]);
+const EXEMPT_NAMES = new Set([
+  "old school bond",
+  "energy potion(1)", "energy potion(2)", "energy potion(3)", "energy potion(4)",
+  "bronze arrow", "bronze dart", "bronze dart(p)", "bronze dart(p+)",
+  "bronze dart(p++)", "iron arrow", "iron dart", "iron dart (p)",
+  "iron dart(p+)", "iron dart(p++)", "steel arrow", "steel dart",
+  "steel dart(p)", "steel dart(p+)", "steel dart(p++)", "mind rune",
+  "bass", "bread", "cake", "cooked chicken", "cooked meat", "herring",
+  "lobster", "mackerel", "meat pie", "pike", "salmon", "shrimps", "tuna",
+  "ardougne teleport (tablet)", "camelot teleport (tablet)",
+  "civitas illa fortis teleport", "falador teleport (tablet)",
+  "kourend castle teleport (tablet)", "lumbridge teleport (tablet)",
+  "varrock teleport (tablet)", "teleport to house (tablet)",
+  "games necklace(8)", "ring of dueling(8)",
+  "chisel", "gardening trowel", "glassblowing pipe", "hammer", "needle",
+  "pestle and mortar", "rake", "saw", "secateurs", "seed dibber", "shears",
+  "spade", "watering can",
+]);
+
+const NATURE_RUNE_ID = 561;          // one cast of High Alchemy
+const NATURE_RUNE_FALLBACK = 100;
+
+/* Every free parameter, in one place. DERIVED means forced by game mechanics
+   or arithmetic; CALIBRATE means a stated prior, to be fitted from the tick
+   archive or the journal that the Python tools collect. Nothing is tuned by
+   feel inside a function. */
+const CAL = {
+  competitors_at_touch: 4.0,       // CALIBRATE: offers you queue behind
+  aggressiveness_scale: 0.25,      // CALIBRATE: share of spread that jumps it
+  min_leg_seconds: 60,             // DERIVED: placing and collecting takes time
+  adverse_selection_gamma: 0.5,    // CALIBRATE
+  drift_penalty_falling: 8.0,      // CALIBRATE
+  drift_penalty_rising: 4.0,       // CALIBRATE
+  adverse_selection_floor: 0.2,
+  risk_aversion_eta: 1.0,          // CALIBRATE
+  staleness_eta: 1.0,              // CALIBRATE
+  default_sigma_daily: 0.05,       // CALIBRATE
+  mean_reversion_omega: 1.0,       // CALIBRATE
+  mean_reversion_cap: 0.5,
+  trend_tau: 0.5,                  // CALIBRATE
+  trend_cap: 0.10,
+  regime_shift_threshold: 4.0,     // CALIBRATE
+  alch_alpha: 2.0,                 // CALIBRATE
+  alch_relevant_distance: 0.40,
+  update_risk_penalty: 0.35,       // CALIBRATE
+  update_risk_lead_hours: 6.0,
+  score_noise_scale: 3.0,          // CALIBRATE: sampling noise on a log score
+  score_noise_floor: 0.35,         // CALIBRATE: noise no volume removes
+  horizon_hours: WINDOW_HOURS,
+};
+
+const legHorizonHours = () => CAL.horizon_hours / LEGS_PER_ROUND_TRIP;
+
+/* ---- tax ---- */
 
 const geTax = (sell, exempt) =>
   exempt ? 0 : Math.min(TAX_CAP, Math.floor(sell * TAX_RATE));
 
-const netMargin = (buy, sell, exempt) => sell - geTax(sell, exempt) - buy;
+const netRevenue = (sell, exempt) => sell - geTax(sell, exempt);
 
-const roi = (buy, sell, exempt) => netMargin(buy, sell, exempt) / buy;
+const netMargin = (buy, sell, exempt) => netRevenue(sell, exempt) - buy;
+
+const roi = (buy, sell, exempt) =>
+  buy <= 0 ? 0 : netMargin(buy, sell, exempt) / buy;
+
+/* Because the tax rounds down, net revenue is a staircase with 50 gp treads:
+   selling at 100 nets 98, and so does 99. Every price inside a band is
+   identical to the seller, so undercutting inside it buys queue priority for
+   free. Listing at exactly 1,000 when 999 nets the same is giving away
+   position for nothing. */
+function taxBoundaryUndercut(sell, exempt) {
+  if (exempt || sell <= 0) return sell;
+  const target = netRevenue(sell, exempt);
+  let candidate = sell;
+  while (candidate > 1 && netRevenue(candidate - 1, exempt) >= target) candidate--;
+  return candidate;
+}
+
+/* ---- prices ---- */
 
 /* Volume-weighted reference price for one side of the book.
    The 5-minute average is fresher, but it can rest on a handful of trades: 13
@@ -468,20 +588,7 @@ function executablePrices(latestLow, latestHigh, refLow, refHigh) {
   ];
 }
 
-/* A flip needs both sides of the book: someone instant-selling to fill your
-   buy, someone instant-buying to fill your sell. The thin side bounds it. */
-const windowVolume = (highVol, lowVol, buckets) =>
-  Math.min(highVol, lowVol) * buckets;
-
-function flippableQty(buyLimit, volume, affordable) {
-  let qty = volume;
-  if (buyLimit != null) qty = Math.min(qty, buyLimit);
-  if (affordable != null) qty = Math.min(qty, affordable);
-  return Math.max(qty, 0);
-}
-
-const freshness = (ageSeconds) =>
-  ageSeconds <= 0 ? 1 : Math.pow(0.5, ageSeconds / FRESHNESS_HALF_LIFE);
+/* ---- queue position ---- */
 
 /* How many gp of price improvement you can afford on each side at once while
    the flip still profits.
@@ -489,9 +596,12 @@ const freshness = (ageSeconds) =>
    The Grand Exchange matches on price first, then on offer age: at the same
    price, offers that are days old take near-absolute priority. So there are
    exactly two ways to get filled — outbid the queue, or wait behind a queue
-   you cannot see. Depth is how much room you have to do the first. Air runes
-   at 5/6 have depth 0: buying at 6 to sell at 5 is a guaranteed loss, so a
-   1 gp margin can only ever be won by waiting. */
+   you cannot see. Air runes at 5/6 have depth 0: buying at 6 to sell at 5 is a
+   guaranteed loss, so a 1 gp margin can only ever be won by waiting.
+
+   Depth is no longer a score multiplier of its own. It is the input to the
+   fill rate — how far ahead of the queue you can buy your way is precisely
+   what determines how fast you fill. */
 function undercutDepth(buy, sell, exempt) {
   if (netMargin(buy, sell, exempt) <= 0) return 0;
   let lo = 0, hi = Math.max(0, Math.floor((sell - buy) / 2) + 1);
@@ -503,214 +613,387 @@ function undercutDepth(buy, sell, exempt) {
   return lo;
 }
 
-/* Fraction of the quoted margin you should expect to actually capture. Depth 0
-   keeps a small non-zero weight: those flips do sometimes fill, you just
-   cannot influence whether they do. */
-const queueFactor = (depth) =>
-  depth <= 0 ? 0.15 : 1 - Math.exp(-depth / 3);
+/* Undercut room as a fraction of the spread it comes out of. Measured against
+   the spread, not the price: 1 gp is decisive on a 3 gp spread and meaningless
+   on a 300 gp one. */
+const priceEdge = (depth, spread) => spread <= 0 ? 0 : Math.max(0, depth / spread);
 
-/* Recent momentum as a fraction of price. Negative means falling. */
+/* Share of arriving volume your offer captures. At the touch you are one of
+   several offers and take roughly 1/N of what arrives; concede enough of the
+   spread and you are taking essentially everything. An item with no room to
+   improve sits at its queue share and cannot buy its way out — which is
+   exactly the trap this number exists to price. */
+function aggressiveness(edge) {
+  const share = 1 / Math.max(1, CAL.competitors_at_touch);
+  if (edge <= 0) return share;
+  return share + (1 - share) * (1 - Math.exp(-edge / Math.max(CAL.aggressiveness_scale, 1e-9)));
+}
+
+/* ---- fill time ---- */
+
+const fillRate = (volumePerHour, share) =>
+  volumePerHour <= 0 || share <= 0 ? 0 : (volumePerHour / SECONDS_PER_HOUR) * share;
+
+/* Mean time for one leg. Floored: on a very liquid item the arithmetic says a
+   small offer clears in under a second, but you still have to walk to the
+   Grand Exchange and collect it. */
+function expectedFillSeconds(qty, rate) {
+  if (qty <= 0) return CAL.min_leg_seconds;
+  if (rate <= 0) return Infinity;
+  return Math.max(CAL.min_leg_seconds, qty / rate);
+}
+
+/* Treating fill time as exponential: memorylessness is the honest assumption
+   when queue position is invisible, and it has the right shape — most of the
+   mass early, a long tail of offers that simply never fill. */
+function fillProbability(expectedSeconds, horizonSeconds) {
+  if (!isFinite(expectedSeconds) || expectedSeconds <= 0 || horizonSeconds <= 0) return 0;
+  return 1 - Math.exp(-horizonSeconds / expectedSeconds);
+}
+
+/* Units the market can hand you on ONE leg inside the horizon. This replaces
+   multiplying one bucket's volume by four, which assumed the last hour repeats
+   and ignored that you only get your share of the queue. */
+const fillableQuantity = (volumePerHour, share, horizonHours) =>
+  Math.max(0, Math.floor(fillRate(volumePerHour, share) * horizonHours * SECONDS_PER_HOUR));
+
+function flippableQty(buyLimit, volume, affordable) {
+  let qty = volume;
+  if (buyLimit != null) qty = Math.min(qty, buyLimit);
+  if (affordable != null) qty = Math.min(qty, affordable);
+  return Math.max(qty, 0);
+}
+
+/* ---- adverse selection ---- */
+
+/* Trades at the high price are buyer-initiated, at the low price
+   seller-initiated. The dangerous sign for a flipper is negative: heavy
+   seller-initiated flow is the flow that fills your resting buy right before
+   the price keeps going down. */
+function orderFlowImbalance(highVolume, lowVolume) {
+  const total = highVolume + lowVolume;
+  return total <= 0 ? 0 : (highVolume - lowVolume) / total;
+}
+
 function priceDrift(mid5m, mid1h) {
   if (mid5m == null || mid1h == null || mid1h <= 0) return 0;
   return (mid5m - mid1h) / mid1h;
 }
 
-/* A resting buy offer fills fastest exactly when the price is falling —
-   someone is dumping into it — and then the sell leg is stranded above the
-   market. Falling is penalised harder than rising because you are the one
-   holding inventory between the two legs. */
-function driftFactor(drift) {
-  const penalty = drift < 0 ? 8 * Math.abs(drift) : 4 * drift;
-  return Math.max(0.2, 1 - penalty);
+/* Two independent readings of the same hazard: order flow says who is being
+   aggressive now, drift says where the price has been going. Both are
+   penalised only in the direction that hurts someone who is long between the
+   legs — buying pressure is not a symmetric gift. */
+function adverseSelectionFactor(ofi, drift) {
+  let penalty = 0;
+  if (ofi < 0) penalty += CAL.adverse_selection_gamma * Math.abs(ofi);
+  penalty += drift < 0
+    ? CAL.drift_penalty_falling * Math.abs(drift)
+    : CAL.drift_penalty_rising * drift;
+  return Math.max(CAL.adverse_selection_floor, 1 - penalty);
 }
 
-/* Expected gp from one 4-hour window. Margin times quantity is the best case,
-   where both legs fill at the quoted prices; each factor is a reason that
-   does not happen. */
-const expectedValue = (margin, qty, depth, drift, ageSeconds) =>
-  margin * qty * queueFactor(depth) * driftFactor(drift) * freshness(ageSeconds);
+/* ---- risk over time ---- */
 
-/* Offer slots, not gp, are the binding constraint: three free-to-play, eight
-   for members. A flip holds a slot for the window whether it earns 1 gp or
-   100k, so the question is what a slot is worth for four hours. */
-const gpPerSlotHour = (expectedGp) => expectedGp / WINDOW_HOURS;
-
-/* ==================== multi-day history ====================
-   The last print is not the market: a few hundred salmon sold at 30 gp in
-   the last minutes looks like a buy at 30, but if two weeks of seller volume
-   went at 40, a large offer at 30 fills only against that one dumper. These
-   functions read ~14 days of 6h buckets and answer: at your prices, what
-   share of the market's real volume would have filled you, and which way is
-   it moving? */
-
-const HISTORY_TIMESTEP = "6h";
-const HISTORY_WINDOW_BUCKETS = 56;   // 14 days of 6h buckets
-const MIN_HISTORY_BUCKETS = 8;       // fewer traded buckets: refuse to judge
-const RECENT_TREND_BUCKETS = 12;     // ~3 days
-const FILL_FLOOR = 0.05;             // "never traded there" still keeps 5%
-const FILL_TOLERANCE = 0.01;         // prices within 1% count as reachable
-const LEVEL_TOLERANCE = 0.03;        // this far above the median is normal
-const LEVEL_FLOOR = 0.10;
-const STABILITY_TOLERANCE = 0.02;    // swings within ±2% of median are calm
-const STABILITY_FLOOR = 0.30;
-
-function weightedAvg(pairs) {
-  const total = pairs.reduce((s, [, v]) => s + v, 0);
-  if (total <= 0) return null;
-  return pairs.reduce((s, [p, v]) => s + p * v, 0) / total;
+/* The buy leg fills first; until the sell leg fills you are long. The standard
+   deviation of the price move over that window scales with its square root, so
+   a flip that sits for a day on a volatile item is a different proposition
+   from the same margin cleared in ten minutes. */
+function holdingRisk(sigmaDaily, holdSeconds) {
+  if (!isFinite(holdSeconds)) return 0;
+  if (sigmaDaily <= 0 || holdSeconds <= 0) return 1;
+  const days = holdSeconds / (SECONDS_PER_HOUR * HOURS_PER_DAY);
+  return Math.exp(-CAL.risk_aversion_eta * sigmaDaily * Math.sqrt(days));
 }
 
-function bucketVwap(points) {
-  const pairs = [];
-  for (const p of points) {
-    const hv = p.highPriceVolume || 0, lv = p.lowPriceVolume || 0;
-    const value = (p.avgHighPrice || 0) * hv + (p.avgLowPrice || 0) * lv;
-    const vol = (p.avgHighPrice != null ? hv : 0) +
-                (p.avgLowPrice != null ? lv : 0);
-    if (vol > 0) pairs.push([value / vol, vol]);
+/* The old page halved confidence every 600 seconds for every item alike. That
+   is too harsh on a liquid staple, where a 20-minute-old print is still the
+   market, and too kind on a thin volatile one. What decays is not time but
+   price certainty, so the item's own volatility drives it. */
+function stalenessFactor(ageSeconds, sigmaDaily) {
+  if (ageSeconds <= 0) return 1;
+  const sigma = sigmaDaily > 0 ? sigmaDaily : CAL.default_sigma_daily;
+  const days = ageSeconds / (SECONDS_PER_HOUR * HOURS_PER_DAY);
+  return Math.exp(-CAL.staleness_eta * sigma * Math.sqrt(days));
+}
+
+/* ---- Ornstein-Uhlenbeck, per item ---- */
+
+const MEAN_REVERSION_T = 2.0;   // |t| for calling the slope significantly < 0
+
+function ols(xs, ys) {
+  const n = xs.length;
+  if (n < 3 || n !== ys.length) return null;
+  const meanX = xs.reduce((a, b) => a + b, 0) / n;
+  const meanY = ys.reduce((a, b) => a + b, 0) / n;
+  let sxx = 0, sxy = 0;
+  for (let i = 0; i < n; i++) {
+    sxx += (xs[i] - meanX) ** 2;
+    sxy += (xs[i] - meanX) * (ys[i] - meanY);
   }
-  return weightedAvg(pairs);
+  if (sxx <= 0) return null;
+  const slope = sxy / sxx;
+  const intercept = meanY - slope * meanX;
+  let rss = 0;
+  for (let i = 0; i < n; i++) rss += (ys[i] - (intercept + slope * xs[i])) ** 2;
+  const dof = n - 2;
+  const residualVariance = dof > 0 ? rss / dof : 0;
+  const stderr = residualVariance > 0 ? Math.sqrt(residualVariance / sxx) : 0;
+  return { intercept, slope, residualVariance, n,
+           tStat: stderr > 0 ? slope / stderr : 0 };
 }
 
-/* Decline is penalised: you hold depreciating inventory between the legs.
-   A rise earns NO bonus: a genuine demand shift and a merch-clan pump are
-   indistinguishable in price data — both are a rising price with volume —
-   so rewarding rises means chasing manipulations. */
-function momentumFactor(trend) {
-  if (trend >= 0) return 1;
-  return Math.max(0.5, 1 + 3.0 * trend);
-}
-
-/* Mean-reversion discount for trading above the item's normal level. Game
-   commodity supply and demand are roughly constant, so shocks revert to the
-   multi-day median; a price spiked above it is the classic manipulation
-   signature. Below the median is not penalised — buying under the normal
-   level is where a flipper wants to be. */
-function levelFactor(elevation) {
-  if (elevation <= LEVEL_TOLERANCE) return 1;
-  return Math.max(LEVEL_FLOOR, Math.exp(-8.0 * (elevation - LEVEL_TOLERANCE)));
-}
-
-/* A flip is a round trip holding inventory in between; the wider an item
-   swings around its median, the more the trip can eat the margin. */
-function stabilityFactor(volatility) {
-  if (volatility <= STABILITY_TOLERANCE) return 1;
-  return Math.max(STABILITY_FLOOR, 1 - 8.0 * (volatility - STABILITY_TOLERANCE));
-}
-
-function median(values) {
-  if (!values.length) return null;
-  const ordered = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(ordered.length / 2);
-  return ordered.length % 2 === 1 ? ordered[mid]
-    : (ordered[mid - 1] + ordered[mid]) / 2;
-}
-
-/* Mirrors engine.history_view in the Python engine — keep them in step. */
-function historyView(rawPoints, buy, sell) {
-  const points = rawPoints.slice(-HISTORY_WINDOW_BUCKETS)
-    .filter((p) => p && typeof p === "object");
-  let buckets = 0;
-  const lows = [], highs = [], lowRatios = [], highRatios = [], mids = [];
-  for (const p of points) {
-    const hv = p.highPriceVolume || 0, lv = p.lowPriceVolume || 0;
-    if (hv > 0 || lv > 0) buckets++;
-    if (p.avgLowPrice != null && lv > 0) lows.push([p.avgLowPrice, lv]);
-    if (p.avgHighPrice != null && hv > 0) highs.push([p.avgHighPrice, hv]);
-    const value = (p.avgHighPrice || 0) * hv + (p.avgLowPrice || 0) * lv;
-    const vol = (p.avgHighPrice != null ? hv : 0) +
-                (p.avgLowPrice != null ? lv : 0);
-    if (vol <= 0) continue;
-    const bucketMid = value / vol;
-    mids.push(bucketMid);
-    if (p.avgLowPrice != null && lv > 0) {
-      lowRatios.push([p.avgLowPrice / bucketMid, lv]);
-    }
-    if (p.avgHighPrice != null && hv > 0) {
-      highRatios.push([p.avgHighPrice / bucketMid, hv]);
-    }
-  }
-  if (buckets < MIN_HISTORY_BUCKETS) return null;
-
-  const baselineLow = weightedAvg(lows);
-  const baselineHigh = weightedAvg(highs);
-
-  // Detrended fill shares: a seller's aggressiveness is their price relative
-  // to the market at that moment. A dump stays visible whenever it happened;
-  // an item marching upward is not punished for trading above last week's
-  // absolute prices.
-  const midNow = (buy + sell) / 2;
-  const buyRatio = (buy / midNow) * (1 + FILL_TOLERANCE);
-  const sellRatio = (sell / midNow) * (1 - FILL_TOLERANCE);
-  const lowTotal = lowRatios.reduce((s, [, v]) => s + v, 0);
-  const highTotal = highRatios.reduce((s, [, v]) => s + v, 0);
-  const buyFillShare = lowTotal > 0
-    ? lowRatios.reduce((s, [r, v]) => s + (r <= buyRatio ? v : 0), 0) / lowTotal
-    : 0;
-  const sellFillShare = highTotal > 0
-    ? highRatios.reduce((s, [r, v]) => s + (r >= sellRatio ? v : 0), 0) / highTotal
-    : 0;
-  const fillFactor = Math.max(FILL_FLOOR,
-    Math.min(1, Math.min(buyFillShare, sellFillShare)));
-
-  const recent = bucketVwap(points.slice(-RECENT_TREND_BUCKETS));
-  const prior = bucketVwap(points.slice(0, -RECENT_TREND_BUCKETS));
-  const trend = (recent != null && prior != null && prior > 0)
-    ? (recent - prior) / prior : 0;
-
-  const dislocation = (baselineLow != null && baselineLow > 0)
-    ? (buy - baselineLow) / baselineLow : 0;
-
-  // Where does the quote sit against the item's normal level, and how calm
-  // is that level? The median of bucket mids is robust: a few pumped buckets
-  // barely move it, so a pump shows as a large elevation, not a new normal.
-  const medianMid = median(mids);
-  const elevation = (medianMid != null && medianMid > 0)
-    ? (midNow - medianMid) / medianMid : 0;
-  let volatility = 0;
-  if (medianMid != null && medianMid > 0) {
-    const deviation = median(mids.map((m) => Math.abs(m - medianMid)));
-    volatility = deviation != null ? deviation / medianMid : 0;
-  }
-
+/* Fit dp = kappa*(mu - p)dt + sigma*dW on LOG prices — log because the item
+   universe spans five orders of magnitude. mu is a log price, so exp(mu) is
+   the long-run level in gp. */
+function fitOU(prices, dtDays) {
+  const usable = prices.filter((p) => p != null && p > 0);
+  if (usable.length < 12 || dtDays <= 0) return null;
+  const logs = usable.map(Math.log);
+  const lagged = logs.slice(0, -1);
+  const deltas = logs.slice(1).map((v, i) => v - logs[i]);
+  const fit = ols(lagged, deltas);
+  if (!fit) return null;
+  const b = fit.slope;
+  const kappa = -b / dtDays;
+  // b >= 0 is a random walk or explosive: mu is undefined, treat as trending.
+  const mu = b < 0 ? -fit.intercept / b : logs.reduce((a, c) => a + c, 0) / logs.length;
+  const sigma = fit.residualVariance > 0
+    ? Math.sqrt(fit.residualVariance / dtDays) : 0;
   return {
-    buckets,
-    baselineLow: baselineLow != null ? Math.round(baselineLow) : null,
-    baselineHigh: baselineHigh != null ? Math.round(baselineHigh) : null,
-    buyFillShare, sellFillShare, fillFactor, trend,
-    momentum: momentumFactor(trend), dislocation,
-    medianMid: medianMid != null ? Math.round(medianMid) : null,
-    elevation, volatility,
-    level: levelFactor(elevation), stability: stabilityFactor(volatility),
+    kappa, mu, sigma, tStat: fit.tStat,
+    meanReverting: kappa > 0 && fit.tStat <= -MEAN_REVERSION_T,
+    halfLifeDays: kappa > 0 ? Math.log(2) / kappa : null,
+    levelGp: Math.exp(mu),
+    /* Exact OU solution, not the Euler step: over a long horizon the linear
+       form kappa*(mu-p)*t overshoots the mean badly. */
+    expectedLogReturn(price, days) {
+      if (price <= 0 || days <= 0 || this.kappa <= 0) return 0;
+      return (this.mu - Math.log(price)) * (1 - Math.exp(-this.kappa * days));
+    },
   };
 }
 
-function historyWarnings(view) {
-  const notes = [];
-  const pct = (x) => `${Math.round(Math.abs(x) * 100)}%`;
-  if (view.elevation >= 0.05) {
-    notes.push(`trading ${pct(view.elevation)} above its 14-day median — spike or manipulation, expect reversion`);
-  }
-  if (view.volatility >= 0.05) {
-    notes.push(`price swings ±${pct(view.volatility)} around its 14-day median — risky to hold`);
-  }
-  if (view.dislocation <= -0.10) {
-    notes.push(`buy price ${pct(view.dislocation)} below the 14-day average — only the dump fills there`);
-  }
-  const binding = Math.min(view.buyFillShare, view.sellFillShare);
-  if (binding <= 0.25) {
-    notes.push(`only ${pct(binding)} of 14-day volume traded at your prices`);
-  }
-  if (view.trend >= 0.03) {
-    notes.push(`risen ${pct(view.trend)} over recent days — don't chase, wait for it to settle`);
-  } else if (view.trend <= -0.03) {
-    notes.push(`falling ${pct(view.trend)} over recent days`);
-  }
-  return notes;
+/* A game update that re-prices an item shows up as a level shift that no
+   mean-reversion model should be trusted through: the pre-update mean is not
+   where the price is heading back to. */
+function regimeShift(prices) {
+  const usable = prices.filter((p) => p != null && p > 0);
+  if (usable.length < 12) return 0;
+  const split = Math.floor(usable.length / 2);
+  const first = usable.slice(0, split), second = usable.slice(split);
+  const centreFirst = median(first), centreSecond = median(second);
+  if (!centreFirst || centreSecond == null) return 0;
+  const spread = median(first.map((p) => Math.abs(p - centreFirst)));
+  const scale = spread && spread > 0 ? spread : 0.01 * centreFirst;
+  return Math.abs(centreSecond - centreFirst) / scale;
 }
 
-const capitalPerSlot = (capital, slots) =>
-  Math.max(1, Math.floor(capital / Math.max(1, slots)));
+/* Replaces one exponential penalty for trading above a 14-day median applied
+   to every item in the game — right for a rune, wrong for a raid unique whose
+   normal condition is trading above its own median. */
+function meanReversionFactor(ou, midPrice, holdSeconds, regimeScore) {
+  if (!ou || midPrice <= 0 || holdSeconds <= 0 || !isFinite(holdSeconds)) return 1;
+  if (regimeScore >= CAL.regime_shift_threshold) return 1;
+  const days = holdSeconds / (SECONDS_PER_HOUR * HOURS_PER_DAY);
+  if (ou.meanReverting) {
+    const adjustment = CAL.mean_reversion_omega * ou.expectedLogReturn(midPrice, days);
+    const cap = CAL.mean_reversion_cap;
+    return 1 + Math.max(-cap, Math.min(cap, adjustment));
+  }
+  // Trending: credited timidly and capped, because a rise and a merch-clan
+  // pump are indistinguishable in price data.
+  const move = -ou.kappa * (ou.mu - Math.log(midPrice)) * days;
+  const capped = Math.max(-CAL.trend_cap, Math.min(CAL.trend_cap, move));
+  return Math.max(0.5, 1 + CAL.trend_tau * capped);
+}
+
+/* ---- high alchemy: the floor under the price ---- */
+
+/* No rational holder sells below the alch value net of a nature rune, because
+   the spell pays it unconditionally. For a flipper it is a free put: the worst
+   case on the sell leg is the floor, not zero. The previous version of this
+   page loaded highalch and never used it. */
+const alchFloor = (highalch, natureCost) =>
+  highalch == null || highalch <= 0 ? null : highalch - natureCost;
+
+const alchDistance = (buy, floor) =>
+  floor == null || buy <= 0 ? null : (buy - floor) / buy;
+
+function alchBonus(distance) {
+  if (distance == null || distance >= CAL.alch_relevant_distance) return 1;
+  if (distance <= 0) return 1;      // an arbitrage, reported separately
+  return Math.exp(CAL.alch_alpha * (CAL.alch_relevant_distance - distance) / 10);
+}
+
+/* ---- weekly update risk ---- */
+
+const UPDATE_WEEKDAY_UTC = 3;      // Date.getUTCDay(): Sunday = 0
+const UPDATE_HOUR_UTC = 11;
+
+function secondsUntilUpdate(nowSeconds) {
+  const now = new Date(nowSeconds * 1000);
+  const target = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(),
+    now.getUTCDate(), UPDATE_HOUR_UTC, 0, 0, 0));
+  target.setUTCDate(target.getUTCDate() +
+    ((UPDATE_WEEKDAY_UTC - now.getUTCDay() + 7) % 7));
+  if (target <= now) target.setUTCDate(target.getUTCDate() + 7);
+  return (target - now) / 1000;
+}
+
+/* Patch notes are read faster than prices adjust, so anyone holding inventory
+   across an update is the uninformed side of every trade that follows. Applies
+   only when the flip is not expected to be closed in time. */
+function updateRiskFactor(nowSeconds, expectedHoldSeconds) {
+  if (expectedHoldSeconds <= 0) return 1;
+  const horizon = isFinite(expectedHoldSeconds)
+    ? expectedHoldSeconds : CAL.horizon_hours * SECONDS_PER_HOUR;
+  const exposure = horizon + CAL.update_risk_lead_hours * SECONDS_PER_HOUR;
+  const until = secondsUntilUpdate(nowSeconds);
+  if (until >= exposure) return 1;
+  return Math.max(0, 1 - CAL.update_risk_penalty * (1 - until / exposure));
+}
+
+/* ---- the score ---- */
+
+/* Returns the decomposition, not just the product: a chain of factors against
+   one realised number is unidentifiable, so each is kept separately and the
+   detail panel shows where the quoted profit went. */
+function scoreFlip(o) {
+  const mid = (o.buy + o.sell) / 2;
+  const share = aggressiveness(priceEdge(o.depth, o.sell - o.buy));
+  const buyRate = fillRate(o.buyVolume1h, share);
+  const sellRate = fillRate(o.sellVolume1h, share);
+  const buySeconds = expectedFillSeconds(o.qty, buyRate);
+  const sellSeconds = expectedFillSeconds(o.qty, sellRate);
+  const totalSeconds = buySeconds + sellSeconds;
+
+  const horizonSeconds = CAL.horizon_hours * SECONDS_PER_HOUR;
+  const pBuy = fillProbability(buySeconds, horizonSeconds);
+  // The sell leg only gets what is left of the horizon after the buy leg.
+  const remaining = Math.max(0, horizonSeconds - Math.min(buySeconds, horizonSeconds));
+  const pSell = fillProbability(sellSeconds, remaining);
+  const pBoth = pBuy * pSell;
+
+  let sigma = o.sigmaDaily != null ? o.sigmaDaily : (o.ou ? o.ou.sigma : null);
+  if (sigma == null || sigma <= 0) sigma = CAL.default_sigma_daily;
+
+  const adverse = adverseSelectionFactor(o.ofi, o.drift);
+  const hold = holdingRisk(sigma, sellSeconds);
+  const stale = stalenessFactor(o.quoteAge, sigma);
+  const reversion = meanReversionFactor(o.ou, mid, sellSeconds, o.regimeScore || 0);
+  const floor = alchFloor(o.highalch, o.natureCost);
+  const distance = alchDistance(o.buy, floor);
+  const alch = alchBonus(distance);
+  const update = updateRiskFactor(o.now, totalSeconds);
+
+  const rawProfit = o.margin * o.qty;
+  const expected = rawProfit * pBoth * adverse * hold * stale * reversion * alch * update;
+  const hours = totalSeconds / SECONDS_PER_HOUR;
+  const perSlotHour = hours > 0 && isFinite(hours) ? expected / hours : 0;
+
+  return {
+    qty: o.qty, margin: o.margin, rawProfit, capitalNeeded: o.qty * o.buy,
+    share, buySeconds, sellSeconds, totalSeconds, pFillBuy: pBuy,
+    pFillSell: pSell, pFill: pBoth,
+    factors: {
+      "both legs fill": pBoth, "adverse selection": adverse,
+      "holding risk": hold, "quote staleness": stale,
+      "mean reversion": reversion, "alch floor": alch, "update risk": update,
+    },
+    expected, perSlotHour,
+    alchFloorGp: floor, alchDistance: distance,
+    alchArbitrageGp: distance != null && distance <= 0 && floor != null
+      ? floor - o.buy : null,
+  };
+}
+
+/* ---- shrinkage: the biggest single correction ----
+
+   Ranking noisy estimates does not surface the best items, it surfaces the
+   items whose estimation error happened to be largest and positive. With
+   hundreds of candidates each resting on a handful of trades, that bias is
+   most of what the top of an uncorrected list is made of, and it is worst
+   exactly where the data is thinnest.
+
+   Normal-normal posterior on the log scale. The centre is the UNWEIGHTED mean
+   deliberately: weighting by precision hands almost all the weight to the few
+   busiest items in the game, which then defines "average" for everything else
+   and shrinks thin items UPWARD toward it. */
+function empiricalBayes(estimates, noiseVariances) {
+  const n = estimates.length;
+  if (!n) return { values: [], centre: 0, tau2: 0, weights: [] };
+  const safe = noiseVariances.map((v) => Math.max(v, 1e-12));
+  const centre = estimates.reduce((a, b) => a + b, 0) / n;
+  if (n < 3) return { values: [...estimates], centre, tau2: Infinity, weights: estimates.map(() => 1) };
+
+  const observed = estimates.reduce((s, e) => s + (e - centre) ** 2, 0) / (n - 1);
+  const meanNoise = safe.reduce((a, b) => a + b, 0) / n;
+  // Observed spread is true spread plus average noise. Negative means the
+  // differences are smaller than noise alone would produce: nothing to tell
+  // apart, so everything collapses to the mean.
+  const tau2 = Math.max(0, observed - meanNoise);
+
+  const values = [], weights = [];
+  for (let i = 0; i < n; i++) {
+    const w = tau2 > 0 ? tau2 / (tau2 + safe[i]) : 0;
+    values.push(w * estimates[i] + (1 - w) * centre);
+    weights.push(w);
+  }
+  return { values, centre, tau2, weights };
+}
+
+/* Volume is the sample size behind each estimate: an item quoted off 40,000
+   traded units is measured, one quoted off twelve is a rumour. */
+function shrinkScores(rows) {
+  const scored = rows.filter((r) => r.rawPerSlotHour > 0);
+  if (!scored.length) return { applied: false, tau2: 0, centreGp: 0 };
+  const logs = scored.map((r) => Math.log(r.rawPerSlotHour));
+  const variances = scored.map((r) => {
+    const count = Math.max(1, r.volume);
+    const sampling = CAL.score_noise_scale / Math.sqrt(count);
+    return Math.max(sampling * sampling + CAL.score_noise_floor ** 2, 1e-9);
+  });
+  const fit = empiricalBayes(logs, variances);
+  scored.forEach((row, i) => {
+    row.perSlotHour = Math.exp(fit.values[i]);
+    const kept = row.perSlotHour / row.rawPerSlotHour;
+    if (kept < 0.85) {
+      row.warnings = [...row.warnings,
+        `score cut ${Math.round((1 - kept) * 100)}% by shrinkage — it rests on ` +
+        `${num(row.volume)} units/h of volume, too little to take at face value`];
+    }
+  });
+  for (const row of rows) if (row.rawPerSlotHour <= 0) row.perSlotHour = row.rawPerSlotHour;
+  return { applied: true, tau2: fit.tau2, centreGp: Math.exp(fit.centre) };
+}
+
+/* ---- capital allocation ----
+   An equal split strands capital: a 10 gp item with a 10,000 buy limit can
+   absorb 100k and no more, so a third of a 3m bank sits idle while the 50k
+   item that could have used it is capped. */
+function allocateCapital(rows, capital, slots) {
+  const ranked = rows.slice(0, Math.max(1, slots));
+  const total = ranked.reduce((s, r) => s + Math.max(0, r.perSlotHour), 0);
+  if (total <= 0) { ranked.forEach((r) => { r.allocated = 0; }); return; }
+  ranked.forEach((r) => {
+    r.allocated = r.perSlotHour > 0 ? Math.floor(capital * (r.perSlotHour / total)) : 0;
+  });
+  for (let pass = 0; pass < 3; pass++) {
+    let spare = 0;
+    for (const r of ranked) {
+      if (r.allocated > r.capitalNeeded) { spare += r.allocated - r.capitalNeeded; r.allocated = r.capitalNeeded; }
+    }
+    if (spare <= 0) break;
+    const hungry = ranked.filter((r) => r.perSlotHour > 0 && r.capitalNeeded > r.allocated);
+    if (!hungry.length) break;
+    const weight = hungry.reduce((s, r) => s + r.perSlotHour, 0);
+    if (weight <= 0) break;
+    for (const r of hungry) r.allocated += Math.floor(spare * (r.perSlotHour / weight));
+  }
+}
+
+/* ---- formatting ---- */
 
 /* Parse gp the way players write it: '250k', '1.5m', '2b', '1,000,000'. */
 function parseGp(text) {
@@ -731,14 +1014,164 @@ function parseGp(text) {
 
 function formatGp(amount) {
   for (const [suffix, size] of [["b", 1e9], ["m", 1e6], ["k", 1e3]]) {
-    if (amount >= size) {
+    if (Math.abs(amount) >= size) {
       return (amount / size).toFixed(1).replace(/\.0$/, "") + suffix;
     }
   }
   return amount.toLocaleString("en-US");
 }
 
+function formatDuration(seconds) {
+  if (!isFinite(seconds)) return "never";
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 48 * SECONDS_PER_HOUR) {
+    return `${(seconds / SECONDS_PER_HOUR).toFixed(1).replace(/\.0$/, "")}h`;
+  }
+  return `${Math.round(seconds / (24 * SECONDS_PER_HOUR))}d`;
+}
+
 const num = (n) => n.toLocaleString("en-US");
+
+const pctOf = (x) => `${Math.round(Math.abs(x) * 100)}%`;
+
+function median(values) {
+  if (!values.length) return null;
+  const ordered = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(ordered.length / 2);
+  return ordered.length % 2 === 1 ? ordered[mid]
+    : (ordered[mid - 1] + ordered[mid]) / 2;
+}
+
+/* ==================== multi-day history ====================
+   The last print is not the market: a few hundred salmon sold at 30 gp in the
+   last minutes looks like a buy at 30, but if two weeks of seller volume went
+   at 40, a large offer at 30 fills only against that one dumper. */
+
+const HISTORY_TIMESTEP = "6h";
+const HISTORY_BUCKET_DAYS = 6 / HOURS_PER_DAY;
+const HISTORY_WINDOW_BUCKETS = 56;   // 14 days of 6h buckets
+const MIN_HISTORY_BUCKETS = 8;       // fewer traded buckets: refuse to judge
+const RECENT_TREND_BUCKETS = 12;     // ~3 days
+const FILL_TOLERANCE = 0.01;         // prices within 1% count as reachable
+
+function weightedAvg(pairs) {
+  const total = pairs.reduce((s, [, v]) => s + v, 0);
+  if (total <= 0) return null;
+  return pairs.reduce((s, [p, v]) => s + p * v, 0) / total;
+}
+
+function bucketVwap(points) {
+  const pairs = [];
+  for (const p of points) {
+    const hv = p.highPriceVolume || 0, lv = p.lowPriceVolume || 0;
+    const value = (p.avgHighPrice || 0) * hv + (p.avgLowPrice || 0) * lv;
+    const vol = (p.avgHighPrice != null ? hv : 0) +
+                (p.avgLowPrice != null ? lv : 0);
+    if (vol > 0) pairs.push([value / vol, vol]);
+  }
+  return weightedAvg(pairs);
+}
+
+/* Mirrors engine.history_view — keep them in step. */
+function historyView(rawPoints, buy, sell) {
+  const points = rawPoints.slice(-HISTORY_WINDOW_BUCKETS)
+    .filter((p) => p && typeof p === "object");
+  let buckets = 0;
+  const lows = [], highs = [], lowRatios = [], highRatios = [], mids = [];
+  for (const p of points) {
+    const hv = p.highPriceVolume || 0, lv = p.lowPriceVolume || 0;
+    if (hv > 0 || lv > 0) buckets++;
+    if (p.avgLowPrice != null && lv > 0) lows.push([p.avgLowPrice, lv]);
+    if (p.avgHighPrice != null && hv > 0) highs.push([p.avgHighPrice, hv]);
+    const value = (p.avgHighPrice || 0) * hv + (p.avgLowPrice || 0) * lv;
+    const vol = (p.avgHighPrice != null ? hv : 0) +
+                (p.avgLowPrice != null ? lv : 0);
+    if (vol <= 0) continue;
+    const bucketMidPrice = value / vol;
+    mids.push(bucketMidPrice);
+    if (p.avgLowPrice != null && lv > 0) lowRatios.push([p.avgLowPrice / bucketMidPrice, lv]);
+    if (p.avgHighPrice != null && hv > 0) highRatios.push([p.avgHighPrice / bucketMidPrice, hv]);
+  }
+  if (buckets < MIN_HISTORY_BUCKETS) return null;
+
+  const baselineLow = weightedAvg(lows);
+
+  // Detrended fill shares: a seller's aggressiveness is their price relative
+  // to the market at that moment. A dump stays visible whenever it happened;
+  // an item marching upward is not punished for trading above last week.
+  const midNow = (buy + sell) / 2;
+  const buyRatio = (buy / midNow) * (1 + FILL_TOLERANCE);
+  const sellRatio = (sell / midNow) * (1 - FILL_TOLERANCE);
+  const lowTotal = lowRatios.reduce((s, [, v]) => s + v, 0);
+  const highTotal = highRatios.reduce((s, [, v]) => s + v, 0);
+  const buyFillShare = lowTotal > 0
+    ? lowRatios.reduce((s, [r, v]) => s + (r <= buyRatio ? v : 0), 0) / lowTotal : 0;
+  const sellFillShare = highTotal > 0
+    ? highRatios.reduce((s, [r, v]) => s + (r >= sellRatio ? v : 0), 0) / highTotal : 0;
+
+  const recent = bucketVwap(points.slice(-RECENT_TREND_BUCKETS));
+  const prior = bucketVwap(points.slice(0, -RECENT_TREND_BUCKETS));
+  const trend = (recent != null && prior != null && prior > 0)
+    ? (recent - prior) / prior : 0;
+  const dislocation = (baselineLow != null && baselineLow > 0)
+    ? (buy - baselineLow) / baselineLow : 0;
+
+  const medianMid = median(mids);
+  const elevation = (medianMid != null && medianMid > 0)
+    ? (midNow - medianMid) / medianMid : 0;
+  let volatility = 0;
+  if (medianMid != null && medianMid > 0) {
+    const deviation = median(mids.map((m) => Math.abs(m - medianMid)));
+    volatility = deviation != null ? deviation / medianMid : 0;
+  }
+
+  return {
+    buckets,
+    baselineLow: baselineLow != null ? Math.round(baselineLow) : null,
+    buyFillShare, sellFillShare,
+    fillShare: Math.min(buyFillShare, sellFillShare),
+    trend, dislocation,
+    medianMid: medianMid != null ? Math.round(medianMid) : null,
+    elevation, volatility,
+    ou: fitOU(mids, HISTORY_BUCKET_DAYS),
+    regimeScore: regimeShift(mids),
+  };
+}
+
+function historyWarnings(view) {
+  const notes = [];
+  const reverting = view.ou && view.ou.meanReverting;
+  if (view.regimeScore >= CAL.regime_shift_threshold) {
+    notes.push("price level shifted mid-history — likely an update re-pricing it; mean reversion is not modelled through it");
+  }
+  if (view.elevation >= 0.05 && reverting) {
+    notes.push(`trading ${pctOf(view.elevation)} above its own long-run level — expect reversion against you`);
+  } else if (view.elevation >= 0.05) {
+    notes.push(`trading ${pctOf(view.elevation)} above its 14-day median, and it does not mean-revert — no reason to expect it back`);
+  }
+  if (view.volatility >= 0.05) {
+    notes.push(`price swings ±${pctOf(view.volatility)} around its 14-day median — risky to hold`);
+  }
+  if (view.dislocation <= -0.10) {
+    notes.push(`buy price ${pctOf(view.dislocation)} below the 14-day average — only the dump fills there`);
+  }
+  if (view.fillShare <= 0.25) {
+    notes.push(`only ${pctOf(view.fillShare)} of 14-day volume traded at your prices`);
+  }
+  if (view.trend >= 0.03) {
+    notes.push(`risen ${pctOf(view.trend)} over recent days — don't chase, wait for it to settle`);
+  } else if (view.trend <= -0.03) {
+    notes.push(`falling ${pctOf(view.trend)} over recent days`);
+  }
+  if (reverting && view.ou.halfLifeDays > 7) {
+    notes.push(`mean-reverts, but with a ${Math.round(view.ou.halfLifeDays)}-day half-life — too slow to trade around`);
+  }
+  return notes;
+}
+
+const capitalPerSlot = (capital, slots) =>
+  Math.max(1, Math.floor(capital / Math.max(1, slots)));
 
 /* ==================== api client ====================
    The wiki's acceptable-use policy asks for a descriptive User-Agent, but
@@ -750,7 +1183,8 @@ const BASE = "https://prices.runescape.wiki/api/v1/osrs";
 const LATEST_TTL = 30_000;
 const INTERVAL_TTL = { "5m": 60_000, "1h": 300_000 };
 const MAPPING_TTL = 24 * 3600 * 1000;
-const MAPPING_KEY = "osrs-flipper.mapping.v1";
+// v2: the cached shape gained highalch, so old entries must not be reused.
+const MAPPING_KEY = "osrs-flipper.mapping.v2";
 
 const memo = new Map();
 
@@ -785,7 +1219,8 @@ const fetchInterval = (step) => cached(step, INTERVAL_TTL[step], async () => {
 });
 
 /* Only the fields the ranking needs are kept, so the cache fits comfortably
-   in localStorage (the full /mapping payload is several MB). */
+   in localStorage (the full /mapping payload is several MB). highalch is one
+   of them now: it is the floor under the sell leg. */
 async function fetchMapping() {
   try {
     const raw = localStorage.getItem(MAPPING_KEY);
@@ -804,6 +1239,8 @@ async function fetchMapping() {
       name: row.name,
       members: Boolean(row.members),
       limit: typeof row.limit === "number" ? row.limit : null,
+      highalch: typeof row.highalch === "number" ? row.highalch : null,
+      exempt: EXEMPT_IDS.has(row.id) || EXEMPT_NAMES.has(row.name.trim().toLowerCase()),
     };
   }
   try {
@@ -812,7 +1249,7 @@ async function fetchMapping() {
   return items;
 }
 
-/* Per-item route: used for the detail chart and the top-K refinement only,
+/* Per-item route: used for the detail chart and the shortlist refinement only,
    never swept across all items. localStorage keeps series across visits so a
    re-ranking does not refetch what the 6h buckets cannot have changed. */
 const TIMESERIES_TTL = 1_800_000;
@@ -838,12 +1275,156 @@ const fetchTimeseries = (id, step) =>
     return payload.data;
   });
 
-/* Re-score the top candidates against 14 days of history, a few at a time. */
+/* ==================== the pipeline ====================
+
+   Structural gates reject; everything else is scored. The old page rejected on
+   ROI, quote age, volume and undercut room before anything deeper could speak
+   for an item — a filter that only subtracts cannot find edge, it can only
+   shorten the list. Those are now scoring inputs, and the sidebar filters hide
+   rows AFTER scoring and shrinkage, so narrowing the view never reorders what
+   is left. */
+
 const DEEP_TOP_K = 15;
+const DEEP_BREADTH = 3;      // fetch 3x what is shown, so history can promote
 const DEEP_CONCURRENCY = 4;
 
-async function refineTopRows(rows) {
-  const targets = rows.slice(0, DEEP_TOP_K);
+/* Midpoint of a bucket, or whichever side traded if only one did. */
+function bucketMid(activity) {
+  if (!activity) return null;
+  const { avgHighPrice: high, avgLowPrice: low } = activity;
+  if (high != null && low != null) return (high + low) / 2;
+  return high != null ? high : (low ?? null);
+}
+
+/* Plain-language reasons this flip might not pay what it quotes. */
+function flipWarnings(row, breakdown, affordable, exempt) {
+  const notes = [];
+  if (breakdown.alchArbitrageGp != null && breakdown.alchArbitrageGp > 0) {
+    // Not free money: alching is capped at roughly 1,200 casts an hour and
+    // needs 55 Magic. It caps the downside rather than replacing the sell leg.
+    notes.push(`trading below its high-alch value: alching nets ${num(breakdown.alchArbitrageGp)} gp per item, about ${formatGp(breakdown.alchArbitrageGp * 1200)} gp/h at ~1,200 casts. Caps the downside on the sell leg rather than replacing it.`);
+  }
+  if (row.depth === 0) {
+    notes.push("no room to outbid the queue — you wait your turn, and the fill estimate assumes you are one of several offers");
+  } else if (row.depth <= 2) {
+    notes.push(`only ${row.depth} gp of undercut room`);
+  }
+  if (!isFinite(breakdown.totalSeconds)) {
+    notes.push("no realistic fill on one side — the book is one-sided");
+  } else if (breakdown.totalSeconds > 8 * SECONDS_PER_HOUR) {
+    notes.push(`expected round trip ${formatDuration(breakdown.totalSeconds)} — the slot is the cost, not the gp`);
+  }
+  if (breakdown.pFill < 0.25) {
+    notes.push(`only ${pctOf(breakdown.pFill)} chance both legs clear inside 4h`);
+  }
+  if (row.drift <= -0.02) {
+    notes.push(`price falling ${(Math.abs(row.drift) * 100).toFixed(1)}% — your buy fills, your sell may not`);
+  } else if (row.drift >= 0.02) {
+    notes.push(`price rising ${(row.drift * 100).toFixed(1)}% — your buy may not fill`);
+  }
+  if (row.ofi <= -0.3) {
+    notes.push(`sellers are ${pctOf(row.ofi)} of aggressor volume — you would be catching what they are dumping`);
+  }
+  if (row.qty && affordable <= row.qty) {
+    notes.push("capital-bound, not limit-bound — a bigger slot buys more");
+  }
+  if (row.limit == null) notes.push("no published buy limit");
+  if (row.listAt < row.sell) {
+    notes.push(`list the sell at ${num(row.listAt)}, not ${num(row.sell)} — identical net revenue after tax, better queue position`);
+  }
+  return notes;
+}
+
+function screen(items, quotes, act5m, act1h, config, now) {
+  const rows = [];
+  const funnel = {
+    "in /latest": 0, "no mapping entry": 0, "members-only": 0,
+    "null price side": 0, "nothing traded": 0, "margin not positive": 0,
+    "cannot afford one": 0, "scored": 0,
+  };
+  // Affordability uses the equal split for sizing; allocateCapital reports the
+  // score-weighted split that should actually be deployed.
+  const perSlot = capitalPerSlot(config.capital, config.slots);
+
+  for (const [rawId, quote] of Object.entries(quotes)) {
+    funnel["in /latest"]++;
+    const id = Number(rawId);
+    const item = items[id];
+    if (!item) { funnel["no mapping entry"]++; continue; }
+    if (item.members && !config.includeMembers) { funnel["members-only"]++; continue; }
+
+    const { high, low, highTime, lowTime } = quote || {};
+    if (high == null || low == null || highTime == null || lowTime == null || low <= 0) {
+      funnel["null price side"]++; continue;
+    }
+    const age = Math.max(0, Math.round(now - Math.min(highTime, lowTime)));
+
+    const a1h = act1h[id];
+    const highVol1h = a1h?.highPriceVolume ?? 0;
+    const lowVol1h = a1h?.lowPriceVolume ?? 0;
+    // A flip needs both sides of the book. One-sided volume means there is no
+    // round trip to make, whatever the quoted spread says.
+    if (highVol1h <= 0 || lowVol1h <= 0) { funnel["nothing traded"]++; continue; }
+    const thinVolume = Math.min(highVol1h, lowVol1h);
+
+    const a5m = act5m[id];
+    const refLow = referencePrice(
+      a5m?.avgLowPrice ?? null, a5m?.lowPriceVolume ?? 0,
+      a1h?.avgLowPrice ?? null, lowVol1h);
+    const refHigh = referencePrice(
+      a5m?.avgHighPrice ?? null, a5m?.highPriceVolume ?? 0,
+      a1h?.avgHighPrice ?? null, highVol1h);
+    const [buy, sell] = executablePrices(low, high, refLow, refHigh);
+
+    const exempt = Boolean(item.exempt);
+    const margin = netMargin(buy, sell, exempt);
+    if (margin <= 0) { funnel["margin not positive"]++; continue; }
+
+    const affordable = Math.floor(perSlot / buy);
+    if (affordable === 0) { funnel["cannot afford one"]++; continue; }
+
+    const depth = undercutDepth(buy, sell, exempt);
+    const share = aggressiveness(priceEdge(depth, sell - buy));
+    const qty = Math.max(1, flippableQty(
+      item.limit, fillableQuantity(thinVolume, share, legHorizonHours()), affordable));
+
+    const drift = priceDrift(bucketMid(a5m), bucketMid(a1h));
+    const ofi = orderFlowImbalance(highVol1h, lowVol1h);
+    const breakdown = scoreFlip({
+      buy, sell, margin, qty, depth, buyVolume1h: lowVol1h,
+      sellVolume1h: highVol1h, quoteAge: age, ofi, drift, now,
+      highalch: item.highalch, natureCost: config.natureCost,
+    });
+
+    funnel["scored"]++;
+    const row = {
+      id, name: item.name, buy, sell, latestLow: low, latestHigh: high,
+      listAt: taxBoundaryUndercut(sell, exempt),
+      tax: geTax(sell, exempt), exempt, margin, roi: roi(buy, sell, exempt),
+      limit: item.limit, volume: thinVolume, qty, drift, ofi, age, depth,
+      capitalNeeded: breakdown.capitalNeeded, gross: breakdown.rawProfit,
+      buySeconds: breakdown.buySeconds, sellSeconds: breakdown.sellSeconds,
+      totalSeconds: breakdown.totalSeconds, pFill: breakdown.pFill,
+      factors: breakdown.factors, expected: breakdown.expected,
+      rawPerSlotHour: breakdown.perSlotHour, perSlotHour: breakdown.perSlotHour,
+      alchFloorGp: breakdown.alchFloorGp, alchDistance: breakdown.alchDistance,
+      alchArbitrageGp: breakdown.alchArbitrageGp,
+      deep: false, warnings: [],
+    };
+    row.warnings = flipWarnings(row, breakdown, affordable, exempt);
+    rows.push(row);
+  }
+  const shrinkage = shrinkScores(rows);
+  rows.sort((a, b) => b.perSlotHour - a.perSlotHour);
+  return { rows, funnel, shrinkage };
+}
+
+/* Re-score the leading candidates against 14 days of history. Unlike the old
+   page this recomputes the score rather than multiplying it by further sub-1.0
+   factors: history replaces estimates instead of only penalising them, so an
+   item trading below its long-run level can move UP. */
+async function refineTopRows(rows, config, now) {
+  const targets = rows.slice(0, DEEP_TOP_K * DEEP_BREADTH);
   let cursor = 0;
   const workers = Array.from({ length: DEEP_CONCURRENCY }, async () => {
     while (cursor < targets.length) {
@@ -858,138 +1439,88 @@ async function refineTopRows(rows) {
           "no usable 14-day history — ranked on intraday data only"];
         continue;
       }
+      // The share of multi-day volume that traded at your prices is evidence
+      // about the RATE your offer fills at, not a separate penalty on profit.
+      // A price only 5% of the market ever reached is not a flip earning 5% of
+      // its margin — it is a flip that takes twenty times as long.
+      const reachableBuy = Math.max(0, row.volume * Math.max(view.buyFillShare, 0.01));
+      const reachableSell = Math.max(0, row.volume * Math.max(view.sellFillShare, 0.01));
+      const share = aggressiveness(priceEdge(row.depth, row.sell - row.buy));
+      const qty = Math.max(1, flippableQty(
+        row.limit,
+        fillableQuantity(Math.min(reachableBuy, reachableSell), share, legHorizonHours()),
+        Math.floor(row.capitalNeeded / row.buy)));
+
+      const breakdown = scoreFlip({
+        buy: row.buy, sell: row.sell, margin: row.margin, qty, depth: row.depth,
+        buyVolume1h: reachableBuy, sellVolume1h: reachableSell,
+        quoteAge: row.age, ofi: row.ofi, drift: row.drift, now,
+        sigmaDaily: view.ou ? view.ou.sigma : null, ou: view.ou,
+        regimeScore: view.regimeScore,
+        highalch: row.alchFloorGp != null ? row.alchFloorGp + config.natureCost : null,
+        natureCost: config.natureCost,
+      });
+
       row.deep = true;
-      row.fillShare = Math.min(view.buyFillShare, view.sellFillShare);
-      row.fillFactor = view.fillFactor;
+      row.qty = qty;
+      row.capitalNeeded = breakdown.capitalNeeded;
+      row.gross = breakdown.rawProfit;
+      row.buySeconds = breakdown.buySeconds;
+      row.sellSeconds = breakdown.sellSeconds;
+      row.totalSeconds = breakdown.totalSeconds;
+      row.pFill = breakdown.pFill;
+      row.factors = breakdown.factors;
+      row.expected = breakdown.expected;
+      row.rawPerSlotHour = breakdown.perSlotHour;
+      row.perSlotHour = breakdown.perSlotHour;
+      row.alchArbitrageGp = breakdown.alchArbitrageGp;
+      row.fillShare = view.fillShare;
       row.trend = view.trend;
-      row.momentum = view.momentum;
       row.baselineLow = view.baselineLow;
       row.medianMid = view.medianMid;
       row.elevation = view.elevation;
       row.volatility = view.volatility;
-      row.levelFactor = view.level;
-      row.stabilityFactor = view.stability;
-      row.expected = row.expected * view.fillFactor * view.momentum
-        * view.level * view.stability;
-      row.perSlotHour = gpPerSlotHour(row.expected);
+      row.meanReverting = Boolean(view.ou && view.ou.meanReverting);
+      row.halfLifeHours = view.ou && view.ou.halfLifeDays != null
+        ? view.ou.halfLifeDays * HOURS_PER_DAY : null;
+      row.ouLevel = view.ou ? Math.round(view.ou.levelGp) : null;
+      row.regimeScore = view.regimeScore;
       row.warnings = [...row.warnings, ...historyWarnings(view)];
     }
   });
   await Promise.all(workers);
+  const shrinkage = shrinkScores(rows);
   rows.sort((a, b) => b.perSlotHour - a.perSlotHour);
-  return targets.filter((r) => r.deep).length;
+  return { refined: targets.filter((r) => r.deep).length, shrinkage };
 }
 
-/* ==================== ranking ==================== */
-
-/* Midpoint of a bucket, or whichever side traded if only one did. */
-function bucketMid(activity) {
-  if (!activity) return null;
-  const { avgHighPrice: high, avgLowPrice: low } = activity;
-  if (high != null && low != null) return (high + low) / 2;
-  return high != null ? high : (low ?? null);
-}
-
-/* Plain-language reasons this flip might not pay what it quotes. */
-function flipWarnings(depth, drift, affordable, qty, limit) {
-  const notes = [];
-  if (depth === 0) notes.push("no room to outbid the queue — you wait your turn");
-  else if (depth <= 2) notes.push(`only ${depth} gp of undercut room`);
-  if (drift <= -0.02) {
-    notes.push(`price falling ${(Math.abs(drift) * 100).toFixed(1)}% — your buy fills, your sell may not`);
-  } else if (drift >= 0.02) {
-    notes.push(`price rising ${(drift * 100).toFixed(1)}% — your buy may not fill`);
-  }
-  if (qty && affordable <= qty) {
-    notes.push("capital-bound, not limit-bound — a bigger slot buys more");
-  }
-  if (limit == null) notes.push("no published buy limit");
-  return notes;
-}
-
-function rankFlips(items, quotes, act5m, act1h, config, now) {
-  const rows = [];
-  const funnel = {
-    "in /latest": 0, "no mapping entry": 0, "members-only": 0,
-    "null price side": 0, "quote too old": 0, "volume too thin": 0,
-    "price out of range": 0, "pays tax": 0, "roi too low": 0,
-    "no undercut room": 0, "cannot afford one": 0, "passed": 0,
+/* Hide rows the user asked not to see. Never reorders what remains. */
+function applyPreferences(rows, config) {
+  const hidden = {
+    "quote too old": 0, "volume too thin": 0, "price out of range": 0,
+    "pays tax": 0, "roi too low": 0, "no undercut room": 0,
   };
-  const perSlot = capitalPerSlot(config.capital, config.slots);
-
-  for (const [rawId, quote] of Object.entries(quotes)) {
-    funnel["in /latest"]++;
-    const id = Number(rawId);
-    const item = items[id];
-    if (!item) { funnel["no mapping entry"]++; continue; }
-    if (item.members && !config.includeMembers) { funnel["members-only"]++; continue; }
-
-    const { high, low, highTime, lowTime } = quote || {};
-    if (high == null || low == null || highTime == null || lowTime == null || low <= 0) {
-      funnel["null price side"]++; continue;
+  const kept = [];
+  for (const row of rows) {
+    if (config.maxQuoteAge != null && row.age > config.maxQuoteAge) { hidden["quote too old"]++; continue; }
+    if (row.volume < config.minVolume1h) { hidden["volume too thin"]++; continue; }
+    if (row.buy < config.minPrice || (config.maxPrice != null && row.buy > config.maxPrice)) {
+      hidden["price out of range"]++; continue;
     }
-    const age = Math.round(now - Math.min(highTime, lowTime));
-    if (age > config.maxQuoteAge) { funnel["quote too old"]++; continue; }
-
-    const a1h = act1h[id];
-    const highVol1h = a1h?.highPriceVolume ?? 0;
-    const lowVol1h = a1h?.lowPriceVolume ?? 0;
-    const thinVolume = Math.min(highVol1h, lowVol1h);
-    if (thinVolume < config.minVolume1h) { funnel["volume too thin"]++; continue; }
-
-    const a5m = act5m[id];
-    const refLow = referencePrice(
-      a5m?.avgLowPrice ?? null, a5m?.lowPriceVolume ?? 0,
-      a1h?.avgLowPrice ?? null, lowVol1h);
-    const refHigh = referencePrice(
-      a5m?.avgHighPrice ?? null, a5m?.highPriceVolume ?? 0,
-      a1h?.avgHighPrice ?? null, highVol1h);
-    const [buy, sell] = executablePrices(low, high, refLow, refHigh);
-
-    if (buy < config.minPrice ||
-        (config.maxPrice != null && buy > config.maxPrice)) {
-      funnel["price out of range"]++; continue;
-    }
-    const exempt = TAX_EXEMPT_IDS.has(id);
-    if (config.taxFreeOnly && geTax(sell, exempt) > 0) {
-      funnel["pays tax"]++; continue;
-    }
-    const itemRoi = roi(buy, sell, exempt);
-    if (itemRoi < config.minRoi) { funnel["roi too low"]++; continue; }
-
-    const depth = undercutDepth(buy, sell, exempt);
-    if (depth < config.minUndercutDepth) { funnel["no undercut room"]++; continue; }
-
-    const affordable = Math.floor(perSlot / buy);
-    if (affordable === 0) { funnel["cannot afford one"]++; continue; }
-
-    const margin = netMargin(buy, sell, exempt);
-    const qty = flippableQty(
-      item.limit,
-      windowVolume(highVol1h, lowVol1h, HOUR_BUCKETS_PER_WINDOW),
-      affordable);
-    const gross = margin * qty;
-    const drift = priceDrift(bucketMid(a5m), bucketMid(a1h));
-    const expected = expectedValue(margin, qty, depth, drift, age);
-
-    funnel["passed"]++;
-    rows.push({
-      id, name: item.name, buy, sell, latestLow: low, latestHigh: high,
-      tax: geTax(sell, exempt), margin, roi: itemRoi, limit: item.limit,
-      volume: thinVolume, qty, capitalNeeded: qty * buy, gross, depth, drift,
-      age, expected, perSlotHour: gpPerSlotHour(expected),
-      warnings: flipWarnings(depth, drift, affordable, qty, item.limit),
-    });
+    if (config.taxFreeOnly && row.tax > 0) { hidden["pays tax"]++; continue; }
+    if (row.roi < config.minRoi) { hidden["roi too low"]++; continue; }
+    if (row.depth < config.minUndercutDepth) { hidden["no undercut room"]++; continue; }
+    kept.push(row);
   }
-  rows.sort((a, b) => b.perSlotHour - a.perSlotHour);
-  return { rows, funnel };
+  return { kept, hidden };
 }
 
 /* ==================== state & rendering ==================== */
 
 const state = {
   capital: null,
-  rows: [],
+  rows: [],          // what is shown, after the display filters
+  natureCost: NATURE_RUNE_FALLBACK,
   sortKey: "perSlotHour",
   sortDesc: true,
   selected: null,
@@ -1006,11 +1537,15 @@ function parsePriceInput(sel) {
 }
 
 function readConfig() {
+  const age = Number($("#f-age").value);
   return {
     capital: state.capital,
     slots: Number($("#f-slots").value),
     includeMembers: $("#f-members").checked,
-    maxQuoteAge: Number($("#f-age").value),
+    natureCost: state.natureCost,
+    // Display filters. All default to off: these are preferences, not
+    // correctness gates, and they are applied after scoring and shrinkage.
+    maxQuoteAge: age > 0 ? age : null,
     minVolume1h: Number($("#f-vol").value),
     minRoi: Number($("#f-roi").value) / 1000,   // slider is tenths of a percent
     minUndercutDepth: Number($("#f-depth").value),
@@ -1021,14 +1556,17 @@ function readConfig() {
 }
 
 function syncFilterLabels() {
-  $("#f-age-v").textContent = $("#f-age").value + " s";
-  $("#f-vol-v").textContent = num(Number($("#f-vol").value));
-  $("#f-roi-v").textContent = (Number($("#f-roi").value) / 10).toFixed(1) + " %";
+  const age = Number($("#f-age").value);
+  $("#f-age-v").textContent = age === 0 ? "off" : age + " s";
+  const vol = Number($("#f-vol").value);
+  $("#f-vol-v").textContent = vol === 0 ? "off" : num(vol);
+  const roi = Number($("#f-roi").value);
+  $("#f-roi-v").textContent = roi === 0 ? "off" : (roi / 10).toFixed(1) + " %";
   const depth = Number($("#f-depth").value);
   $("#f-depth-v").textContent = depth === 0 ? "off" : depth + " gp";
   const slots = Number($("#f-slots").value);
   $("#per-slot").textContent = state.capital == null ? "—"
-    : formatGp(capitalPerSlot(state.capital, slots)) + " gp per flip";
+    : formatGp(capitalPerSlot(state.capital, slots)) + " gp per flip if split evenly";
 }
 
 async function loadAndRender() {
@@ -1040,31 +1578,57 @@ async function loadAndRender() {
     const [items, quotes, act5m, act1h] = await Promise.all([
       fetchMapping(), fetchLatest(), fetchInterval("5m"), fetchInterval("1h"),
     ]);
-    const { rows, funnel } = rankFlips(
-      items, quotes, act5m, act1h, readConfig(), Date.now() / 1000);
+    // The nature rune is the cost side of the high-alchemy floor, so it is
+    // read live rather than hardcoded.
+    const rune = quotes[NATURE_RUNE_ID];
+    state.natureCost = rune && rune.high > 0 ? rune.high : NATURE_RUNE_FALLBACK;
+
+    const config = readConfig();
+    const now = Date.now() / 1000;
+    const { rows, funnel } = screen(items, quotes, act5m, act1h, config, now);
     if (gen !== state.gen) return;          // a newer run superseded this one
-    state.rows = rows;
+
     const funnelText = Object.entries(funnel)
       .filter(([, v]) => v > 0)
       .map(([k, v]) => `${num(v)} ${k}`)
       .join("  →  ");
-    status.textContent = funnelText + "  ·  checking the top " +
-      Math.min(DEEP_TOP_K, rows.length) + " against 14-day history…";
-    renderTable();
-    const refined = await refineTopRows(rows);
+    show(rows, config, funnelText + "  ·  checking the top " +
+      Math.min(DEEP_TOP_K * DEEP_BREADTH, rows.length) +
+      " against 14-day history…");
+
+    const { refined, shrinkage } = await refineTopRows(rows, config, now);
     if (gen !== state.gen) return;
-    status.textContent = funnelText +
-      `  →  ${refined} deep-checked vs 14-day history`;
-    renderTable();
-    if (state.selected != null) {
-      const row = state.rows.find((r) => r.id === state.selected);
-      if (row) showDetail(row.id);
+    let tail = `  →  ${refined} deep-checked vs 14-day history`;
+    if (shrinkage.applied && shrinkage.tau2 <= 0) {
+      tail += "  ·  every difference between today's scores is inside " +
+        "estimation noise — this ranking is not meaningful";
+    } else if (shrinkage.applied) {
+      tail += `  ·  scores shrunk toward the market average of ` +
+        `${formatGp(Math.round(shrinkage.centreGp))} gp/slot/h`;
     }
+    show(rows, config, funnelText + tail);
   } catch (err) {
     if (gen !== state.gen) return;
     status.className = "small err";
     status.textContent = "Could not load prices: " + err.message +
       ". The wiki API may be busy — try Refresh in a moment.";
+  }
+}
+
+/* Apply the display filters, allocate capital across the slots, render. */
+function show(allRows, config, statusText) {
+  const { kept, hidden } = applyPreferences(allRows, config);
+  allocateCapital(kept, config.capital, config.slots);
+  state.rows = kept;
+  const hiddenText = Object.entries(hidden).filter(([, v]) => v > 0)
+    .map(([k, v]) => `${num(v)} ${k}`).join(", ");
+  $("#status").className = "small dim";
+  $("#status").textContent = statusText +
+    (hiddenText ? `  ·  hidden by your filters: ${hiddenText}` : "");
+  renderTable();
+  if (state.selected != null) {
+    const row = state.rows.find((r) => r.id === state.selected);
+    if (row) showDetail(row.id);
   }
 }
 
@@ -1074,19 +1638,22 @@ function sortedRows() {
   return [...state.rows].sort((a, b) => {
     const x = a[key], y = b[key];
     if (typeof x === "string") return x.localeCompare(y) * dir;
-    // null buy limits sort last regardless of direction
+    // nulls (no buy limit, not deep-checked) sort last regardless of direction
     if (x == null) return 1;
     if (y == null) return -1;
     return (x - y) * dir;
   });
 }
 
+const TABLE_COLUMNS = 14;
+
 function renderTable() {
   const body = $("#flips tbody");
   const rows = sortedRows().slice(0, 100);
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="15" style="text-align:center;padding:2rem">
-      No flips pass these filters. Lower the minimum ROI or volume.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="${TABLE_COLUMNS}" style="text-align:center;padding:2rem">
+      Nothing to show. Loosen the display filters, or the market is genuinely
+      offering nothing right now.</td></tr>`;
     $("#detail").classList.add("hidden");
     return;
   }
@@ -1095,23 +1662,20 @@ function renderTable() {
       <td>${escapeHtml(r.name)}${r.warnings.length
         ? ` <span class="flag" title="${escapeHtml(r.warnings.join(" · "))}">!</span>` : ""}</td>
       <td>${num(r.buy)}</td>
-      <td>${num(r.sell)}</td>
+      <td${r.listAt < r.sell ? ` class="pos" title="List here, not ${num(r.sell)} — identical net revenue after tax, better queue position"` : ""}>${num(r.listAt)}</td>
       <td class="pos">${num(r.margin)}</td>
       <td>${(r.roi * 100).toFixed(1)}%</td>
       <td class="${r.depth === 0 ? "bad" : ""}">${num(r.depth)}</td>
-      <td class="${r.deep && r.fillShare <= 0.25 ? "bad" : ""}">${
-        r.deep ? Math.round(r.fillShare * 100) + "%" : "—"}</td>
-      <td class="${r.deep && r.trend <= -0.03 ? "bad" : ""}">${
-        r.deep ? (r.trend >= 0 ? "+" : "−") +
-        Math.round(Math.abs(r.trend) * 100) + "%" : "—"}</td>
-      <td class="${r.deep && r.elevation >= 0.05 ? "bad" : ""}">${
-        r.deep ? (r.elevation >= 0 ? "+" : "−") +
-        Math.round(Math.abs(r.elevation) * 100) + "%" : "—"}</td>
-      <td>${r.limit == null ? "—" : num(r.limit)}</td>
-      <td>${num(r.volume)}</td>
       <td>${num(r.qty)}</td>
       <td>${formatGp(r.capitalNeeded)}</td>
-      <td class="dim">${num(r.gross)}</td>
+      <td class="${r.totalSeconds > 8 * SECONDS_PER_HOUR ? "bad" : ""}">${formatDuration(r.totalSeconds)}</td>
+      <td class="${r.pFill < 0.25 ? "bad" : ""}">${Math.round(r.pFill * 100)}%</td>
+      <td class="${r.alchDistance != null && r.alchDistance <= 0 ? "pos" : ""}">${
+        r.alchDistance == null ? "—"
+        : (r.alchDistance >= 0 ? "+" : "−") + Math.round(Math.abs(r.alchDistance) * 100) + "%"}</td>
+      <td class="${r.deep && r.fillShare <= 0.25 ? "bad" : ""}">${
+        r.deep ? Math.round(r.fillShare * 100) + "%" : "—"}</td>
+      <td class="dim">${num(Math.round(r.rawPerSlotHour))}</td>
       <td class="pos"><strong>${num(Math.round(r.perSlotHour))}</strong></td>
     </tr>`).join("");
 
@@ -1136,46 +1700,50 @@ function showDetail(id) {
   $("#d-name").textContent = row.name;
   $("#d-prices").textContent = `${num(row.buy)} → ${num(row.sell)}`;
   $("#d-raw").textContent =
-    `raw quote ${num(row.latestLow)} → ${num(row.latestHigh)} gp`;
+    `raw quote ${num(row.latestLow)} → ${num(row.latestHigh)} gp · list the sell at ${num(row.listAt)}`;
   $("#d-margin").textContent = num(row.margin) + " gp";
   $("#d-roi").textContent =
-    `${(row.roi * 100).toFixed(1)}% ROI · ${num(row.tax)} gp tax`;
+    `${(row.roi * 100).toFixed(1)}% ROI · ${row.exempt ? "tax-exempt item" : num(row.tax) + " gp tax"}`;
+  $("#d-trip").textContent = formatDuration(row.totalSeconds);
+  $("#d-trip-sub").textContent =
+    `buy leg ${formatDuration(row.buySeconds)}, sell leg ${formatDuration(row.sellSeconds)} · ${
+      Math.round(row.pFill * 100)}% both clear in 4h`;
   $("#d-profit").textContent = num(Math.round(row.perSlotHour)) + " gp";
   $("#d-qty").textContent =
-    `${num(row.qty)} units · ${formatGp(row.capitalNeeded)} gp tied up`;
+    `${num(Math.round(row.rawPerSlotHour))} before shrinkage · ${num(row.qty)} units · ${formatGp(row.capitalNeeded)} gp tied up`;
 
-  // show where the quoted profit goes, factor by factor
-  const qf = queueFactor(row.depth), df = driftFactor(row.drift),
-        ff = freshness(row.age);
+  // Where the quoted profit went, factor by factor. Each is stored separately
+  // rather than only as a product, which is what makes a shortfall
+  // attributable to the factor that caused it.
   const pct = (f) => `${Math.round(f * 100)}%`;
   const lines = [
-    `Quoted best case: <strong>${num(row.gross)} gp</strong> per 4h window if both legs fill at these prices.`,
-    `Queue position keeps ${pct(qf)} — ${row.depth === 0
-      ? "no room to outbid anyone, so you wait behind offers that may be days old"
-      : `${row.depth} gp of undercut room, enough to pay for priority`}.`,
-    `Price drift keeps ${pct(df)} — ${Math.abs(row.drift) < 0.005
-      ? "market is flat" : `moving ${(row.drift * 100).toFixed(1)}% between the 1h and 5m averages`}.`,
-    `Quote freshness keeps ${pct(ff)} — last trade ${row.age}s ago.`,
+    `Quoted best case: <strong>${num(row.gross)} gp</strong> if both legs fill at these prices.`,
+    `A slot is time, not a container: this flip is expected to occupy one for <strong>${formatDuration(row.totalSeconds)}</strong>, which is what ${num(Math.round(row.perSlotHour))} gp per slot-hour is measured against.`,
   ];
+  for (const [name, value] of Object.entries(row.factors)) {
+    if (Math.abs(value - 1) < 0.005) continue;      // nothing to explain
+    lines.push(`${name.charAt(0).toUpperCase() + name.slice(1)} ${
+      value >= 1 ? "adds" : "keeps"} ${pct(value)}.`);
+  }
+  if (row.allocated != null) {
+    lines.push(`Score-weighted allocation: commit <strong>${formatGp(row.allocated)} gp</strong> of the bank here, rather than an equal share.`);
+  }
   if (row.deep) {
     lines.push(
-      `14-day fill keeps ${pct(row.fillFactor)} — ${pct(row.fillShare)} of two weeks' volume traded at your prices${
+      `14-day history: ${pct(row.fillShare)} of two weeks' volume traded at your prices${
         row.baselineLow != null ? ` (sellers averaged ${num(row.baselineLow)} gp)` : ""}.`,
-      `Price level keeps ${pct(row.levelFactor)} — quote sits ${
-        Math.abs(row.elevation) < 0.01 ? "at" :
-        `${pct(row.elevation)} ${row.elevation > 0 ? "above" : "below"}`} its 14-day median${
-        row.medianMid != null ? ` of ${num(row.medianMid)} gp` : ""}${
-        row.elevation >= 0.05 ? " — reversion risk" : ""}.`,
-      `Stability keeps ${pct(row.stabilityFactor)} — the price swings ±${pct(row.volatility)} around that median.`,
-      `Momentum keeps ${pct(row.momentum)} — multi-day price ${
-        Math.abs(row.trend) < 0.005 ? "is flat"
-        : (row.trend > 0 ? "rising " : "falling ") + pct(row.trend)}${
-        row.trend >= 0.03 ? " (no bonus: a rise and a pump look identical)" : ""}.`);
+      row.meanReverting
+        ? `Mean-reverts around ${num(row.ouLevel)} gp, half-life ${
+            row.halfLifeHours != null ? formatDuration(row.halfLifeHours * SECONDS_PER_HOUR) : "—"
+          }. Today's quote sits ${Math.abs(row.elevation) < 0.01 ? "at" :
+            pct(row.elevation) + (row.elevation > 0 ? " above" : " below")} its 14-day median.`
+        : `Does not mean-revert on 14 days of data, so "above its median" carries no prediction — the level factor stays near neutral and only a small capped trend term applies.`);
   } else {
-    lines.push("Not deep-checked against 14-day history (outside the top 15).");
+    lines.push("Not deep-checked against 14-day history (outside the shortlist).");
   }
-  lines.push(
-    `Expected: <strong>${num(Math.round(row.expected))} gp</strong> per window, <strong>${num(Math.round(row.perSlotHour))} gp</strong> per slot-hour.`);
+  if (row.rawPerSlotHour > 0 && row.perSlotHour / row.rawPerSlotHour < 0.995) {
+    lines.push(`Shrinkage took it from ${num(Math.round(row.rawPerSlotHour))} to <strong>${num(Math.round(row.perSlotHour))} gp/slot-hour</strong>: ranking hundreds of noisy estimates surfaces the biggest errors, so each score is pulled toward the market average by an amount set by the ${num(row.volume)} units/h of volume behind it.`);
+  }
   $("#d-notes").innerHTML = lines.map((l) => `<li>${l}</li>`).join("");
   loadChart();
 }
