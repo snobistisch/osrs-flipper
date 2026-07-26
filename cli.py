@@ -18,6 +18,7 @@ import archive
 import engine
 import exemptions
 import filters
+import merch
 
 
 def parse_args(argv):
@@ -35,6 +36,12 @@ def parse_args(argv):
                         "of /timeseries history (0 disables). Three times this "
                         "many are actually fetched, so the deep stage can "
                         "reorder rather than just confirm.")
+    p.add_argument("--mode", choices=("flip", "crash"), default="flip",
+                   help="flip ranks by gp per slot per hour; crash lists the "
+                        "deep-checked candidates standing furthest from their "
+                        "own 14-day median, ranked by how tradable the "
+                        "recovery is. Both read the same fetch. For the "
+                        "long-horizon merch view run: python3 agent.py merch")
     p.add_argument("--archive", default=None,
                    help="tick archive to smooth volume estimates with "
                         "(default: use it if cache/ticks.db exists)")
@@ -69,6 +76,36 @@ def config_from(opts, nature_cost: int) -> filters.FilterConfig:
         min_roi=opts.min_roi, min_undercut_depth=opts.min_depth,
         min_price=opts.min_price, max_price=opts.max_price,
         tax_free_only=opts.tax_free)
+
+
+def print_crash_table(result, opts):
+    """The same rows, read for dislocation instead of for throughput."""
+    crashed = [(row, merch.crash_context(row)) for row in result.rows]
+    crashed = [(row, ctx) for row, ctx in crashed
+               if ctx.signal is not None and ctx.signal.score > 0]
+    if not crashed:
+        print("Nothing among the {} deep-checked candidates is standing far "
+              "enough from its own median to call. That is the normal state of "
+              "the market.".format(result.deep_checked))
+        return
+    crashed.sort(key=lambda pair: -pair[1].recovery)
+
+    header = "{:<26} {:>9} {:>8} {:>7} {:>6} {:>8} {:>16} {:>9}"
+    print(header.format("ITEM", "BUY", "VS 14D", "VOL", "FILL", "REVERTS",
+                        "BADGE", "RECOVERY"))
+    for row, ctx in crashed[:opts.top]:
+        print("{:<26.26} {:>9,} {:>7.0f}% {:>6.1f}x {:>5.0f}% {:>8} {:>16} "
+              "{:>9.0f}".format(
+                  row.name, row.buy, ctx.signal.depth * 100, ctx.volume_ratio,
+                  (row.fill_share or 0) * 100,
+                  "yes" if row.mean_reverting else "no",
+                  merch.BADGE_LABELS[ctx.signal.kind], ctx.recovery))
+    print()
+    print("RECOVERY ranks depth by how much of it you can actually trade: a "
+          "70% collapse nobody deals in scores below a 25% dip on a liquid "
+          "item that mean-reverts. This covers the candidates the ranking "
+          "deep-checked, not every item in the game — scanning all of them "
+          "would mean the per-item polling the wiki asks people not to do.")
 
 
 def print_table(result, opts, config, exempt, nature_cost, archive_note):
@@ -181,7 +218,10 @@ def main(argv=None):
             items, quotes, activity_5m, activity_1h, config, now=time.time(),
             fetch_history=fetch if opts.deep > 0 else None,
             top_k=opts.deep, exempt=exempt, volume_lookup=volume_lookup)
-        print_table(result, opts, config, exempt, nature_cost, archive_note)
+        if opts.mode == "crash":
+            print_crash_table(result, opts)
+        else:
+            print_table(result, opts, config, exempt, nature_cost, archive_note)
     finally:
         if store is not None:
             store.close()

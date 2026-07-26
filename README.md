@@ -141,6 +141,50 @@ survives the noise at all, the tool says so instead of ranking anyway.
   uninformed side of every trade that follows, so flips whose expected round
   trip runs into an update are discounted.
 
+### 8. A year is a different question from an hour
+
+Everything above prices a round trip measured in hours. Holding an item for
+weeks is a different bet with a different unit, and `merch.py` scores it
+separately. The two numbers never get added together: an item can be a terrible
+flip (nobody trades it, the spread is one gp) and an excellent hold (its price
+has doubled in a year).
+
+- **Trends are fitted on log prices.** The slope is then a growth *rate* that
+  means the same thing on a 5 gp herb and a 60m wand, and R² is comparable
+  across items rather than dominated by absolute scale.
+- **Most apparent trends are not trends.** This is the headline result and it
+  is measured, not assumed. A year of daily prices with no drift in it at all
+  still wanders far enough to look like a 40%/yr riser. Simulating driftless
+  random walks: `|t| >= 1.5` labels 61% of pure noise a trend, `|t| >= 2.5`
+  labels 42%, `|t| >= 5.0` labels 16%. The curve is scale-free — repeat it at
+  1.2%, 2.1% or 3.5% daily volatility and it moves under a point.
+
+  So the threshold is 5.0, and the honest consequence is that several
+  watchlist items with headline rates near +50%/yr are reported SIDEWAYS. Every
+  row also carries a **noise probability**: the share of trendless items that
+  would look at least this trendy. Read that column before the trend column.
+  "+57%/yr, R² 0.71" sounds like a finding; "41% of items with no trend look
+  like this" is the same row telling you it is not one.
+- **Textbook t-statistics do not apply to prices.** Today's distance from the
+  trend line is nearly yesterday's, so OLS standard errors are far too small —
+  a pure random walk comes out at `|t|` of thirty. The slope's t is widened for
+  AR(1) residual autocorrelation before anything is concluded from it.
+- **A supply crunch is measured against the market, not in absolute terms.**
+  Total trade volume in the game moves a long way over six months. Measured on
+  live data every item on the watchlist — blood runes, diamonds and raid
+  uniques alike — was down between 50% and 86%. Read absolutely that badges the
+  entire game as a supply crunch, which is the same as badging none of it. The
+  median of the basket is the market; what survives dividing it out belongs to
+  the item. With fewer than eight items there is no market estimate and no
+  badge is given.
+- **A crash is deep *and* loud.** A price far below its own 14-day median on
+  heavy volume is a dump. The same depth on quiet volume is a different animal
+  and a better one — no forced seller to wait out — so it is classified
+  separately. Nothing fires through a regime shift: a level that moved because
+  the game changed has no median left to revert to.
+- **Depth is ranked by how much of it you can trade.** A 70% collapse nobody
+  deals in is worth less than a 25% dip on a liquid item that mean-reverts.
+
 ## Filters no longer decide what gets scored
 
 The old pipeline was a chain of gates: too stale, too thin, ROI too low, no
@@ -158,7 +202,11 @@ narrowing the view never reorders what is left.
 
 Nothing to install: the [hosted
 version](https://snobistisch.github.io/osrs-flipper/) is one self-contained
-HTML file and runs the same ranking. Enter a budget and it goes.
+HTML file and runs the same ranking. Enter a budget and it goes. Three tabs:
+**Flip** ranks by gp per slot per hour, **Merch** pulls a year of daily prices
+for a watchlist and is the only view that fetches per item (once, on demand,
+cached six hours in IndexedDB), **Crash** reads the deep-checked candidates for
+price dislocation.
 
 For the local tools:
 
@@ -180,7 +228,9 @@ python3 cli.py --capital 1m --slots 3
 
 `--members` for members items, `--slots 8` if you have them, `--top 40` for a
 longer list. The display filters (`--min-roi`, `--min-vol`, `--max-age`,
-`--min-depth`) all default to off.
+`--min-depth`) all default to off. `--mode crash` reads the same fetch for
+price dislocation instead of throughput; the long-horizon merch view lives in
+`agent.py merch`, because it needs a different set of requests.
 
 ## Start the tick archive today
 
@@ -229,6 +279,69 @@ the fill-time model needs the censored observations.
 - **Factor values on flips that beat versus missed their prediction.** A factor
   that differs sharply between the two columns is the one carrying the error.
 
+## Run it from an agent
+
+`cli.py` prints for a person. `agent.py` prints for a program, and — the part
+that makes it usable — prints *nothing at all* when there is nothing to say.
+
+```bash
+python3 agent.py flips --json --capital 1.5m --slots 3
+python3 agent.py merch                 # the watchlist over a year
+python3 agent.py watch                 # new signals only; usually silent
+python3 agent.py portfolio list
+python3 agent.py status                # cache ages, archive, last watch run
+```
+
+Stdlib only, so it runs from cron with no virtualenv activated. State lives in
+`~/.osrs-flipper/` (override with `--state-dir`), outside the repo, so a
+`git pull` cannot wipe your positions.
+
+### Why `watch` is quiet
+
+An agent wired to a chat app is only worth having while its messages are still
+worth opening. `watch` holds state between runs and speaks only when something
+crossed a line it had not already crossed: a crash that deepens from 40% to
+70% alerts twice, a crash that sits at 55% for a week alerts once. Below half
+the alert threshold an item resets and may fire again later, so hovering around
+the line does not flap. If the API has been unreachable for three consecutive
+runs it says so — a broken cron should not look like a quiet market.
+
+### Hermes Agent
+
+Copy `skills/osrs-flipper/` into your skills directory, then:
+
+```bash
+hermes cron create "every 4h" "Run the osrs-flipper watch command. If it prints nothing, reply exactly [SILENT] and send no message. Otherwise summarise each signal in one line, in plain language, with the item name and price. Do not add advice." --script ~/osrs-flipper/agent.py --skill osrs-flipper --deliver telegram
+```
+
+A daily digest instead of alerts:
+
+```bash
+hermes cron create "0 9 * * *" "Run: python3 agent.py merch --json. Report only items whose trend noise_probability is below 0.20, plus anything carrying a crash or supply badge. If none qualify, reply [SILENT]." --skill osrs-flipper --deliver telegram
+```
+
+Keep the tick archive filling on its own schedule:
+
+```bash
+hermes cron create "every 30m" "Run: python3 collect.py --once. Reply [SILENT] unless it reports an error." --deliver local
+```
+
+The skill file is what stops the agent inventing prices when a command fails,
+and what tells it to read `noise_probability` before the headline trend number.
+Read it before changing the output formats — they are a contract.
+
+### Host it on your own machine
+
+The browser app is a single file and needs no server, so opening
+`docs/index.html` is enough. To reach it from your phone on the same network:
+
+```bash
+python3 -m http.server 8000 --directory docs
+```
+
+There is no backend to deploy and nothing to configure. Every request goes from
+your browser straight to the wiki API.
+
 ## Calibration, and what is still a guess
 
 Every free parameter lives in one place: `engine.Calibration`. Each is marked
@@ -258,16 +371,19 @@ data could say which factor was wrong.
 |---|---|
 | `engine.py` | Flip math and scoring. Pure stdlib, no I/O |
 | `stats.py` | OU fits, empirical-Bayes shrinkage. Pure stdlib |
+| `merch.py` | Long-horizon signals: trend, crash, supply crunch. Pure stdlib |
 | `filters.py` | The pipeline: score, shrink, deep-check, filter, allocate |
 | `exemptions.py`, `tax_exempt.json` | Which items pay no GE tax |
-| `api.py` | Wiki API client: bulk endpoints, 30s poll floor, daily `/mapping` cache |
+| `api.py` | Wiki API client: bulk endpoints, 30s poll floor, disk-cached history |
 | `archive.py`, `collect.py` | The private tick archive and its poller |
 | `journal.py` | Flip log and calibration diagnostics |
 | `app.py` / `cli.py` | Dashboard / terminal table |
+| `agent.py` | JSON and cron output for an agent; silent by default |
+| `skills/osrs-flipper/` | Hermes skill: how an agent should read the output |
 | `docs/index.html` | Browser app — self-contained, no build step, no deps |
 
 ```bash
-python3 -m unittest test_engine test_stats test_filters test_journal test_docs_port
+python3 -m unittest test_engine test_stats test_merch test_filters test_journal test_agent test_docs_port
 ```
 
 `engine.py` and `stats.py` deliberately import nothing outside the standard
@@ -282,10 +398,16 @@ maintenance hazard: the port went stale once already, and the only thing
 guarding it was a README line saying "change it in both".
 
 `test_docs_port.py` now guards the parts that rot silently — the tax-exempt
-list, every calibration constant, the history window, and the absence of
-functions the rebuild deleted. A Python test cannot execute the JavaScript, so
-formula changes still have to be made by hand in both files; what it catches is
-the class of drift that produces plausible numbers that are quietly wrong.
+list, every calibration constant, the history window, the raid-unique and
+watchlist id lists, the merch windows, the measured noise curve, and the
+absence of functions the rebuild deleted. It also asserts that the port never
+sets a `User-Agent` header: browsers forbid scripts from setting one, and the
+custom header trips a CORS preflight the wiki answers with 400, so "add a
+descriptive User-Agent like the Python client does" takes the whole page down.
+
+A Python test cannot execute the JavaScript, so formula changes still have to
+be made by hand in both files; what it catches is the class of drift that
+produces plausible numbers that are quietly wrong.
 
 Checked against live data, the two agree to within a fraction of a percent on
 the pre-shrinkage score, the remaining gap being that they poll `/latest`
@@ -303,6 +425,22 @@ TTLs, which is what `collect.py` respects too.
 
 v1 and v2 of the API return byte-identical payloads on every route used here,
 so the client stays on v1 with the base URL configurable.
+
+### The 24h series does not mean what it looks like
+
+Worth knowing before you trust a volume number off `/timeseries?timestep=24h`.
+Cross-checked against the same item at `6h` on 2026-07-26: for every historical
+day, the 24h bucket's **volume is the first 6h bucket of that day**, not the
+day's total, which is roughly four times larger. The most recent bucket is the
+exception and does carry the whole day.
+
+Prices behave the same way and that is harmless — a consistent daily sample,
+within about 2% of the daily mean, which is fine to fit a trend through. The
+volumes are not comparable, and leaving the final bucket in reports an 8x
+volume spike on every item in the game simultaneously. That is exactly what the
+first live run of the crash scanner did. Every volume calculation in `merch.py`
+drops the last bucket for this reason (`VOLUME_SKIP_LAST`), which costs a day
+of latency on the volume signals and is the only way to compare like with like.
 
 Not affiliated with Jagex or the OSRS Wiki. Prices are estimates — flip at your
 own risk.

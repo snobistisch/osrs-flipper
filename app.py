@@ -17,6 +17,7 @@ import archive
 import engine
 import exemptions
 import filters
+import merch
 
 st.set_page_config(page_title="GE Flipper", page_icon="🪙", layout="wide")
 
@@ -260,6 +261,137 @@ def ranked_table(rows, top_n):
                "deep-checked shortlist.")
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def watchlist_views(_client_key: str):
+    """A year of daily history for the watchlist, cached for six hours.
+
+    The underlying client caches to disk as well, so this survives a restart.
+    Returns plain dicts rather than dataclasses because Streamlit's cache
+    pickles the result and the views hold nested frozen dataclasses.
+    """
+    client = wiki_client()
+    items = client.mapping()
+    quotes = client.latest()
+    views, problems = {}, []
+    for item_id in merch.WATCHLIST_IDS:
+        item = items.get(item_id)
+        if item is None:
+            problems.append("{}: not in /mapping".format(item_id))
+            continue
+        quote = quotes.get(item_id)
+        price = ((quote.high + quote.low) / 2
+                 if quote is not None and quote.high and quote.low else None)
+        try:
+            points = client.timeseries(item_id, merch.TREND_TIMESTEP)
+        except api.ApiError as exc:
+            problems.append("{}: {}".format(item.name, exc))
+            continue
+        views[item_id] = merch.daily_view(points, price=price)
+    views = merch.apply_market_context(views)
+
+    rows = []
+    for item_id, view in views.items():
+        item = items[item_id]
+        trend = view.trend
+        rows.append({
+            "Item": item.name,
+            "Price": view.price,
+            "Trend/yr %": trend.annualised_pct if trend else None,
+            "R²": trend.r_squared if trend else None,
+            "Noise %": trend.noise_probability * 100 if trend else None,
+            "vs 14d %": view.depth * 100 if view.depth is not None else None,
+            "Vol": view.volume_ratio,
+            "Supply %": (view.volume_change_relative * 100
+                         if view.volume_change_relative is not None else None),
+            "Type": " ".join(merch.classify_item(
+                item_id, view.price or 0, item.members, item.limit,
+                trend=trend, crash=view.crash, supply=view.supply)) or "—",
+            "Merch": round(merch.merch_score(
+                trend, item.limit,
+                merch.is_botted(view.price or 0, item.members, item.limit))),
+            "Why it is on the list": merch.THESIS_BY_ID.get(item_id, ""),
+        })
+    drift = next((v.market_drift for v in views.values()
+                  if v.market_drift is not None), None)
+    return rows, problems, drift
+
+
+def merch_table():
+    rows, problems, drift = watchlist_views(merch.TREND_TIMESTEP)
+    if not rows:
+        st.info("No history available for the watchlist right now.")
+        return
+    df = pd.DataFrame(rows).sort_values("Merch", ascending=False)
+    st.dataframe(df, hide_index=True, width="stretch", column_config={
+        "Price": st.column_config.NumberColumn(format="localized"),
+        "Trend/yr %": st.column_config.NumberColumn(
+            format="%+.0f%%", help="Compounded from a least-squares fit through "
+            "a year of log prices."),
+        "R²": st.column_config.NumberColumn(
+            format="%.2f", help="How much of the price movement the trend line "
+            "explains."),
+        "Noise %": st.column_config.NumberColumn(
+            format="%.0f%%", help="Share of items with NO trend at all that "
+            "would look at least this trendy. Read this before the trend "
+            "column."),
+        "vs 14d %": st.column_config.NumberColumn(format="%+.0f%%"),
+        "Vol": st.column_config.NumberColumn(
+            format="%.1fx", help="Latest comparable day's volume against its "
+            "normal recent level."),
+        "Supply %": st.column_config.NumberColumn(
+            format="%+.0f%%", help="Volume against six months ago, with the "
+            "market-wide move divided out."),
+        "Merch": st.column_config.NumberColumn(
+            help="Annual rate discounted by how much of the movement the trend "
+                 "explains. Zero unless the item is rising."),
+    })
+    st.caption(
+        "Noise is the column to read first. A year of daily prices with no "
+        "trend in it still wanders far enough to look like a 40%/yr riser, so "
+        "a headline +50%/yr that four in ten trendless items would also show "
+        "is not a finding — which is why several rows here say SIDEWAYS with a "
+        "large-looking rate.")
+    if drift is not None:
+        st.caption(
+            "Market-wide volume moved {:+.0%} over six months. Supply has that "
+            "divided out, so it shows only what belongs to the item.".format(drift))
+    for problem in problems:
+        st.caption("No history for {}".format(problem))
+
+
+def crash_table(rows):
+    crashed = [(row, merch.crash_context(row)) for row in rows]
+    crashed = [(row, ctx) for row, ctx in crashed
+               if ctx.signal is not None and ctx.signal.score > 0]
+    if not crashed:
+        st.info("Nothing among the deep-checked candidates is standing far "
+                "enough from its own median to call. That is the normal state "
+                "of the market.")
+        return
+    crashed.sort(key=lambda pair: -pair[1].recovery)
+    df = pd.DataFrame([{
+        "Item": row.name, "Buy": row.buy,
+        "vs 14d %": ctx.signal.depth * 100,
+        "Vol": ctx.volume_ratio,
+        "Fill %": (row.fill_share or 0) * 100,
+        "Reverts": bool(row.mean_reverting),
+        "Badge": merch.BADGE_LABELS[ctx.signal.kind],
+        "Recovery": round(ctx.recovery),
+    } for row, ctx in crashed])
+    st.dataframe(df, hide_index=True, width="stretch", column_config={
+        "Buy": st.column_config.NumberColumn(format="localized"),
+        "vs 14d %": st.column_config.NumberColumn(format="%+.0f%%"),
+        "Vol": st.column_config.NumberColumn(format="%.1fx"),
+        "Fill %": st.column_config.NumberColumn(format="%.0f%%"),
+    })
+    st.caption(
+        "Recovery ranks depth by how much of it you can actually trade: a 70% "
+        "collapse nobody deals in scores below a 25% dip on a liquid item that "
+        "mean-reverts. This covers the candidates the flip ranking "
+        "deep-checked, not every item in the game — scanning all of them would "
+        "mean the per-item polling the wiki asks people not to do.")
+
+
 def detail_view(row):
     left, mid, right, far = st.columns(4)
     left.metric("Est. buy → sell", "{:,} → {:,} gp".format(row.buy, row.sell),
@@ -418,17 +550,39 @@ def main():
 
     if st.button("Refresh"):
         st.rerun()
-    if not result.rows:
-        st.info("Nothing to show. Loosen the display filters in the sidebar, "
-                "or the market is genuinely offering nothing right now.")
-        st.stop()
-    ranked_table(result.rows, top_n)
 
-    st.subheader("Detail")
-    row = st.selectbox("Item", result.rows[:top_n],
-                       format_func=lambda r: "{} — {:,} gp margin, {:,} gp/slot/h"
-                       .format(r.name, r.margin, round(r.gp_per_slot_hour)))
-    detail_view(row)
+    flip_tab, merch_tab, crash_tab = st.tabs(
+        ["🔄 Flip", "📈 Merch", "🔍 Crash"])
+
+    with flip_tab:
+        if not result.rows:
+            st.info("Nothing to show. Loosen the display filters in the "
+                    "sidebar, or the market is genuinely offering nothing "
+                    "right now.")
+        else:
+            ranked_table(result.rows, top_n)
+            st.subheader("Detail")
+            row = st.selectbox(
+                "Item", result.rows[:top_n],
+                format_func=lambda r: "{} — {:,} gp margin, {:,} gp/slot/h"
+                .format(r.name, r.margin, round(r.gp_per_slot_hour)))
+            detail_view(row)
+
+    with merch_tab:
+        st.caption("A year of daily prices per item, for positions held over "
+                   "weeks. Different horizon from the flip ranking and a "
+                   "different scale — the two numbers do not compare.")
+        # Gated behind a click because it is the only view that fetches per
+        # item: 21 requests the first time, then six hours of cache.
+        if st.session_state.get("merch_loaded") or st.button(
+                "Load a year of history for {} items".format(
+                    len(merch.WATCHLIST_IDS))):
+            st.session_state["merch_loaded"] = True
+            with st.spinner("Fetching daily history…"):
+                merch_table()
+
+    with crash_tab:
+        crash_table(result.rows)
 
 
 main()
