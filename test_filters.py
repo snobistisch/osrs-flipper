@@ -307,10 +307,11 @@ class RefineTests(unittest.TestCase):
         self.assertAlmostEqual(leather_after.expected_gp, leather.expected_gp)
         self.assertEqual(leather_after.fill_factor, 1.0)
 
-    def test_uptrend_outranks_its_flat_twin(self):
+    def test_flat_twin_outranks_the_riser(self):
         # identical intraday state, identical quotes: only the 14-day shape
         # differs. The riser ends at today's quote; the flat twin sat there
-        # all along. Momentum should break the tie toward the riser.
+        # all along. The stable item wins: a riser is indistinguishable from
+        # a pump in price data, so it carries reversion risk and no bonus.
         items = {1: item(1, name="flat"), 2: item(2, name="rising")}
         quotes = {n: quote(high=12_600, low=12_200) for n in (1, 2)}
         acts = {n: act_5m(avg_high=12_600, avg_low=12_200) for n in (1, 2)}
@@ -323,11 +324,35 @@ class RefineTests(unittest.TestCase):
                   for i in range(56)]
         refined, _ = filters.refine_with_history(
             rows, lambda i: {1: flat, 2: rising}[i], top_k=15)
-        self.assertEqual(refined[0].name, "rising")
-        self.assertGreater(refined[0].momentum, 1.0)
-        flat_row = next(r for r in refined if r.name == "flat")
+        self.assertEqual(refined[0].name, "flat")
+        flat_row = refined[0]
         self.assertEqual(flat_row.momentum, 1.0)
         self.assertEqual(flat_row.fill_factor, 1.0)
+        self.assertEqual(flat_row.level_factor, 1.0)
+        riser = next(r for r in refined if r.name == "rising")
+        self.assertEqual(riser.momentum, 1.0)      # no bonus for rising
+        self.assertLess(riser.level_factor, 1.0)   # reversion risk instead
+        self.assertTrue(any("don't chase" in w for w in riser.warnings))
+
+    def test_pumped_item_collapses_against_its_flat_twin(self):
+        # the user's complaint: an item pumped well above its normal level
+        # shows a juicy margin but is a manipulation trap
+        items = {1: item(1, name="pumped"), 2: item(2, name="calm")}
+        quotes = {n: quote(high=820, low=780) for n in (1, 2)}
+        acts = {n: act_5m(avg_high=820, avg_low=780) for n in (1, 2)}
+        acts1h = {n: act_1h(avg_high=820, avg_low=780) for n in (1, 2)}
+        rows, _ = rank(items, quotes, acts, acts1h, capital=50_000_000)
+        pumped = ([history_bucket(510, 1_000, 490, 1_000)] * 50
+                  + [history_bucket(820, 3_000, 780, 3_000)] * 6)
+        calm = [history_bucket(820, 1_000, 780, 1_000)] * 56
+        refined, _ = filters.refine_with_history(
+            rows, lambda i: {1: pumped, 2: calm}[i], top_k=15)
+        self.assertEqual(refined[0].name, "calm")
+        pump_row = next(r for r in refined if r.name == "pumped")
+        self.assertEqual(pump_row.level_factor, engine.LEVEL_FLOOR)
+        self.assertTrue(any("spike or manipulation" in w
+                            for w in pump_row.warnings))
+        self.assertLess(pump_row.expected_gp, refined[0].expected_gp / 5)
 
     def test_missing_history_keeps_stage1_and_flags_it(self):
         rows, _ = self._salmon_rows()

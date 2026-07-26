@@ -61,17 +61,19 @@ def print_table(rows, funnel, opts):
               "or --min-depth.")
         return
 
-    header = "{:<26} {:>9} {:>9} {:>7} {:>6} {:>5} {:>5} {:>5} {:>7} {:>7} {:>11} {:>11}"
+    header = ("{:<26} {:>9} {:>9} {:>7} {:>6} {:>5} {:>5} {:>5} {:>5} {:>7} "
+              "{:>7} {:>11} {:>11}")
     print(header.format("ITEM", "BUY", "SELL", "MARGIN", "ROI", "ROOM",
-                        "FILL", "TRND", "QTY/4H", "TIED UP", "QUOTED/4H",
-                        "EV/SLOT/H"))
+                        "FILL", "TRND", "ELEV", "QTY/4H", "TIED UP",
+                        "QUOTED/4H", "EV/SLOT/H"))
     for r in rows[:opts.top]:
         fill = "{:.0%}".format(r.fill_share) if r.deep_checked else "—"
         trend = "{:+.0%}".format(r.trend) if r.deep_checked else "—"
+        elev = "{:+.0%}".format(r.elevation) if r.deep_checked else "—"
         print("{:<26.26} {:>9,} {:>9,} {:>7,} {:>5.1f}% {:>5,} {:>5} {:>5} "
-              "{:>7,} {:>7} {:>11,} {:>11,.0f}".format(
+              "{:>5} {:>7,} {:>7} {:>11,} {:>11,.0f}".format(
                   r.name, r.buy, r.sell, r.margin, r.roi * 100,
-                  r.undercut_depth, fill, trend, r.qty_per_window,
+                  r.undercut_depth, fill, trend, elev, r.qty_per_window,
                   engine.format_gp(r.capital_needed), r.gross_profit,
                   r.gp_per_slot_hour))
         for note in r.warnings:
@@ -80,11 +82,12 @@ def print_table(rows, funnel, opts):
     print("ROOM = gp of price improvement you can afford per side and still "
           "profit; with 0 you wait behind offers that may be days old. "
           "FILL = share of the last 14 days' volume that traded at your "
-          "prices — the last print is not the market. TRND = recent vs prior "
-          "multi-day VWAP.")
+          "prices. TRND = recent vs prior multi-day VWAP. ELEV = quote vs "
+          "the 14-day median level; high means spike/manipulation risk.")
     print("EV/SLOT/H = expected gp per offer slot per hour: quoted profit "
           "discounted for queue position, drift, staleness, 14-day fill "
-          "probability and momentum. QUOTED/4H is the undiscounted best case.")
+          "probability, price level, stability and momentum. QUOTED/4H is "
+          "the undiscounted best case.")
 
 
 def main(argv=None):

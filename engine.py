@@ -270,16 +270,22 @@ MIN_HISTORY_BUCKETS = 8           # fewer traded buckets: refuse to refine
 RECENT_TREND_BUCKETS = 12         # ~3 days
 FILL_FLOOR = 0.05                 # even "never traded there" keeps 5%
 FILL_TOLERANCE = 0.01             # prices within 1% count as reachable
+LEVEL_TOLERANCE = 0.03            # this far above the median is still normal
+LEVEL_FLOOR = 0.10
+STABILITY_TOLERANCE = 0.02        # swings within ±2% of the median are calm
+STABILITY_FLOOR = 0.30
 
 
 class HistoryView:
     """Multi-day metrics for one item at one (buy, sell) estimate."""
     __slots__ = ("buckets", "baseline_low", "baseline_high", "buy_fill_share",
                  "sell_fill_share", "fill_factor", "trend", "momentum",
-                 "dislocation")
+                 "dislocation", "median_mid", "elevation", "volatility",
+                 "level", "stability")
 
     def __init__(self, buckets, baseline_low, baseline_high, buy_fill_share,
-                 sell_fill_share, fill_factor, trend, momentum, dislocation):
+                 sell_fill_share, fill_factor, trend, momentum, dislocation,
+                 median_mid, elevation, volatility, level, stability):
         self.buckets = buckets
         self.baseline_low = baseline_low
         self.baseline_high = baseline_high
@@ -289,6 +295,11 @@ class HistoryView:
         self.trend = trend
         self.momentum = momentum
         self.dislocation = dislocation
+        self.median_mid = median_mid
+        self.elevation = elevation
+        self.volatility = volatility
+        self.level = level
+        self.stability = stability
 
 
 def _weighted_avg(pairs: List[Tuple[float, int]]) -> Optional[float]:
@@ -315,13 +326,55 @@ def _bucket_vwap(points: List[dict]) -> Optional[float]:
 def momentum_factor(trend: float) -> float:
     """Bounded EV multiplier from the multi-day trend.
 
-    A rise with volume behind it is the price signature of an update-driven
-    demand shift, and your sell leg fills easily into it — mild reward. A
-    decline means you hold depreciating inventory between the legs — harsher
-    penalty. Constants are judgement-tuned, like every factor in this file.
+    Decline is penalised: you hold depreciating inventory between the legs.
+    A rise earns NO bonus: from price data alone, a genuine update-driven
+    demand shift and a merch-clan pump are indistinguishable — both are a
+    rising price with rising volume — so rewarding rises means chasing
+    manipulations. The safe entry is after the price settles at its new
+    level, which the level and stability factors recognise on their own.
     """
-    m = 1 + (1.5 * trend if trend >= 0 else 3.0 * trend)
-    return max(0.5, min(1.25, m))
+    if trend >= 0:
+        return 1.0
+    return max(0.5, 1 + 3.0 * trend)
+
+
+def level_factor(elevation: float) -> float:
+    """Mean-reversion discount for trading above the item's normal level.
+
+    Supply and demand for game commodities are roughly constant, so price
+    shocks revert toward the multi-day median. Buying above that median puts
+    the reversion against the inventory you hold — and a price spiked above
+    its median is the classic manipulation signature (the "margin trap").
+    Below the median is not penalised: buying under the normal level is where
+    a flipper wants to be, and the fill and momentum factors already guard
+    the falling-knife case.
+    """
+    if elevation <= LEVEL_TOLERANCE:
+        return 1.0
+    return max(LEVEL_FLOOR, math.exp(-8.0 * (elevation - LEVEL_TOLERANCE)))
+
+
+def stability_factor(volatility: float) -> float:
+    """Discount for jumpy prices.
+
+    A flip is a round trip that holds inventory in between; the wider an item
+    swings around its median, the more the trip can eat the margin. Stable
+    staples inside a settled range are the flipper's bread and butter —
+    that is where buy-low/sell-high within the band actually works.
+    """
+    if volatility <= STABILITY_TOLERANCE:
+        return 1.0
+    return max(STABILITY_FLOOR, 1 - 8.0 * (volatility - STABILITY_TOLERANCE))
+
+
+def _median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
 
 
 def history_view(points: List[dict], buy: int, sell: int) -> Optional[HistoryView]:
@@ -358,7 +411,7 @@ def history_view(points: List[dict], buy: int, sell: int) -> Optional[HistoryVie
     # trading above last week's absolute prices. The 1% tolerance treats
     # prices within a tick-or-so as reachable.
     mid_now = (buy + sell) / 2
-    low_ratios, high_ratios = [], []
+    low_ratios, high_ratios, mids = [], [], []
     for p in points:
         if not isinstance(p, dict):
             continue
@@ -371,6 +424,7 @@ def history_view(points: List[dict], buy: int, sell: int) -> Optional[HistoryVie
         if vol <= 0:
             continue
         bucket_mid = value / vol
+        mids.append(bucket_mid)
         if low_price is not None and lv > 0:
             low_ratios.append((low_price / bucket_mid, lv))
         if high_price is not None and hv > 0:
@@ -394,13 +448,28 @@ def history_view(points: List[dict], buy: int, sell: int) -> Optional[HistoryVie
     dislocation = ((buy - baseline_low) / baseline_low
                    if baseline_low is not None and baseline_low > 0 else 0.0)
 
+    # Where does today's quote sit against the item's normal level, and how
+    # calm is that level? The median of the bucket mids is robust: a few
+    # spiked buckets barely move it, so a pump shows up as a large elevation
+    # rather than as a new normal.
+    median_mid = _median(mids)
+    elevation = ((mid_now - median_mid) / median_mid
+                 if median_mid is not None and median_mid > 0 else 0.0)
+    volatility = 0.0
+    if median_mid is not None and median_mid > 0:
+        deviation = _median([abs(m - median_mid) for m in mids])
+        volatility = (deviation / median_mid) if deviation is not None else 0.0
+
     return HistoryView(
         buckets=buckets,
         baseline_low=int(round(baseline_low)) if baseline_low is not None else None,
         baseline_high=int(round(baseline_high)) if baseline_high is not None else None,
         buy_fill_share=buy_fill_share, sell_fill_share=sell_fill_share,
         fill_factor=fill_factor, trend=trend,
-        momentum=momentum_factor(trend), dislocation=dislocation)
+        momentum=momentum_factor(trend), dislocation=dislocation,
+        median_mid=int(round(median_mid)) if median_mid is not None else None,
+        elevation=elevation, volatility=volatility,
+        level=level_factor(elevation), stability=stability_factor(volatility))
 
 
 def gp_per_slot_hour(expected_gp: float) -> float:

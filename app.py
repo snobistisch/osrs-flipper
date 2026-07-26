@@ -146,6 +146,7 @@ def ranked_table(rows, top_n):
         "ROI %": r.roi * 100, "Room": r.undercut_depth,
         "Fill %": r.fill_share * 100 if r.deep_checked else None,
         "Trend %": r.trend * 100 if r.deep_checked else None,
+        "Elev %": r.elevation * 100 if r.deep_checked else None,
         "Limit": r.limit, "Vol/1h": r.thin_volume_1h,
         "Qty/4h": r.qty_per_window, "Tied up": r.capital_needed,
         "Quoted/4h": r.gross_profit, "EV/slot/h": round(r.gp_per_slot_hour),
@@ -162,6 +163,9 @@ def ranked_table(rows, top_n):
             "traded at your prices — the last print is not the market."),
         "Trend %": st.column_config.NumberColumn(
             format="%.0f%%", help="Recent vs prior multi-day VWAP."),
+        "Elev %": st.column_config.NumberColumn(
+            format="%.0f%%", help="Quote vs the item's 14-day median level — "
+            "high means spike/manipulation risk."),
         "ROI %": st.column_config.NumberColumn(format="%.1f%%"),
     })
     st.caption("EV/slot/h ranks the table: quoted profit discounted for queue "

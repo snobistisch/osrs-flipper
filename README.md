@@ -46,28 +46,35 @@ once, so "profit if I put my entire bank into this one item" is the wrong
 question. Your budget is divided across your slots, and the ranking is by what
 one slot earns per hour.
 
-### 4. The last print is not the market
+### 4. The last print is not the market — and neither is a spike
 
 A few hundred salmon dumped at 30 gp in the last minutes reads as "buy at 30"
-to every intraday number — the last trade, the 5-minute average, even the
-1-hour average while the dump is running. But over the previous two weeks,
-sellers accepted ~40 gp for virtually all volume. A large buy offer at 30
-fills against that one dumper and then sits.
+to every intraday number, while two weeks of sellers accepted ~40. The mirror
+image is the **manipulation trap**: an item pumped above its normal level shows
+a juicy margin exactly while whoever pumped it is waiting to dump on you.
+Flipping is market making — earning a spread on stable, liquid items inside an
+established range — not trend-chasing, and the guides are unanimous: consistent
+volume, realistic margins, and "if a margin looks too good to be true, it
+probably is."
 
 So the top 15 candidates get a second pass against **14 days of 6h history**
 (`/timeseries`, per-item, cached 30 minutes — never swept across all items):
 
-- **Fill probability in size**: what share of two weeks' seller volume traded
-  at your buy price, and buyer volume at your sell price. Measured on prices
-  *relative to the market of the moment*, so an item marching upward is not
-  punished for trading above last week's absolute levels — but a dump is a
-  dump whenever it happened. The binding leg multiplies EV; a price nobody
-  ever traded at keeps 5%.
-- **Momentum**: recent ~3-day VWAP versus the prior baseline. A rise with
-  volume behind it — the price signature of an update-driven demand shift —
-  earns a bounded bonus (up to ×1.25). A decline is penalised twice as hard,
-  because you hold the inventory between the legs. The tool reads price and
-  volume, not patch notes.
+- **Fill probability in size**: what share of two weeks' volume traded at your
+  prices, measured *relative to the market of the moment* — a dump is a dump
+  whenever it happened, but a genuine riser is not punished for being above
+  last week. A price nobody ever traded at keeps 5%.
+- **Price level**: how far today's quote sits above the item's **14-day
+  median**. The median is robust — a few pumped buckets barely move it — so a
+  spike shows up as elevation, and elevation is discounted hard (down to 10%).
+  Game commodity supply and demand barely move, so shocks revert; buying above
+  the median puts that reversion against you. Below the median costs nothing.
+- **Stability**: the median swing around that median. A flip is a round trip
+  holding inventory in between; jumpy items get discounted (down to 30%).
+- **Momentum**: decline is penalised (you hold falling inventory). A rise
+  earns **no bonus**: from price data alone, an update-driven demand shift and
+  a merch-clan pump are identical. The tool waits for a new level to settle —
+  at which point the level and stability factors like it on their own.
 - Items with under 8 traded buckets are flagged and left on intraday numbers.
 
 ### The intraday prices themselves
@@ -125,8 +132,8 @@ python3 journal.py stats
 - Qty/4h = min(buy limit, hourly thin-side volume ×4, slot budget ÷ buy price).
   The thin side of the book bounds throughput: a flip needs both a seller to
   fill your buy and a buyer to fill your sell.
-- Expected gp = margin × qty × queue factor × drift factor × freshness ×
-  14-day fill probability × momentum, where freshness halves for every
+- Expected gp = margin × qty × queue × drift × freshness × 14-day fill ×
+  price level × stability × momentum, where freshness halves for every
   10 minutes of quote age.
 - EV/slot/hour = expected gp ÷ 4, the buy-limit window. This is the ranking.
 

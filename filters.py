@@ -57,6 +57,11 @@ class FlipRow:
     trend: Optional[float] = None        # recent vs prior multi-day VWAP
     momentum: Optional[float] = None     # the EV multiplier from trend
     baseline_low: Optional[int] = None   # 14d volume-weighted seller price
+    median_mid: Optional[int] = None     # 14d median price level
+    elevation: Optional[float] = None    # quote mid vs median; + = above
+    volatility: Optional[float] = None   # median swing around the median
+    level_factor: Optional[float] = None
+    stability_factor: Optional[float] = None
 
 
 # Rejection reasons, in the order the gates run. Every item in /latest lands
@@ -205,13 +210,17 @@ def refine_with_history(
                 "no usable 14-day history — ranked on intraday data only",)))
             continue
         refined_count += 1
-        expected = row.expected_gp * view.fill_factor * view.momentum
+        expected = (row.expected_gp * view.fill_factor * view.momentum
+                    * view.level * view.stability)
         binding = min(view.buy_fill_share, view.sell_fill_share)
         refined_rows.append(replace(
             row,
             deep_checked=True, fill_share=binding,
             fill_factor=view.fill_factor, trend=view.trend,
             momentum=view.momentum, baseline_low=view.baseline_low,
+            median_mid=view.median_mid, elevation=view.elevation,
+            volatility=view.volatility, level_factor=view.level,
+            stability_factor=view.stability,
             expected_gp=expected,
             gp_per_slot_hour=engine.gp_per_slot_hour(expected),
             warnings=row.warnings + _history_warnings(view),
@@ -222,6 +231,12 @@ def refine_with_history(
 
 def _history_warnings(view: "engine.HistoryView") -> Tuple[str, ...]:
     notes = []
+    if view.elevation >= 0.05:
+        notes.append("trading {:.0%} above its 14-day median — spike or "
+                     "manipulation, expect reversion".format(view.elevation))
+    if view.volatility >= 0.05:
+        notes.append("price swings ±{:.0%} around its 14-day median — risky "
+                     "to hold".format(view.volatility))
     if view.dislocation <= -0.10:
         notes.append("buy price {:.0%} below the 14-day average — only the "
                      "dump fills there".format(abs(view.dislocation)))
@@ -230,8 +245,8 @@ def _history_warnings(view: "engine.HistoryView") -> Tuple[str, ...]:
         notes.append("only {:.0%} of 14-day volume traded at your prices"
                      .format(binding))
     if view.trend >= 0.03:
-        notes.append("rising {:.0%} over recent days — the signature of an "
-                     "update-driven demand shift".format(view.trend))
+        notes.append("risen {:.0%} over recent days — don't chase, wait for "
+                     "it to settle".format(view.trend))
     elif view.trend <= -0.03:
         notes.append("falling {:.0%} over recent days"
                      .format(abs(view.trend)))

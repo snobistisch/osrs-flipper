@@ -255,24 +255,57 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(view.momentum, 1.0)
         self.assertAlmostEqual(view.dislocation, 0.0)
 
-    def test_uptrend_rewarded_and_bounded(self):
+    def test_a_rise_earns_no_bonus(self):
+        # rises and pumps are indistinguishable in price data, so momentum
+        # rewards nothing and only punishes decline
         rising = [bucket(100 + i, 1_000, 98 + i, 1_000) for i in range(56)]
         view = engine.history_view(rising, buy=150, sell=155)
         self.assertGreater(view.trend, 0.05)
-        self.assertGreater(view.momentum, 1.0)
-        self.assertLessEqual(view.momentum, 1.25)
+        self.assertEqual(view.momentum, 1.0)
 
     def test_uptrend_quoted_at_the_band_keeps_full_fill(self):
         # fill shares are detrended: an item marching upward, quoted at its
         # usual spread around today's level, is not punished for trading
-        # above last week's absolute prices
+        # above last week's absolute prices — but the LEVEL factor still
+        # discounts it for sitting above its own 14-day median
         growth = 1.004
         rising = [bucket(round(12_600 * growth ** (i - 55)), 1_000,
                          round(12_200 * growth ** (i - 55)), 1_000)
                   for i in range(56)]
         view = engine.history_view(rising, buy=12_200, sell=12_600)
         self.assertEqual(view.fill_factor, 1.0)
-        self.assertGreater(view.momentum, 1.0)
+        self.assertEqual(view.momentum, 1.0)
+        self.assertGreater(view.elevation, 0.05)
+        self.assertLess(view.level, 1.0)
+
+    def test_pump_is_crushed_by_the_level_factor(self):
+        # 50 buckets at ~500, then a pump to 800: the median barely moves,
+        # so the quote sits ~60% above it and the discount hits the floor
+        calm = [bucket(510, 1_000, 490, 1_000) for _ in range(50)]
+        pumped = calm + [bucket(815, 3_000, 785, 3_000) for _ in range(6)]
+        view = engine.history_view(pumped, buy=785, sell=815)
+        self.assertEqual(view.median_mid, 500)
+        self.assertGreater(view.elevation, 0.5)
+        self.assertEqual(view.level, engine.LEVEL_FLOOR)
+        self.assertLessEqual(view.stability, 1.0)
+
+    def test_stability_punishes_a_jumpy_item(self):
+        # mids alternating 400/600: median 500, median swing 100 = 20%
+        jumpy = [bucket(610, 1_000, 590, 1_000) if i % 2 else
+                 bucket(410, 1_000, 390, 1_000) for i in range(56)]
+        view = engine.history_view(jumpy, buy=490, sell=510)
+        self.assertAlmostEqual(view.volatility, 0.2)
+        self.assertEqual(view.stability, engine.STABILITY_FLOOR)
+
+    def test_calm_item_at_its_median_keeps_both_factors(self):
+        view = engine.history_view(flat_history(), buy=40, sell=42)
+        self.assertEqual(view.level, 1.0)
+        self.assertEqual(view.stability, 1.0)
+        self.assertEqual(view.median_mid, 41)
+
+    def test_below_median_is_not_penalised(self):
+        # buying under the normal level is where a flipper wants to be
+        self.assertEqual(engine.level_factor(-0.15), 1.0)
 
     def test_downtrend_penalised_harder(self):
         up = engine.momentum_factor(0.05)
