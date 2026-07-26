@@ -1,39 +1,211 @@
-"""Pure flip math. No I/O, no API types — everything is unit-testable.
+"""Flip math. No I/O, no API types, no third-party imports — all unit-testable.
 
-The central idea: a quoted margin is not profit. It is profit *if* both legs
-of the flip actually fill, and the Grand Exchange gives you no guarantee of
-that. Everything below exists to turn a quoted margin into an expected value.
+A quoted margin is not profit. It is profit *if* both legs fill, and the Grand
+Exchange guarantees nothing. Everything here turns a quoted margin into an
+expected value per slot-hour.
+
+What changed from the first version, and why:
+
+- The old score multiplied nine hand-tuned factors together and divided by four
+  hours. Nine multiplicative constants against one observable outcome cannot be
+  calibrated: when a flip underdelivers, no amount of journal data can say
+  which factor was wrong, because they only ever appear as a product. Worse,
+  four hours was assumed, not modelled — an item that fills in twelve minutes
+  and one that takes the whole window were treated as differing only in size.
+- Fill time is now a random variable with a rate estimated from traded volume,
+  so gp/slot/hour is profit divided by the time a slot is actually occupied.
+- Undercut depth feeds the fill rate instead of being its own invented
+  multiplier: the gp of price improvement you can afford *is* how far you can
+  jump the queue, which is what changes your fill rate.
+- Level and volatility come from a per-item Ornstein-Uhlenbeck fit rather than
+  from one exponential decay constant applied to every item in the game.
+- Every remaining free parameter lives in `Calibration` below, each marked
+  DERIVED (forced by game mechanics or arithmetic) or CALIBRATE (a prior, to be
+  fitted from journal and archive data). Nothing is tuned by feel in the body
+  of a function.
 
 Conventions:
 - The buy side of a flip fills near the instant-sell price ("low"); the sell
   side fills near the instant-buy price ("high").
-- Tax rules as of 29 May 2025: seller pays 2% rounded down, capped at 5m per
-  item. Sub-50 gp items are untaxed because floor(price * 0.02) is 0 there.
+- Tax as of 29 May 2025: seller pays 2% rounded down, capped at 5m per item.
+  Sub-50 gp sells are untaxed because floor(price * 0.02) is 0 there.
 """
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import stats
 
 TAX_RATE = 0.02
 TAX_CAP = 5_000_000
 
-# Old school bond — exempt from GE tax entirely.
-TAX_EXEMPT_ITEM_IDS = frozenset({13190})
+# The GE tax rounds down, so every 50 gp of sell price is one more gp of tax.
+# Between two multiples of 50 the seller's net revenue is flat, which makes
+# undercutting inside that band free. See tax_boundary_undercut.
+TAX_STEP = int(round(1 / TAX_RATE))    # 50 gp per 1 gp of tax — DERIVED
 
-FIVE_MIN_BUCKETS_PER_WINDOW = 48  # 4h buy-limit window / 5-minute bucket
-HOUR_BUCKETS_PER_WINDOW = 4       # 4h buy-limit window / 1-hour bucket
 WINDOW_HOURS = 4                  # the buy-limit window
 
-# Offer slots cap how many flips you can run at once — the real bottleneck
-# long before gp is. Free-to-play gets three; members get eight.
+# There used to be constants here for extrapolating one bucket's volume across
+# the window (x48 for 5m buckets, x4 for 1h). The fill model replaced them:
+# throughput is now a rate scaled by your queue share, not one sample multiplied
+# by a number.
+
+# Offer slots cap how many flips you can run at once — the real bottleneck long
+# before gp is. Free-to-play gets three; members get eight.
 F2P_SLOTS = 3
 MEMBER_SLOTS = 8
 
 MAX_CASH_STACK = 2_147_483_647    # the game's coin cap
 
+SECONDS_PER_HOUR = 3600.0
+HOURS_PER_DAY = 24.0
+
+# A flip is two sequential legs sharing one window: you cannot list the sell
+# until the buy has filled. Sizing an offer against the whole window therefore
+# guarantees the sell leg has no time left in it — the buy consumes the horizon
+# and the round trip never completes. Each leg gets half. DERIVED.
+LEGS_PER_ROUND_TRIP = 2
+
+# /timeseries at 6h buckets, two weeks back. Kept as the default lookback, but
+# the OU fit reports its own half-life so an item whose dynamics run faster or
+# slower than this window is now visible rather than silently mismodelled.
+HISTORY_TIMESTEP = "6h"
+HISTORY_BUCKET_HOURS = 6.0
+HISTORY_BUCKET_DAYS = HISTORY_BUCKET_HOURS / HOURS_PER_DAY
+HISTORY_WINDOW_BUCKETS = 56       # 14 days of 6h buckets
+MIN_HISTORY_BUCKETS = 8           # fewer traded buckets: refuse to refine
+RECENT_TREND_BUCKETS = 12         # ~3 days
+FILL_TOLERANCE = 0.01             # prices within 1% count as reachable
+
 _GP_SUFFIXES = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
 
+
+# ---------------------------------------------------------------------------
+# Free parameters, all in one place
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Calibration:
+    """Every number the model cannot derive from game mechanics.
+
+    DERIVED  — forced by the rules of the game or by arithmetic; not free.
+    MEASURED — read from the data at runtime, not stored here.
+    CALIBRATE — a prior. Fit it from journal outcomes (journal.py records the
+                inputs) or from the tick archive (archive.py). Until then it is
+                a stated belief, and it is stated *here* rather than buried in
+                a function body so it can be changed in one place and so the
+                journal can record which values produced a prediction.
+    """
+
+    # -- fill model ---------------------------------------------------------
+    # How many offers you are queued behind at the touch price. Your share of
+    # arriving volume at that price is 1/competitors. CALIBRATE: from the tick
+    # archive, as observed fill rate divided by total volume at the touch.
+    competitors_at_touch: float = 4.0
+
+    # How much of the spread you must concede before you have essentially
+    # jumped the whole queue. Expressed as a fraction of the spread rather than
+    # of the price: 1 gp of improvement is decisive on a 3 gp spread and
+    # meaningless on a 300 gp one, and normalising by the mid instead would
+    # rank cheap items and expensive ones on different scales — which is how
+    # the old fixed-gp queue constant misranked them.
+    # CALIBRATE: regress observed fill rate on distance from the touch.
+    aggressiveness_scale: float = 0.25
+
+    # Floor on how long one leg can take. Not a market property: placing an
+    # offer, returning to the GE and collecting takes a human about a minute,
+    # so no flip cycles faster than this however thick the book is. DERIVED
+    # from the interaction, not from prices.
+    min_leg_seconds: float = 60.0
+
+    # -- adverse selection --------------------------------------------------
+    # Sensitivity to order-flow imbalance running against the position.
+    # CALIBRATE: regress holding-period return on OFI at entry.
+    adverse_selection_gamma: float = 0.5
+    # Sensitivity to price drift between the 5m and 1h mids. Falling markets
+    # are penalised harder than rising ones: a resting buy fills fastest
+    # exactly when someone is dumping into it, and then the sell leg is
+    # stranded above the market. CALIBRATE alongside gamma.
+    drift_penalty_falling: float = 8.0
+    drift_penalty_rising: float = 4.0
+    adverse_selection_floor: float = 0.2
+
+    # -- holding-period risk ------------------------------------------------
+    # Risk aversion over the price move between the two legs. eta = 1 prices a
+    # one-sigma adverse move as a full sigma of discount. CALIBRATE: choose to
+    # hit a target Sharpe on journal outcomes.
+    risk_aversion_eta: float = 1.0
+    # Same idea applied to the age of the quote you are trading against: the
+    # price may already have moved since that print. CALIBRATE.
+    staleness_eta: float = 1.0
+    # Volatility (per sqrt-day, log scale) assumed when no OU fit exists yet.
+    # CALIBRATE: the cross-sectional median of fitted sigmas.
+    default_sigma_daily: float = 0.05
+
+    # -- mean reversion and trend ------------------------------------------
+    # Weight on the OU-implied expected return over the holding period.
+    # CALIBRATE: regress realised holding-period return on the OU prediction.
+    mean_reversion_omega: float = 1.0
+    # Cap on how much mean reversion may move a score, either way. Keeps a
+    # badly conditioned fit on a thin item from dominating the ranking.
+    mean_reversion_cap: float = 0.5
+    # Trending items get a much smaller, capped credit than reverting ones: a
+    # rising price and a merch-clan pump are indistinguishable from price data
+    # alone, so this stays deliberately timid. CALIBRATE.
+    trend_tau: float = 0.5
+    trend_cap: float = 0.10
+    # Above this regime-shift score the OU fit spans two different markets and
+    # its mean is meaningless. CALIBRATE.
+    regime_shift_threshold: float = 4.0
+
+    # -- structural ---------------------------------------------------------
+    # Credit for buying near the high-alchemy floor, which caps the downside.
+    # CALIBRATE: the most you should overpay for that protection.
+    alch_alpha: float = 2.0
+    # Ignore the alch floor further than this below the buy price — protection
+    # 40% below the market is not protection you will ever use. DERIVED-ish.
+    alch_relevant_distance: float = 0.40
+
+    # -- update risk --------------------------------------------------------
+    # Discount for a flip whose sell leg is still open when the weekly update
+    # lands. CALIBRATE: compare realised returns across updates.
+    update_risk_penalty: float = 0.35
+    # Hours before the update at which the discount starts to bite.
+    update_risk_lead_hours: float = 6.0
+
+    # -- shrinkage ----------------------------------------------------------
+    # Estimation noise on a log score has two parts.
+    #
+    # Sampling noise falls as 1/sqrt(observed volume): this is the scale at one
+    # unit per hour. CALIBRATE: from the dispersion of repeated scores for the
+    # same item in the tick archive.
+    score_noise_scale: float = 3.0
+    # Irreducible noise that no amount of volume removes. A margin is inferred
+    # from two prints, and the question a score really answers is whether that
+    # spread will still be there when your offer is resting — which the volume
+    # behind those prints says nothing about. Without this floor the busiest
+    # items are treated as measured almost exactly, and shrinkage stops doing
+    # anything at the top of the list, which is the one place it matters.
+    # CALIBRATE: from how far an item's score moves between consecutive polls.
+    # 0.35 on a log scale is roughly +/-40%, which is about how much a liquid
+    # item's computed score wanders poll to poll. Setting it much higher starts
+    # declaring genuine 3x differences to be noise.
+    score_noise_floor: float = 0.35
+
+    # -- horizon ------------------------------------------------------------
+    horizon_hours: float = float(WINDOW_HOURS)
+
+
+DEFAULT_CALIBRATION = Calibration()
+
+
+# ---------------------------------------------------------------------------
+# gp formatting
+# ---------------------------------------------------------------------------
 
 def parse_gp(text: str) -> int:
     """Parse a gp amount the way players write it: '250k', '1.5m', '2b',
@@ -63,11 +235,28 @@ def format_gp(amount: int) -> str:
     """Format gp the way players read it: '1.5m', '250k', '999'. Rounds to
     one decimal, so use the exact number wherever precision matters."""
     for suffix, size in (("b", 10 ** 9), ("m", 10 ** 6), ("k", 10 ** 3)):
-        if amount >= size:
+        if abs(amount) >= size:
             text = "{:.1f}".format(amount / size).rstrip("0").rstrip(".")
             return text + suffix
     return "{:,}".format(amount)
 
+
+def format_duration(seconds: float) -> str:
+    """'40s', '12m', '3.5h', '2d' — for expected fill times."""
+    if seconds != seconds or seconds == float("inf"):
+        return "never"
+    if seconds < 90:
+        return "{:.0f}s".format(seconds)
+    if seconds < 5400:
+        return "{:.0f}m".format(seconds / 60)
+    if seconds < 48 * SECONDS_PER_HOUR:
+        return "{:.1f}h".format(seconds / SECONDS_PER_HOUR).replace(".0h", "h")
+    return "{:.0f}d".format(seconds / (24 * SECONDS_PER_HOUR))
+
+
+# ---------------------------------------------------------------------------
+# Prices
+# ---------------------------------------------------------------------------
 
 def reference_price(
     avg_5m: Optional[int], volume_5m: int,
@@ -115,26 +304,182 @@ def ge_tax(sell_price: int, tax_exempt: bool = False) -> int:
     return min(TAX_CAP, math.floor(sell_price * TAX_RATE))
 
 
+def net_revenue(sell_price: int, tax_exempt: bool = False) -> int:
+    """What the seller actually receives."""
+    return sell_price - ge_tax(sell_price, tax_exempt)
+
+
 def net_margin(buy_price: int, sell_price: int, tax_exempt: bool = False) -> int:
     """Profit on one item after tax. Negative when the spread can't cover tax."""
-    return (sell_price - ge_tax(sell_price, tax_exempt)) - buy_price
+    return net_revenue(sell_price, tax_exempt) - buy_price
 
 
 def roi(buy_price: int, sell_price: int, tax_exempt: bool = False) -> float:
     """Net margin as a fraction of capital tied up per item."""
+    if buy_price <= 0:
+        return 0.0
     return net_margin(buy_price, sell_price, tax_exempt) / buy_price
 
 
-def window_volume(high_volume: int, low_volume: int,
-                  buckets_per_window: int) -> int:
-    """Estimated flippable units per 4h window.
+def tax_boundary_undercut(sell_price: int, tax_exempt: bool = False) -> int:
+    """Lowest sell price with the same net revenue as `sell_price`.
 
-    A flip needs both sides of the book: someone instant-selling to fill your
-    buy, someone instant-buying to fill your sell. The thin side of the bucket
-    bounds throughput; extrapolated over the window (48 for 5m buckets, 4 for
-    1h buckets).
+    Because the tax rounds down, net revenue is a staircase: selling at 100
+    nets 98, and so does 99. Every gp between two multiples of 50 is priced
+    identically to the seller, so undercutting inside that band buys queue
+    priority for nothing. A flipper listing at exactly 1,000 when 999 nets the
+    same is giving away position for free.
+
+    Returns the price unchanged when it is already at the bottom of its band,
+    when it is exempt, or when it is below the taxable threshold.
     """
-    return min(high_volume, low_volume) * buckets_per_window
+    if tax_exempt or sell_price <= 0:
+        return sell_price
+    target = net_revenue(sell_price, tax_exempt)
+    # The band cannot be wider than one tax step, so this walks at most TAX_STEP
+    # prices even at the 5m cap.
+    candidate = sell_price
+    while candidate > 1 and net_revenue(candidate - 1, tax_exempt) >= target:
+        candidate -= 1
+    return candidate
+
+
+def break_even_sell(buy_price: int, tax_exempt: bool = False) -> int:
+    """Cheapest sell price that clears a profit of at least 1 gp per item."""
+    if tax_exempt:
+        return buy_price + 1
+    # net(p) ~ 0.98p, so start just above the analytic solution and walk up.
+    candidate = max(buy_price + 1, int(buy_price / (1 - TAX_RATE)))
+    while net_margin(buy_price, candidate, tax_exempt) <= 0:
+        candidate += 1
+    return candidate
+
+
+# ---------------------------------------------------------------------------
+# Queue position
+# ---------------------------------------------------------------------------
+
+def undercut_depth(buy: int, sell: int, tax_exempt: bool = False) -> int:
+    """How many gp of price improvement you can afford on each side at once
+    while the flip still profits.
+
+    The Grand Exchange matches on price first, then on offer age: at the same
+    price, offers that are days old take near-absolute priority. So there are
+    exactly two ways to get filled — outbid the queue, or wait behind a queue
+    you cannot see and cannot measure.
+
+    Depth 0 means every gp of price improvement costs more than the flip earns,
+    so your offer sits behind everyone else's at the same tick. Air runes quoted
+    at 5/6 are the canonical case: buying at 6 to sell at 5 is a guaranteed
+    loss, so a 1 gp margin can only ever be won by waiting.
+
+    Leather quoted at 173/192 has depth 7: bidding 180 to sell at 185 still
+    clears 2 gp after tax, so you can pay for priority and still profit.
+
+    Depth is no longer a score multiplier of its own. It is the input to the
+    fill rate — how far ahead of the queue you can buy your way is precisely
+    what determines how fast you fill.
+    """
+    if net_margin(buy, sell, tax_exempt) <= 0:
+        return 0
+    lo, hi = 0, max(0, (sell - buy) // 2 + 1)
+    while lo < hi:                      # binary search: margin falls with k
+        mid = (lo + hi + 1) // 2
+        if net_margin(buy + mid, sell - mid, tax_exempt) > 0:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def aggressiveness(edge: float,
+                   calibration: Calibration = DEFAULT_CALIBRATION) -> float:
+    """Share of arriving volume your offer captures, given how far inside the
+    touch you are willing to price.
+
+    At the touch you are one of several offers at that price and take roughly
+    1/N of what arrives. Concede some of the spread and you move ahead of them;
+    concede enough and you are taking essentially everything that arrives.
+
+    `edge` is the concession as a fraction of the spread, so an item with no
+    room to improve (the air rune at 5/6) sits at its queue share and cannot
+    buy its way out, which is exactly the trap the number exists to price.
+    """
+    share = 1.0 / max(1.0, calibration.competitors_at_touch)
+    if edge <= 0:
+        return share
+    scale = max(calibration.aggressiveness_scale, 1e-9)
+    return share + (1.0 - share) * (1.0 - math.exp(-edge / scale))
+
+
+def price_edge(depth: int, spread: float) -> float:
+    """Undercut room as a fraction of the spread it is being taken out of."""
+    if spread <= 0:
+        return 0.0
+    return max(0.0, depth / spread)
+
+
+# ---------------------------------------------------------------------------
+# Fill time
+# ---------------------------------------------------------------------------
+
+def fill_rate(volume_per_hour: float, share: float) -> float:
+    """Units per second your offer can expect to absorb."""
+    if volume_per_hour <= 0 or share <= 0:
+        return 0.0
+    return (volume_per_hour / SECONDS_PER_HOUR) * share
+
+
+def expected_fill_seconds(qty: int, rate: float,
+                          calibration: Calibration = DEFAULT_CALIBRATION) -> float:
+    """Mean time for one leg of `qty` units at `rate` units/second.
+
+    Floored at min_leg_seconds: on a very liquid item the arithmetic says a
+    small offer clears in under a second, but you still have to walk to the
+    Grand Exchange and collect it.
+    """
+    if qty <= 0:
+        return calibration.min_leg_seconds
+    if rate <= 0:
+        return float("inf")
+    return max(calibration.min_leg_seconds, qty / rate)
+
+
+def fill_probability(expected_seconds: float, horizon_seconds: float) -> float:
+    """P(leg completes within the horizon), treating fill time as exponential.
+
+    Exponential because offers are matched by an arrival process we cannot
+    observe: memorylessness is the honest assumption when queue position is
+    invisible. It has the right shape — most of the probability mass early,
+    a long tail of offers that simply never fill.
+    """
+    if expected_seconds == float("inf") or expected_seconds <= 0:
+        return 0.0
+    if horizon_seconds <= 0:
+        return 0.0
+    return 1.0 - math.exp(-horizon_seconds / expected_seconds)
+
+
+def fillable_quantity(volume_per_hour: float, share: float,
+                      horizon_hours: float) -> int:
+    """Units the market can hand you on ONE leg inside the horizon.
+
+    This replaces multiplying one bucket's thin-side volume by four. That
+    extrapolation assumed the last hour repeats, ignored that you only get your
+    share of the queue, and ignored that volume is strongly U-shaped over the
+    day. Scaling the observed rate by your queue share prices the first two
+    honestly; archive.py's EWMA addresses the third by smoothing the rate over
+    days rather than trusting one bucket.
+
+    Pass the per-leg horizon, not the whole window — see LEGS_PER_ROUND_TRIP.
+    """
+    rate = fill_rate(volume_per_hour, share)
+    return max(0, int(rate * horizon_hours * SECONDS_PER_HOUR))
+
+
+def leg_horizon_hours(calibration: "Calibration") -> float:
+    """How long one leg may take if the round trip is to fit in the window."""
+    return calibration.horizon_hours / LEGS_PER_ROUND_TRIP
 
 
 def flippable_qty(buy_limit, volume: int, affordable=None) -> int:
@@ -151,71 +496,24 @@ def flippable_qty(buy_limit, volume: int, affordable=None) -> int:
     return max(qty, 0)
 
 
-def profit_per_window(margin: int, qty: int) -> int:
-    """Expected gp per 4h window at the given per-item margin."""
-    return margin * qty
+# ---------------------------------------------------------------------------
+# Adverse selection
+# ---------------------------------------------------------------------------
 
+def order_flow_imbalance(high_volume: float, low_volume: float) -> float:
+    """Signed share of aggressor volume, in [-1, 1].
 
-def freshness(age_seconds: float, half_life: float = 600.0) -> float:
-    """Confidence in a quote: 1.0 when brand new, halving every half_life s.
-
-    /latest reports the LAST trade on each side, which can be hours old; a
-    wide margin on stale data usually means a dead item, not free money.
+    Trades at the high price are buyer-initiated (someone lifted an ask);
+    trades at the low price are seller-initiated (someone hit a bid). Positive
+    means buyers were the aggressors. For a flipper the dangerous sign is
+    negative: heavy seller-initiated flow is the flow that fills your resting
+    buy right before the price keeps going down.
     """
-    if age_seconds <= 0:
-        return 1.0
-    return 0.5 ** (age_seconds / half_life)
+    total = high_volume + low_volume
+    if total <= 0:
+        return 0.0
+    return (high_volume - low_volume) / total
 
-
-# ---------------------------------------------------------------------------
-# Queue position — why a wide-volume, one-tick spread is a trap
-# ---------------------------------------------------------------------------
-
-def undercut_depth(buy: int, sell: int, tax_exempt: bool = False) -> int:
-    """How many gp of price improvement you can afford on each side at once
-    while the flip still profits.
-
-    The Grand Exchange matches on price first, then on offer age: at the same
-    price, offers that are days old take near-absolute priority. So there are
-    exactly two ways to get filled — outbid the queue, or wait behind a queue
-    you cannot see and cannot measure.
-
-    Depth is how much room you have to do the first. Depth 0 means every gp of
-    price improvement costs more than the flip earns, so you have no way to
-    jump ahead: your offer sits behind everyone else's at the same tick. Air
-    runes quoted at 5/6 are the canonical case — buying at 6 to sell at 5 is a
-    guaranteed loss, so a 1 gp margin can only ever be won by waiting.
-
-    Leather quoted at 173/192 has depth 7: bidding 180 to sell at 185 still
-    clears 2 gp after tax, so you can pay for priority and still profit.
-    """
-    if net_margin(buy, sell, tax_exempt) <= 0:
-        return 0
-    lo, hi = 0, max(0, (sell - buy) // 2 + 1)
-    while lo < hi:                      # binary search: margin falls with k
-        mid = (lo + hi + 1) // 2
-        if net_margin(buy + mid, sell - mid, tax_exempt) > 0:
-            lo = mid
-        else:
-            hi = mid - 1
-    return lo
-
-
-def queue_factor(depth: int) -> float:
-    """Fraction of the quoted margin you should expect to actually capture,
-    given how much room you have to buy your way to the front of the queue.
-
-    Depth 0 keeps a small non-zero weight rather than zero: those flips do
-    sometimes fill, you just cannot influence whether they do.
-    """
-    if depth <= 0:
-        return 0.15
-    return 1.0 - math.exp(-depth / 3.0)
-
-
-# ---------------------------------------------------------------------------
-# Adverse selection — passive orders fill when you least want them to
-# ---------------------------------------------------------------------------
 
 def price_drift(mid_5m: Optional[float], mid_1h: Optional[float]) -> float:
     """Recent momentum, as a fraction of price. Negative means falling."""
@@ -224,82 +522,521 @@ def price_drift(mid_5m: Optional[float], mid_1h: Optional[float]) -> float:
     return (mid_5m - mid_1h) / mid_1h
 
 
-def drift_factor(drift: float) -> float:
-    """Discount for trading against a moving market.
+def adverse_selection_factor(
+    ofi: float, drift: float,
+    calibration: Calibration = DEFAULT_CALIBRATION,
+) -> float:
+    """Discount for trading against informed flow.
 
-    A resting buy offer fills fastest exactly when the price is falling —
-    someone is dumping into it — and then the sell leg is stranded above the
-    market. That asymmetry is why passive orders realise less than they quote.
-    A falling market is penalised harder than a rising one because you are the
-    one holding inventory between the two legs.
+    Two independent readings of the same hazard: order-flow imbalance says who
+    is being aggressive right now, drift says where the price has been going.
+    Both are penalised only in the direction that hurts a flipper — you are
+    long between the legs, so selling pressure is the risk and buying pressure
+    is not a symmetric gift.
     """
-    penalty = 8.0 * abs(drift) if drift < 0 else 4.0 * drift
-    return max(0.2, 1.0 - penalty)
+    penalty = 0.0
+    if ofi < 0:
+        penalty += calibration.adverse_selection_gamma * abs(ofi)
+    if drift < 0:
+        penalty += calibration.drift_penalty_falling * abs(drift)
+    else:
+        penalty += calibration.drift_penalty_rising * drift
+    return max(calibration.adverse_selection_floor, 1.0 - penalty)
 
 
 # ---------------------------------------------------------------------------
-# Expected value
+# Risk over time
 # ---------------------------------------------------------------------------
 
-def expected_value(margin: int, qty: int, depth: int, drift: float,
-                   age_seconds: float) -> float:
-    """Expected gp from one 4-hour window on this item.
+def holding_risk(sigma_daily: float, hold_seconds: float,
+                 calibration: Calibration = DEFAULT_CALIBRATION) -> float:
+    """Discount for the price moving against you while you hold inventory.
 
-    The quoted margin times the quantity is the best case: both legs fill at
-    the quoted prices. Each factor below is a reason that does not happen.
+    The buy leg fills first; until the sell leg fills you are long. The
+    standard deviation of the price move over that window scales with the
+    square root of its length, so a flip that sits for a day on a volatile item
+    is a different proposition from the same margin cleared in ten minutes.
+    The old model had one volatility discount that knew nothing about how long
+    the position would be open.
     """
-    return (margin * qty
-            * queue_factor(depth)
-            * drift_factor(drift)
-            * freshness(age_seconds))
+    if hold_seconds == float("inf"):
+        return 0.0
+    if sigma_daily <= 0 or hold_seconds <= 0:
+        return 1.0
+    days = hold_seconds / (SECONDS_PER_HOUR * HOURS_PER_DAY)
+    return math.exp(-calibration.risk_aversion_eta * sigma_daily * math.sqrt(days))
+
+
+def staleness_factor(age_seconds: float, sigma_daily: float,
+                     calibration: Calibration = DEFAULT_CALIBRATION) -> float:
+    """Confidence in a quote, given how far the price could have moved since.
+
+    The old version halved confidence every 600 seconds for every item alike.
+    That is too harsh on a liquid staple, where a 20-minute-old print is still
+    the market, and too kind on a thin volatile one, where a 30-second-old
+    print may already be gone. What actually decays is not time but price
+    certainty, so the discount is driven by the item's own volatility over the
+    elapsed time.
+    """
+    if age_seconds <= 0:
+        return 1.0
+    sigma = sigma_daily if sigma_daily > 0 else calibration.default_sigma_daily
+    days = age_seconds / (SECONDS_PER_HOUR * HOURS_PER_DAY)
+    return math.exp(-calibration.staleness_eta * sigma * math.sqrt(days))
 
 
 # ---------------------------------------------------------------------------
-# Multi-day history — the last print is not the market
+# Mean reversion, from a per-item OU fit
+# ---------------------------------------------------------------------------
+
+def mean_reversion_factor(
+    fit: Optional["stats.OUFit"], mid_price: float, hold_seconds: float,
+    regime_score: float = 0.0,
+    calibration: Calibration = DEFAULT_CALIBRATION,
+) -> float:
+    """EV multiplier from where the price sits relative to its own level.
+
+    Replaces the old level and momentum factors. Those applied one exponential
+    penalty above a 14-day median to every item in the game, which is right for
+    a rune and wrong for a raid unique: supply of rare gear is fixed, demand
+    grows, and "above its two-week median" is that item's permanent condition.
+
+    An OU fit separates the two cases per item. Where reversion is real and
+    statistically significant, the expected return over the *actual* holding
+    period is credited or charged. Where it is not — a trending item, or one
+    whose history straddles a game update that re-priced it — the fit is not
+    trusted, and only a small capped trend term applies.
+    """
+    if fit is None or mid_price <= 0 or hold_seconds <= 0:
+        return 1.0
+    if hold_seconds == float("inf"):
+        return 1.0
+    days = hold_seconds / (SECONDS_PER_HOUR * HOURS_PER_DAY)
+
+    if regime_score >= calibration.regime_shift_threshold:
+        # The series spans two different markets; its mean is an average of a
+        # level that no longer exists and one that has not settled.
+        return 1.0
+
+    if fit.mean_reverting:
+        expected = fit.expected_log_return(mid_price, days)
+        adjustment = calibration.mean_reversion_omega * expected
+        cap = calibration.mean_reversion_cap
+        return 1.0 + max(-cap, min(cap, adjustment))
+
+    # Not significantly reverting: treat as a trend, timidly. A rising price
+    # and a merch-clan pump look identical in price data, so the upside credit
+    # is capped hard and the downside is not.
+    drift_per_day = -fit.kappa * (fit.mu - math.log(mid_price))
+    move = drift_per_day * days
+    capped = max(-calibration.trend_cap, min(calibration.trend_cap, move))
+    return max(0.5, 1.0 + calibration.trend_tau * capped)
+
+
+# ---------------------------------------------------------------------------
+# High alchemy — the floor under the price
+# ---------------------------------------------------------------------------
+
+def alch_floor(highalch: Optional[int], nature_rune_cost: int) -> Optional[int]:
+    """Guaranteed gp per item from casting High Level Alchemy, net of the rune.
+
+    No rational holder sells below this on the GE, because the spell pays it
+    unconditionally. For a flipper it is a free put: the worst case on the sell
+    leg is the floor, not zero.
+    """
+    if highalch is None or highalch <= 0:
+        return None
+    return highalch - nature_rune_cost
+
+
+def alch_distance(buy_price: int, floor: Optional[int]) -> Optional[float]:
+    """How far the buy price sits above the alchemy floor, as a fraction.
+
+    Negative means the item is trading below what alching pays — a risk-free
+    arbitrage that does not need a GE sell leg at all.
+    """
+    if floor is None or buy_price <= 0:
+        return None
+    return (buy_price - floor) / buy_price
+
+
+def alch_bonus(distance: Optional[float],
+               calibration: Calibration = DEFAULT_CALIBRATION) -> float:
+    """Credit for downside that is capped by the alchemy floor.
+
+    The old engine loaded highalch from /mapping into the Item dataclass and
+    then never referenced it again.
+    """
+    if distance is None or distance >= calibration.alch_relevant_distance:
+        return 1.0
+    if distance <= 0:
+        # Handled as an arbitrage by the caller, not as a multiplier — an
+        # unbounded bonus here would swamp the ranking.
+        return 1.0
+    return math.exp(calibration.alch_alpha * (calibration.alch_relevant_distance
+                                              - distance) / 10.0)
+
+
+def alch_profit(highalch: Optional[int], buy_price: int,
+                nature_rune_cost: int) -> Optional[int]:
+    """Profit per item from buying on the GE and alching, or None if not alchable."""
+    floor = alch_floor(highalch, nature_rune_cost)
+    if floor is None:
+        return None
+    return floor - buy_price
+
+
+# ---------------------------------------------------------------------------
+# Weekly update risk
+# ---------------------------------------------------------------------------
+
+# OSRS ships its weekly update on Wednesday, historically around 11:00 UTC.
+# Times slip, so this is a scheduling prior, not a guarantee.
+UPDATE_WEEKDAY = 2        # Monday = 0
+UPDATE_HOUR_UTC = 11
+
+
+def seconds_until_update(now: float) -> float:
+    """Seconds from `now` (unix) to the next weekly update window."""
+    current = datetime.fromtimestamp(now, tz=timezone.utc)
+    days_ahead = (UPDATE_WEEKDAY - current.weekday()) % 7
+    target = current.replace(hour=UPDATE_HOUR_UTC, minute=0, second=0,
+                             microsecond=0) + timedelta(days=days_ahead)
+    if target <= current:
+        target += timedelta(days=7)
+    return (target - current).total_seconds()
+
+
+def update_risk_factor(now: float, expected_hold_seconds: float,
+                       calibration: Calibration = DEFAULT_CALIBRATION) -> float:
+    """Discount for a position that is still open when the update lands.
+
+    Patch notes are read by players faster than prices adjust, so anyone
+    holding inventory across an update is the uninformed side of every trade
+    that follows it. The penalty applies only when the flip is not expected to
+    be closed in time — a ten-minute flip on Wednesday morning is unaffected.
+    """
+    if expected_hold_seconds <= 0:
+        return 1.0
+    horizon = expected_hold_seconds
+    if horizon == float("inf"):
+        horizon = calibration.horizon_hours * SECONDS_PER_HOUR
+    until = seconds_until_update(now)
+    lead = calibration.update_risk_lead_hours * SECONDS_PER_HOUR
+    exposure = horizon + lead
+    if until >= exposure:
+        return 1.0
+    # Ramps from no penalty at the edge of the exposure window to the full
+    # penalty at the update itself.
+    closeness = 1.0 - (until / exposure) if exposure > 0 else 1.0
+    return max(0.0, 1.0 - calibration.update_risk_penalty * closeness)
+
+
+# ---------------------------------------------------------------------------
+# The score
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ScoreBreakdown:
+    """Every term that produced a score, kept separately.
+
+    The point of storing the decomposition rather than only the product: a
+    nine-factor product against one realised number is unidentifiable, so the
+    journal records each factor at entry and the error can afterwards be
+    attributed to the factor that caused it.
+    """
+    qty: int
+    margin: int
+    raw_profit: int
+    capital_needed: int
+
+    buy_share: float
+    sell_share: float
+    buy_rate: float                 # units/second
+    sell_rate: float
+    buy_seconds: float
+    sell_seconds: float
+    total_seconds: float
+    p_fill_buy: float
+    p_fill_sell: float
+    p_fill_both: float
+
+    adverse_selection: float
+    holding_risk: float
+    staleness: float
+    mean_reversion: float
+    alch: float
+    update_risk: float
+
+    expected_profit: float
+    gp_per_slot_hour: float
+
+    alch_arbitrage_gp: Optional[int] = None   # per item, if below the floor
+
+    def factors(self) -> Dict[str, float]:
+        """Flat name -> value map, for journal recording and error attribution."""
+        return {
+            "p_fill_both": self.p_fill_both,
+            "adverse_selection": self.adverse_selection,
+            "holding_risk": self.holding_risk,
+            "staleness": self.staleness,
+            "mean_reversion": self.mean_reversion,
+            "alch": self.alch,
+            "update_risk": self.update_risk,
+        }
+
+
+def score_flip(
+    *,
+    buy: int,
+    sell: int,
+    margin: int,
+    qty: int,
+    depth: int,
+    buy_volume_1h: float,
+    sell_volume_1h: float,
+    quote_age: float,
+    ofi: float,
+    drift: float,
+    now: float,
+    sigma_daily: Optional[float] = None,
+    ou_fit: Optional["stats.OUFit"] = None,
+    regime_score: float = 0.0,
+    highalch: Optional[int] = None,
+    nature_rune_cost: int = 100,
+    calibration: Calibration = DEFAULT_CALIBRATION,
+) -> ScoreBreakdown:
+    """Expected gp per slot-hour for one flip, with its decomposition.
+
+    `buy_volume_1h` is seller-initiated volume (what fills your buy offer);
+    `sell_volume_1h` is buyer-initiated volume (what fills your sell offer).
+    """
+    mid = (buy + sell) / 2.0
+    share = aggressiveness(price_edge(depth, sell - buy), calibration)
+
+    buy_rate = fill_rate(buy_volume_1h, share)
+    sell_rate = fill_rate(sell_volume_1h, share)
+    buy_seconds = expected_fill_seconds(qty, buy_rate, calibration)
+    sell_seconds = expected_fill_seconds(qty, sell_rate, calibration)
+    total_seconds = buy_seconds + sell_seconds
+
+    horizon_seconds = calibration.horizon_hours * SECONDS_PER_HOUR
+    p_buy = fill_probability(buy_seconds, horizon_seconds)
+    # The sell leg only gets whatever is left of the horizon after the buy leg,
+    # approximated at its mean. Both legs racing the same clock is the point:
+    # an item that fills its buy in three hours has almost no time to sell.
+    remaining = max(0.0, horizon_seconds - min(buy_seconds, horizon_seconds))
+    p_sell = fill_probability(sell_seconds, remaining)
+    p_both = p_buy * p_sell
+
+    sigma = sigma_daily if sigma_daily is not None else (
+        ou_fit.sigma if ou_fit is not None else calibration.default_sigma_daily)
+    if sigma is None or sigma <= 0:
+        sigma = calibration.default_sigma_daily
+
+    adverse = adverse_selection_factor(ofi, drift, calibration)
+    hold = holding_risk(sigma, sell_seconds, calibration)
+    stale = staleness_factor(quote_age, sigma, calibration)
+    reversion = mean_reversion_factor(ou_fit, mid, sell_seconds, regime_score,
+                                      calibration)
+    floor = alch_floor(highalch, nature_rune_cost)
+    distance = alch_distance(buy, floor)
+    alch = alch_bonus(distance, calibration)
+    update = update_risk_factor(now, total_seconds, calibration)
+
+    raw_profit = margin * qty
+    expected = (raw_profit * p_both * adverse * hold * stale * reversion
+                * alch * update)
+
+    hours = total_seconds / SECONDS_PER_HOUR
+    per_slot_hour = expected / hours if hours > 0 and hours != float("inf") else 0.0
+
+    arbitrage = None
+    if distance is not None and distance <= 0 and floor is not None:
+        arbitrage = floor - buy
+
+    return ScoreBreakdown(
+        qty=qty, margin=margin, raw_profit=raw_profit, capital_needed=qty * buy,
+        buy_share=share, sell_share=share, buy_rate=buy_rate, sell_rate=sell_rate,
+        buy_seconds=buy_seconds, sell_seconds=sell_seconds,
+        total_seconds=total_seconds, p_fill_buy=p_buy, p_fill_sell=p_sell,
+        p_fill_both=p_both, adverse_selection=adverse, holding_risk=hold,
+        staleness=stale, mean_reversion=reversion, alch=alch, update_risk=update,
+        expected_profit=expected, gp_per_slot_hour=per_slot_hour,
+        alch_arbitrage_gp=arbitrage)
+
+
+# ---------------------------------------------------------------------------
+# Shrinkage across the whole scored universe
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ShrunkScores:
+    values: List[float]              # gp/slot/hour after shrinkage
+    edge_probability: List[float]    # P(true score beats the market average)
+    prior_mean_gp: float
+    tau_squared: float
+    applied: bool = True
+
+    @property
+    def informative(self) -> bool:
+        """False when no difference between these scores survives the noise."""
+        return self.tau_squared > 0
+
+
+def shrink_scores(
+    raw: Sequence[float],
+    observation_counts: Sequence[float],
+    calibration: Calibration = DEFAULT_CALIBRATION,
+) -> ShrunkScores:
+    """Correct a ranking of thousands of noisy estimates.
+
+    Ranking N noisy estimates and reading off the top does not find the best
+    items; it finds the items whose estimation error happened to be largest and
+    positive. With N in the thousands and each estimate resting on a handful of
+    trades, that bias is not a nuisance term — it is most of what the top of
+    the list is made of. The bias is worst exactly where the data is thinnest,
+    so the correction has to be per-item, not a flat haircut.
+
+    The correction is a normal-normal posterior on the log scale, so items
+    spanning five orders of magnitude are comparable: each score is pulled
+    toward the cross-sectional mean, and thin-volume scores are pulled much
+    further because their evidence is thinner.
+
+    `observation_counts` is the volume each estimate rests on. Noise falls as
+    1/sqrt(count), so a staple quoted off 40,000 traded units keeps almost all
+    of its estimate and a 12-unit curiosity keeps almost none.
+
+    Alongside the shrunk value, each item gets the posterior probability that
+    its true score beats the market-wide average. Ranking alone cannot say
+    whether the item on top is genuinely better or merely luckier; that
+    probability can, and it collapses toward 50% exactly where the evidence is
+    too thin to tell.
+    """
+    positive_index = [i for i, value in enumerate(raw) if value > 0]
+    if not positive_index:
+        return ShrunkScores(list(raw), [0.0] * len(raw), 0.0, 0.0, False)
+
+    logs = [math.log(raw[i]) for i in positive_index]
+    variances = []
+    for i in positive_index:
+        count = max(1.0, float(observation_counts[i]))
+        sampling = calibration.score_noise_scale / math.sqrt(count)
+        floor = calibration.score_noise_floor
+        variances.append(max(sampling * sampling + floor * floor, 1e-9))
+
+    shrunk = stats.empirical_bayes(logs, variances)
+
+    values = list(raw)
+    edge = [0.0] * len(raw)
+    for position, i in enumerate(positive_index):
+        values[i] = math.exp(shrunk.values[position])
+        edge[i] = shrunk.probability_above_mean(position)
+    return ShrunkScores(values=values, edge_probability=edge,
+                        prior_mean_gp=math.exp(shrunk.prior_mean),
+                        tau_squared=shrunk.prior_variance, applied=True)
+
+
+# ---------------------------------------------------------------------------
+# Capital allocation
+# ---------------------------------------------------------------------------
+
+def capital_per_slot(capital: int, slots: int) -> int:
+    """Equal split. Kept for the sidebar's headline number and as the fallback
+    when nothing has been scored yet; allocate_capital is what the ranking uses."""
+    return max(1, capital // max(1, slots))
+
+
+def allocate_capital(scores: Sequence[float], capital: int, slots: int,
+                     needs: Optional[Sequence[int]] = None) -> List[int]:
+    """Split capital across the top flips in proportion to their scores.
+
+    An equal split leaves capital stranded: a 10 gp item with a 10,000 buy
+    limit can absorb 100k gp and no more, so a third of a 3m bank sitting on it
+    is a third of the bank doing nothing, while the 50k gp item that could have
+    used it is capped at a fraction of its limit.
+
+    Allocation is proportional to score, then clipped to what each flip can
+    actually absorb (`needs`), and anything freed by the clip is redistributed.
+    Only positive scores are funded — an empty slot beats a negative-expectancy
+    flip taken to look busy.
+    """
+    count = min(len(scores), max(1, slots))
+    ranked = list(scores)[:count]
+    total = sum(s for s in ranked if s > 0)
+    if total <= 0:
+        return [0] * len(ranked)
+
+    allocation = [int(capital * (s / total)) if s > 0 else 0 for s in ranked]
+    if needs is None:
+        return allocation
+
+    caps = list(needs)[:count]
+    for _ in range(3):        # a couple of passes converge; this is not an LP
+        spare = 0
+        for i, amount in enumerate(allocation):
+            cap = caps[i] if i < len(caps) else None
+            if cap is not None and amount > cap:
+                spare += amount - cap
+                allocation[i] = cap
+        if spare <= 0:
+            break
+        hungry = [i for i, amount in enumerate(allocation)
+                  if ranked[i] > 0 and (i >= len(caps) or caps[i] > amount)]
+        if not hungry:
+            break
+        weight = sum(ranked[i] for i in hungry)
+        if weight <= 0:
+            break
+        for i in hungry:
+            allocation[i] += int(spare * (ranked[i] / weight))
+    return allocation
+
+
+# ---------------------------------------------------------------------------
+# Multi-day history
 # ---------------------------------------------------------------------------
 # Intraday data cannot tell a real spread from a transient dump: a few hundred
 # salmon sold at 30 gp in the last minutes looks like a buy at 30, but if the
 # last two weeks of seller volume went at 40, a large offer at 30 fills only
 # against that one dumper and then sits. These functions read ~14 days of 6h
 # timeseries buckets and answer: at your prices, what share of the market's
-# real volume would actually have filled you, and which way is it moving?
-
-HISTORY_TIMESTEP = "6h"
-HISTORY_WINDOW_BUCKETS = 56       # 14 days of 6h buckets
-MIN_HISTORY_BUCKETS = 8           # fewer traded buckets: refuse to refine
-RECENT_TREND_BUCKETS = 12         # ~3 days
-FILL_FLOOR = 0.05                 # even "never traded there" keeps 5%
-FILL_TOLERANCE = 0.01             # prices within 1% count as reachable
-LEVEL_TOLERANCE = 0.03            # this far above the median is still normal
-LEVEL_FLOOR = 0.10
-STABILITY_TOLERANCE = 0.02        # swings within ±2% of the median are calm
-STABILITY_FLOOR = 0.30
+# real volume would actually have filled you, how does this item behave, and
+# is it in the middle of a regime change?
 
 
+@dataclass(frozen=True)
 class HistoryView:
     """Multi-day metrics for one item at one (buy, sell) estimate."""
-    __slots__ = ("buckets", "baseline_low", "baseline_high", "buy_fill_share",
-                 "sell_fill_share", "fill_factor", "trend", "momentum",
-                 "dislocation", "median_mid", "elevation", "volatility",
-                 "level", "stability")
+    buckets: int
+    baseline_low: Optional[int]
+    baseline_high: Optional[int]
+    buy_fill_share: float
+    sell_fill_share: float
+    fill_share: float
+    trend: float
+    dislocation: float
+    median_mid: Optional[int]
+    elevation: float
+    volatility: float
+    ou: Optional["stats.OUFit"] = None
+    regime_score: float = 0.0
+    mean_volume: float = 0.0
 
-    def __init__(self, buckets, baseline_low, baseline_high, buy_fill_share,
-                 sell_fill_share, fill_factor, trend, momentum, dislocation,
-                 median_mid, elevation, volatility, level, stability):
-        self.buckets = buckets
-        self.baseline_low = baseline_low
-        self.baseline_high = baseline_high
-        self.buy_fill_share = buy_fill_share
-        self.sell_fill_share = sell_fill_share
-        self.fill_factor = fill_factor
-        self.trend = trend
-        self.momentum = momentum
-        self.dislocation = dislocation
-        self.median_mid = median_mid
-        self.elevation = elevation
-        self.volatility = volatility
-        self.level = level
-        self.stability = stability
+    @property
+    def mean_reverting(self) -> bool:
+        return self.ou is not None and self.ou.mean_reverting
+
+    @property
+    def half_life_hours(self) -> Optional[float]:
+        if self.ou is None:
+            return None
+        half_life = self.ou.half_life_days
+        return half_life * HOURS_PER_DAY if half_life is not None else None
+
+    @property
+    def regime_changed(self) -> bool:
+        return self.regime_score >= DEFAULT_CALIBRATION.regime_shift_threshold
 
 
 def _weighted_avg(pairs: List[Tuple[float, int]]) -> Optional[float]:
@@ -323,76 +1060,23 @@ def _bucket_vwap(points: List[dict]) -> Optional[float]:
     return _weighted_avg(pairs)
 
 
-def momentum_factor(trend: float) -> float:
-    """Bounded EV multiplier from the multi-day trend.
-
-    Decline is penalised: you hold depreciating inventory between the legs.
-    A rise earns NO bonus: from price data alone, a genuine update-driven
-    demand shift and a merch-clan pump are indistinguishable — both are a
-    rising price with rising volume — so rewarding rises means chasing
-    manipulations. The safe entry is after the price settles at its new
-    level, which the level and stability factors recognise on their own.
-    """
-    if trend >= 0:
-        return 1.0
-    return max(0.5, 1 + 3.0 * trend)
-
-
-def level_factor(elevation: float) -> float:
-    """Mean-reversion discount for trading above the item's normal level.
-
-    Supply and demand for game commodities are roughly constant, so price
-    shocks revert toward the multi-day median. Buying above that median puts
-    the reversion against the inventory you hold — and a price spiked above
-    its median is the classic manipulation signature (the "margin trap").
-    Below the median is not penalised: buying under the normal level is where
-    a flipper wants to be, and the fill and momentum factors already guard
-    the falling-knife case.
-    """
-    if elevation <= LEVEL_TOLERANCE:
-        return 1.0
-    return max(LEVEL_FLOOR, math.exp(-8.0 * (elevation - LEVEL_TOLERANCE)))
-
-
-def stability_factor(volatility: float) -> float:
-    """Discount for jumpy prices.
-
-    A flip is a round trip that holds inventory in between; the wider an item
-    swings around its median, the more the trip can eat the margin. Stable
-    staples inside a settled range are the flipper's bread and butter —
-    that is where buy-low/sell-high within the band actually works.
-    """
-    if volatility <= STABILITY_TOLERANCE:
-        return 1.0
-    return max(STABILITY_FLOOR, 1 - 8.0 * (volatility - STABILITY_TOLERANCE))
-
-
-def _median(values: List[float]) -> Optional[float]:
-    if not values:
-        return None
-    ordered = sorted(values)
-    mid = len(ordered) // 2
-    if len(ordered) % 2 == 1:
-        return ordered[mid]
-    return (ordered[mid - 1] + ordered[mid]) / 2
-
-
-def history_view(points: List[dict], buy: int, sell: int) -> Optional[HistoryView]:
+def history_view(points: List[dict], buy: int, sell: int,
+                 window: int = HISTORY_WINDOW_BUCKETS) -> Optional[HistoryView]:
     """Read a slice of /timeseries buckets (wiki key names, oldest first).
 
     Returns None when fewer than MIN_HISTORY_BUCKETS buckets traded — too
     little history to say anything, so the caller keeps its stage-1 numbers.
     """
-    points = points[-HISTORY_WINDOW_BUCKETS:]
+    points = [p for p in points[-window:] if isinstance(p, dict)]
     lows, highs = [], []
     buckets = 0
+    volumes = []
     for p in points:
-        if not isinstance(p, dict):
-            continue
         hv = p.get("highPriceVolume") or 0
         lv = p.get("lowPriceVolume") or 0
         if hv > 0 or lv > 0:
             buckets += 1
+            volumes.append(hv + lv)
         if p.get("avgLowPrice") is not None and lv > 0:
             lows.append((p["avgLowPrice"], lv))
         if p.get("avgHighPrice") is not None and hv > 0:
@@ -413,8 +1097,6 @@ def history_view(points: List[dict], buy: int, sell: int) -> Optional[HistoryVie
     mid_now = (buy + sell) / 2
     low_ratios, high_ratios, mids = [], [], []
     for p in points:
-        if not isinstance(p, dict):
-            continue
         high_price, low_price = p.get("avgHighPrice"), p.get("avgLowPrice")
         hv = p.get("highPriceVolume") or 0
         lv = p.get("lowPriceVolume") or 0
@@ -438,7 +1120,6 @@ def history_view(points: List[dict], buy: int, sell: int) -> Optional[HistoryVie
                       / low_total if low_total > 0 else 0.0)
     sell_fill_share = (sum(v for r, v in high_ratios if r >= sell_ratio)
                        / high_total if high_total > 0 else 0.0)
-    fill_factor = max(FILL_FLOOR, min(1.0, min(buy_fill_share, sell_fill_share)))
 
     recent = _bucket_vwap(points[-RECENT_TREND_BUCKETS:])
     prior = _bucket_vwap(points[:-RECENT_TREND_BUCKETS])
@@ -448,47 +1129,40 @@ def history_view(points: List[dict], buy: int, sell: int) -> Optional[HistoryVie
     dislocation = ((buy - baseline_low) / baseline_low
                    if baseline_low is not None and baseline_low > 0 else 0.0)
 
-    # Where does today's quote sit against the item's normal level, and how
-    # calm is that level? The median of the bucket mids is robust: a few
-    # spiked buckets barely move it, so a pump shows up as a large elevation
-    # rather than as a new normal.
-    median_mid = _median(mids)
+    median_mid = stats.median(mids)
     elevation = ((mid_now - median_mid) / median_mid
-                 if median_mid is not None and median_mid > 0 else 0.0)
+                 if median_mid else 0.0)
     volatility = 0.0
-    if median_mid is not None and median_mid > 0:
-        deviation = _median([abs(m - median_mid) for m in mids])
+    if median_mid:
+        deviation = stats.median_absolute_deviation(mids)
         volatility = (deviation / median_mid) if deviation is not None else 0.0
+
+    ou = stats.fit_ou(mids, HISTORY_BUCKET_DAYS)
+    regime = stats.regime_shift(mids)
 
     return HistoryView(
         buckets=buckets,
         baseline_low=int(round(baseline_low)) if baseline_low is not None else None,
         baseline_high=int(round(baseline_high)) if baseline_high is not None else None,
         buy_fill_share=buy_fill_share, sell_fill_share=sell_fill_share,
-        fill_factor=fill_factor, trend=trend,
-        momentum=momentum_factor(trend), dislocation=dislocation,
-        median_mid=int(round(median_mid)) if median_mid is not None else None,
-        elevation=elevation, volatility=volatility,
-        level=level_factor(elevation), stability=stability_factor(volatility))
+        fill_share=min(buy_fill_share, sell_fill_share), trend=trend,
+        dislocation=dislocation,
+        median_mid=int(round(median_mid)) if median_mid else None,
+        elevation=elevation, volatility=volatility, ou=ou, regime_score=regime,
+        mean_volume=(sum(volumes) / len(volumes)) if volumes else 0.0)
 
 
-def gp_per_slot_hour(expected_gp: float) -> float:
+def gp_per_slot_hour(expected_gp: float, total_seconds: float) -> float:
     """Expected gp per offer slot per hour — the metric worth maximising.
 
     Offer slots, not gp, are the binding constraint: three in free-to-play,
-    eight for members. A flip occupies one slot for the buy-limit window
-    whether it earns 1 gp or 100k, so the question is never "which item has
-    the biggest margin" but "what is the best use of a slot for four hours".
+    eight for members. The old version divided by a flat four hours, which
+    assumed every flip occupies a slot for exactly the buy-limit window. It
+    does not: a flip that clears in twelve minutes for 5k gp earns 25k per
+    slot-hour, while one that ties the slot up all four hours for 40k earns
+    10k. The first is the better use of the slot and the old metric ranked it
+    eighth as well.
     """
-    return expected_gp / WINDOW_HOURS
-
-
-def capital_per_slot(capital: int, slots: int) -> int:
-    """Gp to commit to any one flip.
-
-    Putting the whole bank into the single best-looking item ignores that you
-    have several slots and that buy limits cap what any one item can absorb.
-    Splitting evenly is not optimal, but it is much closer than betting it all
-    on the top row.
-    """
-    return max(1, capital // max(1, slots))
+    if total_seconds <= 0 or total_seconds == float("inf"):
+        return 0.0
+    return expected_gp / (total_seconds / SECONDS_PER_HOUR)

@@ -18,10 +18,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+# v1 and v2 return byte-identical payloads on every route used here (/latest,
+# /5m, /1h, /mapping, /timeseries) — checked directly, not assumed. There is
+# nothing to gain by moving, so the version stays configurable rather than
+# switched: if v2 ever grows a route worth having, pass base_url to WikiClient.
 BASE_URL = "https://prices.runescape.wiki/api/v1/osrs"
+BASE_URL_V2 = "https://prices.runescape.wiki/api/v2/osrs"
 # Wiki AUP wants a way to reach whoever runs this. If you fork or deploy the
 # tool, put your own contact here.
-USER_AGENT = ("osrs-flipper/0.1 - GE flipping dashboard - "
+USER_AGENT = ("osrs-flipper/0.2 - GE flipping dashboard - "
               "https://github.com/snobistisch/osrs-flipper")
 
 LATEST_TTL = 30          # seconds; also the minimum poll interval
@@ -69,16 +74,18 @@ def _opt_int(value: object) -> Optional[int]:
 
 
 class WikiClient:
-    def __init__(self, cache_dir: "str | Path" = None):
+    def __init__(self, cache_dir: "str | Path" = None,
+                 base_url: str = BASE_URL):
         if cache_dir is None:
             cache_dir = Path(__file__).parent / "cache"
         self.cache_dir = Path(cache_dir)
+        self.base_url = base_url
         self._memory: Dict[str, Tuple[float, object]] = {}
 
     # -- transport -----------------------------------------------------------
 
     def _get(self, path: str, params: Optional[dict] = None) -> object:
-        url = BASE_URL + path
+        url = self.base_url + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})

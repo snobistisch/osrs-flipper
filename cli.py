@@ -1,7 +1,11 @@
 """Ranked flips as a plain terminal table.
 
-Usage: python3 cli.py [--capital N] [--slots N] [--max-age S] [--min-vol N]
-                      [--min-roi F] [--min-depth N] [--members]
+Usage: python3 cli.py [--capital N] [--slots N] [--members] [--top N]
+                      [--max-age S] [--min-vol N] [--min-roi F] [--min-depth N]
+
+The filter flags now narrow what is *displayed*. They no longer decide what
+gets scored: everything tradable is scored and shrunk first, so hiding rows
+never reorders the ones that remain.
 """
 from __future__ import annotations
 
@@ -10,7 +14,9 @@ import sys
 import time
 
 import api
+import archive
 import engine
+import exemptions
 import filters
 
 
@@ -21,89 +27,112 @@ def parse_args(argv):
                    help="gp available across all slots, e.g. 250k or 1.5m")
     p.add_argument("--slots", type=int, default=engine.F2P_SLOTS,
                    help="concurrent GE offers: 3 free-to-play, 8 members")
-    p.add_argument("--max-age", type=int, default=300,
-                   help="max seconds since the OLDER of the two quotes")
-    p.add_argument("--min-vol", type=int, default=120,
-                   help="min units traded on the thin side per 1h")
-    p.add_argument("--min-roi", type=float, default=0.01,
-                   help="min net ROI per flip, e.g. 0.01 = 1%%")
-    p.add_argument("--min-depth", type=int, default=1,
-                   help="min gp of undercut room; 0 shows flips you cannot "
-                        "queue-jump, like one-tick rune spreads")
-    p.add_argument("--min-price", type=engine.parse_gp, default=1,
-                   help="min buy price per item, e.g. 100 or 5k")
-    p.add_argument("--max-price", type=engine.parse_gp, default=None,
-                   help="max buy price per item, e.g. 10k or 1m")
-    p.add_argument("--tax-free", action="store_true",
-                   help="only flips that pay zero GE tax (sell under 50 gp: "
-                        "the 2%% rounds down to 0, the whole spread is yours)")
     p.add_argument("--members", action="store_true",
                    help="include members-only items")
     p.add_argument("--top", type=int, default=20, help="rows to show")
     p.add_argument("--deep", type=int, default=15,
-                   help="re-score this many top candidates against 14 days of "
-                        "/timeseries history (0 disables)")
+                   help="deep-check this many top candidates against 14 days "
+                        "of /timeseries history (0 disables). Three times this "
+                        "many are actually fetched, so the deep stage can "
+                        "reorder rather than just confirm.")
+    p.add_argument("--archive", default=None,
+                   help="tick archive to smooth volume estimates with "
+                        "(default: use it if cache/ticks.db exists)")
+    p.add_argument("--no-archive", action="store_true",
+                   help="ignore the tick archive even if present")
+
+    view = p.add_argument_group(
+        "display filters", "Applied after scoring. These hide rows; they do "
+                           "not change the ranking of what is left.")
+    view.add_argument("--max-age", type=int, default=None,
+                      help="max seconds since the OLDER of the two quotes")
+    view.add_argument("--min-vol", type=int, default=0,
+                      help="min units traded on the thin side per 1h")
+    view.add_argument("--min-roi", type=float, default=0.0,
+                      help="min net ROI per flip, e.g. 0.01 = 1%%")
+    view.add_argument("--min-depth", type=int, default=0,
+                      help="min gp of undercut room")
+    view.add_argument("--min-price", type=engine.parse_gp, default=1,
+                      help="min buy price per item, e.g. 100 or 5k")
+    view.add_argument("--max-price", type=engine.parse_gp, default=None,
+                      help="max buy price per item, e.g. 10k or 1m")
+    view.add_argument("--tax-free", action="store_true",
+                      help="only flips that pay zero GE tax (sell under 50 gp)")
     return p.parse_args(argv)
 
 
-def config_from(opts) -> filters.FilterConfig:
+def config_from(opts, nature_cost: int) -> filters.FilterConfig:
     return filters.FilterConfig(
         capital=opts.capital, slots=opts.slots, include_members=opts.members,
+        nature_rune_cost=nature_cost,
         max_quote_age=opts.max_age, min_thin_volume_1h=opts.min_vol,
         min_roi=opts.min_roi, min_undercut_depth=opts.min_depth,
         min_price=opts.min_price, max_price=opts.max_price,
         tax_free_only=opts.tax_free)
 
 
-def print_table(rows, funnel, opts):
-    per_slot = engine.capital_per_slot(opts.capital, opts.slots)
-    price_part = ""
-    if opts.min_price > 1 or opts.max_price is not None:
-        price_part = " | price {}–{}".format(
-            engine.format_gp(opts.min_price),
-            engine.format_gp(opts.max_price) if opts.max_price else "∞")
-    if opts.tax_free:
-        price_part += " | tax-free only"
-    print("Budget {} gp across {} slots = {} gp per flip | quote age <= {}s | "
-          "vol >= {}/1h | ROI >= {:.1%} | undercut room >= {} gp{}".format(
-              engine.format_gp(opts.capital), opts.slots,
-              engine.format_gp(per_slot), opts.max_age, opts.min_vol,
-              opts.min_roi, opts.min_depth, price_part))
-    print("Funnel:  " + "  ->  ".join(
-        "{} {}".format(v, k) for k, v in funnel.items() if v))
+def print_table(result, opts, config, exempt, nature_cost, archive_note):
+    print("Budget {} gp across {} slots | {} tax-exempt items loaded | "
+          "nature rune {} gp | {}".format(
+              engine.format_gp(opts.capital), opts.slots, len(exempt),
+              nature_cost, archive_note))
+    if exempt.unmatched_names:
+        print("  tax_exempt.json has {} names no item matched: {}".format(
+            len(exempt.unmatched_names), ", ".join(exempt.unmatched_names[:5])))
+    print("Scored:  " + "  ->  ".join(
+        "{} {}".format(v, k) for k, v in result.funnel.items() if v))
+    if result.deep_checked:
+        print("Deep-checked against 14d history: {}".format(result.deep_checked))
+    shrink = result.shrinkage
+    if shrink is not None and shrink.applied:
+        if not shrink.informative:
+            print("Shrinkage: every difference between these scores is within "
+                  "estimation noise — today's ranking is not meaningful.")
+        else:
+            print("Shrinkage: market-wide mean {} gp/slot/h; scores are pulled "
+                  "toward it, hardest where volume is thinnest.".format(
+                      engine.format_gp(int(shrink.prior_mean_gp))))
+    hidden = {k: v for k, v in result.hidden.items() if v and k != "shown"}
+    if hidden:
+        print("Hidden by display filters:  " + "  ".join(
+            "{} {}".format(v, k) for k, v in hidden.items()))
     print()
-    if not rows:
-        print("No flips pass the current filters. Lower --min-roi, --min-vol, "
-              "or --min-depth.")
+    if not result.rows:
+        print("Nothing to show. Loosen the display filters, or the market is "
+              "genuinely offering nothing right now.")
         return
 
-    header = ("{:<26} {:>9} {:>9} {:>7} {:>6} {:>5} {:>5} {:>5} {:>5} {:>7} "
-              "{:>7} {:>11} {:>11}")
+    header = ("{:<24} {:>8} {:>8} {:>7} {:>6} {:>5} {:>7} {:>8} {:>10} {:>7} "
+              "{:>11} {:>11}")
     print(header.format("ITEM", "BUY", "SELL", "MARGIN", "ROI", "ROOM",
-                        "FILL", "TRND", "ELEV", "QTY/4H", "TIED UP",
-                        "QUOTED/4H", "EV/SLOT/H"))
-    for r in rows[:opts.top]:
-        fill = "{:.0%}".format(r.fill_share) if r.deep_checked else "—"
-        trend = "{:+.0%}".format(r.trend) if r.deep_checked else "—"
-        elev = "{:+.0%}".format(r.elevation) if r.deep_checked else "—"
-        print("{:<26.26} {:>9,} {:>9,} {:>7,} {:>5.1f}% {:>5,} {:>5} {:>5} "
-              "{:>5} {:>7,} {:>7} {:>11,} {:>11,.0f}".format(
-                  r.name, r.buy, r.sell, r.margin, r.roi * 100,
-                  r.undercut_depth, fill, trend, elev, r.qty_per_window,
-                  engine.format_gp(r.capital_needed), r.gross_profit,
-                  r.gp_per_slot_hour))
-        for note in r.warnings:
-            print("{:<26} {}".format("", "· " + note))
+                        "QTY", "TIED UP", "ROUND TRIP", "P(FILL)", "MEASURED",
+                        "EV/SLOT/H"))
+    for row in result.rows[:opts.top]:
+        print("{:<24.24} {:>8,} {:>8,} {:>7,} {:>5.1f}% {:>5,} {:>7,} {:>8} "
+              "{:>10} {:>6.0f}% {:>11,.0f} {:>11,.0f}".format(
+                  row.name, row.buy, row.sell, row.margin,
+                  row.roi * 100, row.undercut_depth, row.qty_per_window,
+                  engine.format_gp(row.capital_needed),
+                  engine.format_duration(row.expected_total_seconds),
+                  row.p_fill * 100, row.raw_gp_per_slot_hour,
+                  row.gp_per_slot_hour))
+        if row.allocated_capital is not None:
+            print("{:<24} · commit {} gp of the bank here (score-weighted, "
+                  "not an equal split)".format(
+                      "", engine.format_gp(row.allocated_capital)))
+        for note in row.warnings:
+            print("{:<24} · {}".format("", note))
     print()
-    print("ROOM = gp of price improvement you can afford per side and still "
-          "profit; with 0 you wait behind offers that may be days old. "
-          "FILL = share of the last 14 days' volume that traded at your "
-          "prices. TRND = recent vs prior multi-day VWAP. ELEV = quote vs "
-          "the 14-day median level; high means spike/manipulation risk.")
-    print("EV/SLOT/H = expected gp per offer slot per hour: quoted profit "
-          "discounted for queue position, drift, staleness, 14-day fill "
-          "probability, price level, stability and momentum. QUOTED/4H is "
-          "the undiscounted best case.")
+    print("ROUND TRIP = expected time for both legs, from the traded volume "
+          "you can reach at your queue position. It is the denominator of "
+          "EV/SLOT/H — a slot freed in 20 minutes is worth more than one held "
+          "for four hours at twice the margin.")
+    print("MEASURED = the score before shrinkage; EV/SLOT/H is after. Ranking "
+          "hundreds of noisy estimates surfaces the biggest errors rather than "
+          "the biggest values, so each score is pulled toward the market "
+          "average by an amount set by how much volume it rests on. A wide gap "
+          "between the two columns means the measured number was mostly the "
+          "thinness of the data.")
 
 
 def main(argv=None):
@@ -117,18 +146,56 @@ def main(argv=None):
     except api.ApiError as exc:
         print("API error: {}".format(exc), file=sys.stderr)
         return 1
-    rows, funnel = filters.rank_flips(items, quotes, activity_5m, activity_1h,
-                                      config_from(opts), now=time.time())
-    if opts.deep > 0:
-        def fetch(item_id):
-            try:
-                return client.timeseries(item_id, engine.HISTORY_TIMESTEP)
-            except api.ApiError:
-                return None
-        rows, refined = filters.refine_with_history(rows, fetch, opts.deep)
-        funnel["deep-checked vs 14d history"] = refined
-    print_table(rows, funnel, opts)
+
+    exempt = exemptions.resolve(items)
+    nature_cost = exemptions.nature_rune_cost(quotes)
+    config = config_from(opts, nature_cost)
+
+    store = None
+    volume_lookup = None
+    archive_note = "no tick archive (run collect.py to build one)"
+    if not opts.no_archive:
+        path = opts.archive or archive.DEFAULT_DB
+        try:
+            store = archive.Archive(path)
+            summary = store.summary()
+            if summary["buckets"]:
+                volume_lookup = _archive_lookup(store)
+                archive_note = "archive: {:.1f} days, {:,} bucket rows".format(
+                    summary["days"], summary["buckets"])
+            else:
+                store.close()
+                store = None
+        except Exception as exc:               # a missing archive is not fatal
+            archive_note = "archive unavailable ({})".format(exc)
+            store = None
+
+    def fetch(item_id):
+        try:
+            return client.timeseries(item_id, engine.HISTORY_TIMESTEP)
+        except api.ApiError:
+            return None
+
+    try:
+        result = filters.rank_flips(
+            items, quotes, activity_5m, activity_1h, config, now=time.time(),
+            fetch_history=fetch if opts.deep > 0 else None,
+            top_k=opts.deep, exempt=exempt, volume_lookup=volume_lookup)
+        print_table(result, opts, config, exempt, nature_cost, archive_note)
+    finally:
+        if store is not None:
+            store.close()
     return 0
+
+
+def _archive_lookup(store):
+    """(buyer-initiated, seller-initiated) units/hour, smoothed over days."""
+    def lookup(item_id):
+        estimate = store.volume_ewma(item_id)
+        if estimate is None or not estimate.usable:
+            return None
+        return estimate.high_per_hour, estimate.low_per_hour
+    return lookup
 
 
 if __name__ == "__main__":

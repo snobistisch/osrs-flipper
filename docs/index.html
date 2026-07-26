@@ -184,6 +184,23 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
 <!-- ============ budget gate ============ -->
 <section id="gate">
   <h1>🪙 Grand Exchange Flipper</h1>
+  <!--
+    This page is a JavaScript port of an EARLIER version of engine.py and
+    filters.py. The Python tools have since been rebuilt and this port has not
+    followed. Do not treat the two as interchangeable; see the README section
+    "The browser app is stale" for the full list of what differs.
+  -->
+  <div class="panel" style="border-color:#8a6d1f;background:#3a2f16;margin-bottom:1rem">
+    <strong>⚠️ This page runs an older version of the ranking.</strong>
+    <p style="margin:.5rem 0 0">The Python tools in this repository were rebuilt
+       and this browser port has not been updated. It still taxes ~57 tax-exempt
+       items that owe nothing, assumes every flip occupies a slot for exactly
+       four hours, ignores the high-alchemy floor, and applies no correction for
+       the fact that ranking hundreds of noisy estimates surfaces the largest
+       errors rather than the largest values. Its numbers will disagree with
+       <code>cli.py</code> and <code>app.py</code>, and those are the ones to
+       trust.</p>
+  </div>
   <p>Live flip finder for Old School RuneScape, built on the OSRS Wiki real-time
      prices API. It ranks by <strong>expected gp per offer slot per hour</strong>,
      not by the margin on the screen — because a quoted margin is only profit if
