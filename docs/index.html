@@ -224,6 +224,48 @@ input[type="checkbox"] { accent-color: var(--gold); width: 1rem; height: 1rem; }
 }
 .checkline { display: flex; align-items: center; gap: 0.5rem; }
 
+/* Filter explanations sit behind a "?" instead of standing under the control.
+   The sidebar is a control surface, and six paragraphs of permanent prose put
+   the controls themselves below the fold on anything shorter than a desktop.
+
+   The hint has to survive a touchscreen, where a native title= tooltip never
+   appears at all — so it is a real focusable button and the panel opens on
+   :hover AND on :focus. Tapping focuses, which is the whole point; :focus
+   rather than :focus-visible, because a pointer tap does not match the latter
+   on iOS. The panel is only faded out, never visibility:hidden, so it stays in
+   the accessibility tree and aria-describedby still resolves. */
+.field-head { display: flex; align-items: center; gap: 0.1rem; }
+/* The "?" sits hard right on every row, so every panel opens from the same
+   edge and none of them can run off the left of a 260px sidebar. */
+.field-head > label, .field-head > h2 { flex: 1; }
+.checkline .hint-wrap { margin-left: auto; }
+.hint-wrap { position: relative; display: inline-flex; }
+.hint {
+  background: none;
+  border: 1px solid var(--edge-light);
+  box-shadow: none;
+  color: var(--text-dim);
+  border-radius: 50%;
+  width: 1.05rem; height: 1.05rem;
+  padding: 0;
+  font-size: 0.72rem; font-weight: 700; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.hint:hover, .hint:focus { color: var(--gold-bright); border-color: var(--gold); }
+.tip {
+  position: absolute; z-index: 20;
+  right: 0; top: calc(100% + 0.35rem);
+  width: 14rem; max-width: calc(100vw - 3rem);
+  background: var(--edge);
+  border: 1px solid var(--edge-light);
+  border-radius: 3px;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.8rem; line-height: 1.45;
+  color: var(--text); text-align: left; font-weight: 400;
+  opacity: 0; pointer-events: none; transition: opacity 0.12s;
+}
+.hint:hover + .tip, .hint:focus + .tip { opacity: 1; }
+
 /* -- terminal chrome -- */
 
 /* One thin bar instead of a tall heading: the page title, the clock and
@@ -356,6 +398,17 @@ td.bad { color: var(--down); }
   display: inline-block; background: #6b4a1e; color: var(--gold-bright);
   border-radius: 3px; padding: 0 0.4rem; font-size: 0.78rem; font-weight: 700;
   cursor: help;
+}
+/* The wiki's sprites are 32px pixel art. Scaled down with smoothing on they
+   turn to mush, so they are drawn pixelated and the box is fixed: the names
+   have to line up with each other whether or not a sprite arrived. */
+.item-icon {
+  display: inline-block;
+  width: 20px; height: 20px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  vertical-align: middle;
+  margin-right: 0.4rem;
 }
 .notes { margin: 0.6rem 0 0; padding-left: 1.1rem; color: var(--text-dim); }
 .notes li { margin-bottom: 0.2rem; }
@@ -570,60 +623,99 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
       <div class="small dim">Slots are the real bottleneck. Your budget is
         split across them, because you flip several items at once.</div>
     </div>
-    <h2>Display filters</h2>
-    <div class="small dim" style="margin:-0.3rem 0 1rem">These hide rows.
-      Everything tradable is scored and shrunk first, so narrowing the view
-      never reorders what is left.</div>
+    <div class="field-head">
+      <h2 style="margin:0">Display filters</h2>
+      <span class="hint-wrap">
+        <button type="button" class="hint" aria-label="What the display filters do"
+                aria-describedby="tip-filters">?</button>
+        <span class="tip" role="tooltip" id="tip-filters">These hide rows.
+          Everything tradable is scored and shrunk first, so narrowing the view
+          never reorders what is left.</span>
+      </span>
+    </div>
     <div class="field">
-      <label for="f-depth">Min undercut room <span class="val" id="f-depth-v"></span></label>
+      <div class="field-head">
+        <label for="f-depth">Min undercut room <span class="val" id="f-depth-v"></span></label>
+        <span class="hint-wrap">
+          <button type="button" class="hint" aria-label="About min undercut room"
+                  aria-describedby="tip-depth">?</button>
+          <span class="tip" role="tooltip" id="tip-depth">Gp of price improvement
+            you can afford per side. At 0 you cannot outbid anyone and wait in
+            the queue — the air rune trap. That is now priced into the fill time
+            rather than filtered out, so leaving this off is fine.</span>
+        </span>
+      </div>
       <input type="range" id="f-depth" min="0" max="50" step="1" value="0">
-      <div class="small dim">Gp of price improvement you can afford per side.
-        At 0 you cannot outbid anyone and wait in the queue — the air rune
-        trap. That is now priced into the fill time rather than filtered out,
-        so leaving this off is fine.</div>
     </div>
     <div class="field">
-      <label for="f-age">Max quote age <span class="val" id="f-age-v"></span></label>
+      <div class="field-head">
+        <label for="f-age">Max quote age <span class="val" id="f-age-v"></span></label>
+        <span class="hint-wrap">
+          <button type="button" class="hint" aria-label="About max quote age"
+                  aria-describedby="tip-age">?</button>
+          <span class="tip" role="tooltip" id="tip-age">Age of the older side of
+            the quote. Staleness is scored against the item's own volatility, so
+            this is a preference, not a correctness gate.</span>
+        </span>
+      </div>
       <input type="range" id="f-age" min="0" max="3600" step="30" value="0">
-      <div class="small dim">Age of the older side of the quote. Staleness is
-        scored against the item's own volatility, so this is a preference, not
-        a correctness gate.</div>
     </div>
     <div class="field">
-      <label for="f-vol">Min volume / hour <span class="val" id="f-vol-v"></span></label>
+      <div class="field-head">
+        <label for="f-vol">Min volume / hour <span class="val" id="f-vol-v"></span></label>
+        <span class="hint-wrap">
+          <button type="button" class="hint" aria-label="About min volume per hour"
+                  aria-describedby="tip-vol">?</button>
+          <span class="tip" role="tooltip" id="tip-vol">Units traded on the
+            quieter side of the book. Thin volume already costs an item heavily
+            in both fill time and shrinkage.</span>
+        </span>
+      </div>
       <input type="range" id="f-vol" min="0" max="10000" step="20" value="0">
-      <div class="small dim">Units traded on the quieter side of the book. Thin
-        volume already costs an item heavily in both fill time and shrinkage.</div>
     </div>
     <div class="field">
       <label for="f-roi">Min ROI after tax <span class="val" id="f-roi-v"></span></label>
       <input type="range" id="f-roi" min="0" max="100" step="1" value="0">
     </div>
     <div class="field">
-      <label>Price per item (gp)</label>
+      <div class="field-head">
+        <label>Price per item (gp)</label>
+        <span class="hint-wrap">
+          <button type="button" class="hint" aria-label="About the price range"
+                  aria-describedby="tip-price">?</button>
+          <span class="tip" role="tooltip" id="tip-price">Filters on the buy
+            estimate. Blank = no limit; amounts like 5k and 1.5m work.</span>
+        </span>
+      </div>
       <div class="price-row">
         <input type="text" id="f-price-min" placeholder="min, e.g. 100" autocomplete="off">
         <input type="text" id="f-price-max" placeholder="max, e.g. 10k" autocomplete="off">
       </div>
-      <div class="small dim">Filters on the buy estimate. Blank = no limit;
-        amounts like 5k and 1.5m work.</div>
     </div>
     <div class="field checkline">
       <input type="checkbox" id="f-taxfree">
       <label for="f-taxfree" style="margin:0">Tax-free flips only</label>
+      <span class="hint-wrap">
+        <button type="button" class="hint" aria-label="About tax-free flips"
+                aria-describedby="tip-taxfree">?</button>
+        <span class="tip" role="tooltip" id="tip-taxfree">Under 50 gp the 2% GE
+          tax rounds down to zero, and around 57 items — cooked food, low-level
+          ammo, tools, teleport tablets, bonds — are exempt outright. Either way
+          the whole spread is yours.</span>
+      </span>
     </div>
-    <div class="small dim" style="margin:-0.6rem 0 1.1rem">Under 50 gp the 2%
-      GE tax rounds down to zero, and around 57 items — cooked food, low-level
-      ammo, tools, teleport tablets, bonds — are exempt outright. Either way
-      the whole spread is yours.</div>
     <div class="field checkline">
       <input type="checkbox" id="f-nobots">
       <label for="f-nobots" style="margin:0">Hide bot-supplied items</label>
+      <span class="hint-wrap">
+        <button type="button" class="hint" aria-label="About bot-supplied items"
+                aria-describedby="tip-nobots">?</button>
+        <span class="tip" role="tooltip" id="tip-nobots">Free-to-play, buy limit
+          over 10,000, under 100 gp. They rank well and clear fast — the supply
+          curve is a script that answers a price rise by producing more. They
+          stay scored either way; this only hides them.</span>
+      </span>
     </div>
-    <div class="small dim" style="margin:-0.6rem 0 1.1rem">Free-to-play, buy
-      limit over 10,000, under 100 gp. They rank well and clear fast — the
-      supply curve is a script that answers a price rise by producing more.
-      They stay scored either way; this only hides them.</div>
     <div class="field checkline">
       <input type="checkbox" id="f-members">
       <label for="f-members" style="margin:0">Include members items</label>
@@ -2077,7 +2169,7 @@ const LATEST_TTL = 30_000;
 const INTERVAL_TTL = { "5m": 60_000, "1h": 300_000 };
 const MAPPING_TTL = 24 * 3600 * 1000;
 // v2: the cached shape gained highalch, so old entries must not be reused.
-const MAPPING_KEY = "osrs-flipper.mapping.v2";
+const MAPPING_KEY = "osrs-flipper.mapping.v3";
 
 const memo = new Map();
 
@@ -2113,7 +2205,13 @@ const fetchInterval = (step) => cached(step, INTERVAL_TTL[step], async () => {
 
 /* Only the fields the ranking needs are kept, so the cache fits comfortably
    in localStorage (the full /mapping payload is several MB). highalch is one
-   of them now: it is the floor under the sell leg. */
+   of them now: it is the floor under the sell leg, and `icon` is the sprite
+   filename the table draws. The filename is worth storing rather than derived
+   from the name, because the two differ often enough to matter: "Woad leaf"
+   ships as "Woad leaf 5.png". A few hundred items have no icon at all.
+   Adding a field changes the shape of the stored payload, which is what the
+   version in MAPPING_KEY is for — without the bump a returning visitor sits
+   on an icon-less cache until the TTL runs out. */
 async function fetchMapping() {
   try {
     const raw = localStorage.getItem(MAPPING_KEY);
@@ -2133,6 +2231,7 @@ async function fetchMapping() {
       members: Boolean(row.members),
       limit: typeof row.limit === "number" ? row.limit : null,
       highalch: typeof row.highalch === "number" ? row.highalch : null,
+      icon: typeof row.icon === "string" ? row.icon : null,
       exempt: EXEMPT_IDS.has(row.id) || EXEMPT_NAMES.has(row.name.trim().toLowerCase()),
     };
   }
@@ -2437,7 +2536,7 @@ function screen(items, quotes, act5m, act1h, config, now) {
 
     funnel["scored"]++;
     const row = {
-      id, name: item.name, buy, sell, latestLow: low, latestHigh: high,
+      id, name: item.name, icon: item.icon, buy, sell, latestLow: low, latestHigh: high,
       listAt: taxBoundaryUndercut(sell, exempt),
       tax: geTax(sell, exempt), exempt, margin, roi: roi(buy, sell, exempt),
       limit: item.limit, volume: thinVolume, qty, drift, ofi, age, depth,
@@ -2890,7 +2989,7 @@ function renderTable() {
   }
   body.innerHTML = rows.map((r) => `
     <tr data-id="${r.id}"${state.selected === r.id ? ' class="selected"' : ""}>
-      <td>${escapeHtml(r.name)}${r.warnings.length
+      <td>${iconHtml(r.icon)}${escapeHtml(r.name)}${r.warnings.length
         ? ` <span class="flag" title="${escapeHtml(r.warnings.join(" · "))}">!</span>` : ""}</td>
       <td>${num(r.buy)}</td>
       <td${r.listAt < r.sell ? ` class="pos" title="List here, not ${num(r.sell)} — identical net revenue after tax, better queue position"` : ""}>${num(r.listAt)}</td>
@@ -2924,6 +3023,29 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+
+/* Item sprites, served straight off the wiki's image path. A hundred rows
+   repaint on every sort, so they load lazily and decode off the main thread
+   rather than firing a hundred requests the moment the table appears. The
+   alt is empty on purpose: the name sits next to it in the same cell, and a
+   screen reader reading both would say every item twice. */
+const WIKI_IMAGES = "https://oldschool.runescape.wiki/images/";
+
+function iconHtml(icon) {
+  if (!icon) return "";
+  const src = WIKI_IMAGES + encodeURIComponent(icon.replace(/ /g, "_"));
+  return `<img class="item-icon" src="${escapeHtml(src)}" alt=""
+    loading="lazy" decoding="async">`;
+}
+
+/* A sprite that 404s is hidden rather than dropped, so the name stays at the
+   same offset as every name above it. `error` does not bubble, hence capture. */
+document.addEventListener("error", (event) => {
+  const img = event.target;
+  if (img instanceof HTMLImageElement && img.classList.contains("item-icon")) {
+    img.style.visibility = "hidden";
+  }
+}, true);
 
 /* ==================== tabs ====================
 
