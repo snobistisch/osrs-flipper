@@ -263,7 +263,9 @@ def _evaluate(
         act_5m.avg_high if act_5m else None,
         act_5m.high_volume if act_5m else 0,
         act_1h.avg_high if act_1h else None, high_vol_1h)
-    buy, sell = engine.executable_prices(quote.low, quote.high, ref_low, ref_high)
+    priced = engine.executable_prices(quote.low, quote.high, ref_low, ref_high,
+                                      config.calibration)
+    buy, sell = priced.buy, priced.sell
 
     tax_exempt = item_id in exempt
     margin = engine.net_margin(buy, sell, tax_exempt)
@@ -330,6 +332,7 @@ def _evaluate(
         alch_distance=engine.alch_distance(buy, floor),
         alch_arbitrage_gp=breakdown.alch_arbitrage_gp,
         warnings=_warnings(depth, drift, ofi, affordable, qty, item.limit,
+                           priced.from_reference,
                            breakdown, sell, tax_exempt),
     )
 
@@ -598,10 +601,15 @@ def _history_warnings(view: engine.HistoryView) -> Tuple[str, ...]:
 
 
 def _warnings(depth: int, drift: float, ofi: float, affordable: int, qty: int,
-              limit: Optional[int], breakdown: engine.ScoreBreakdown,
+              limit: Optional[int], from_reference: bool,
+              breakdown: engine.ScoreBreakdown,
               sell: int, tax_exempt: bool) -> Tuple[str, ...]:
     """Plain-language reasons this flip might not pay what it quotes."""
     notes = []
+    if from_reference:
+        notes.append(
+            "the last two prints showed no spread, so these prices come from "
+            "the hour's volume-weighted averages rather than from a live quote")
     if breakdown.alch_arbitrage_gp is not None and breakdown.alch_arbitrage_gp > 0:
         # Not free money, and worth being precise about why: alching is capped
         # at roughly 1,200 casts an hour and needs 55 Magic, so this is a

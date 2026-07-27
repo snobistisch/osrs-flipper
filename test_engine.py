@@ -533,14 +533,119 @@ class PriceTests(unittest.TestCase):
         self.assertIsNone(engine.reference_price(None, 0, None, 0))
 
     def test_executable_prices_are_pessimistic_on_both_sides(self):
-        self.assertEqual(
-            engine.executable_prices(950, 1_250, ref_low=1_000, ref_high=1_200),
-            (1_000, 1_200))
+        priced = engine.executable_prices(950, 1_250, ref_low=1_000,
+                                          ref_high=1_200)
+        self.assertEqual((priced.buy, priced.sell), (1_000, 1_200))
+        self.assertFalse(priced.from_reference)
 
-    def test_price_drift(self):
-        self.assertAlmostEqual(engine.price_drift(102, 100), 0.02)
+
+class DegenerateQuoteTests(unittest.TestCase):
+    """Two prints showing no spread are not evidence that there is no spread.
+
+    This gate used to reject 248 free-to-play items outright, 88 of which the
+    volume-weighted averages showed a real spread for — salmon among them, at a
+    12.5% tax-free margin. These tests pin both halves: what is now recovered,
+    and what stays rejected so the recovery is not a loophole.
+    """
+
+    def test_a_crossed_print_falls_back_to_the_averages(self):
+        # Salmon as it actually printed: 24/24 at the same instant, while the
+        # hour's averages said 24 -> 27.
+        priced = engine.executable_prices(24, 24, ref_low=24, ref_high=27)
+        self.assertEqual((priced.buy, priced.sell), (24, 27))
+        self.assertTrue(priced.from_reference)
+        self.assertGreater(engine.net_margin(priced.buy, priced.sell, True), 0)
+
+    def test_an_inverted_print_falls_back_too(self):
+        priced = engine.executable_prices(245, 245, ref_low=247, ref_high=255)
+        self.assertEqual((priced.buy, priced.sell), (247, 255))
+        self.assertTrue(priced.from_reference)
+
+    def test_contradictory_sources_stay_rejected(self):
+        """Raw shrimps: 30/27 against a reference of 5/6, 81% apart. One of the
+        two is about a market that no longer exists."""
+        priced = engine.executable_prices(30, 27, ref_low=5, ref_high=6)
+        self.assertFalse(priced.from_reference)
+        self.assertLessEqual(engine.net_margin(priced.buy, priced.sell, True), 0)
+
+    def test_a_thin_item_whose_average_rests_on_two_trades_is_rejected(self):
+        """Yellow boots, 1 unit an hour: printed 1918/2013 against a reference
+        of 3145/5000. A 'spread' of 59% is not a spread."""
+        priced = engine.executable_prices(1918, 2013, ref_low=3145, ref_high=5000)
+        self.assertFalse(priced.from_reference)
+
+    def test_the_divergence_limit_is_where_the_line_sits(self):
+        cal = engine.DEFAULT_CALIBRATION
+        limit = cal.reference_fallback_max_divergence
+        # A reference just inside the limit is trusted, just outside is not.
+        inside = int(round(100 * (1 + limit * 0.9)))
+        outside = int(round(100 * (1 + limit * 1.5)))
+        self.assertTrue(engine.executable_prices(
+            100, 100, ref_low=inside - 2, ref_high=inside + 2).from_reference)
+        self.assertFalse(engine.executable_prices(
+            100, 100, ref_low=outside - 2, ref_high=outside + 2).from_reference)
+
+    def test_a_genuinely_spreadless_item_stays_rejected(self):
+        """The counter-example that keeps the fallback honest: if the averages
+        agree there is no spread, there is no flip."""
+        priced = engine.executable_prices(100, 100, ref_low=100, ref_high=100)
+        self.assertFalse(priced.from_reference)
+        self.assertLessEqual(engine.net_margin(priced.buy, priced.sell, False), 0)
+
+    def test_without_a_reference_nothing_is_invented(self):
+        priced = engine.executable_prices(24, 24)
+        self.assertEqual((priced.buy, priced.sell), (24, 24))
+        self.assertFalse(priced.from_reference)
+
+    def test_a_healthy_quote_never_takes_the_fallback(self):
+        priced = engine.executable_prices(100, 110, ref_low=101, ref_high=109)
+        self.assertEqual((priced.buy, priced.sell), (101, 109))
+        self.assertFalse(priced.from_reference)
+
+
+class PriceDriftTests(unittest.TestCase):
+    """Drift net of what the price grid can express.
+
+    Measured across free-to-play items, median absolute drift ran 7.07% in the
+    cheapest price quartile against 0.61% in the dearest — a twelvefold gap
+    produced by nothing but price. At a penalty of 4 to 8 times the drift, that
+    wiped most of the expected profit from every cheap item in the game, which
+    is the bias that filled the top of the ranking with 1%-margin flips on
+    expensive items.
+    """
+
+    def test_drift_is_net_of_one_tick(self):
+        # 2 gp on a 100 gp item: one of those gp is the grid.
+        self.assertAlmostEqual(engine.price_drift(102, 100), 0.01)
+
+    def test_a_single_tick_on_a_cheap_item_is_not_momentum(self):
+        self.assertEqual(engine.price_drift(11, 10), 0.0)
+        self.assertEqual(engine.price_drift(9, 10), 0.0)
+
+    def test_the_same_absolute_move_is_read_the_same_way(self):
+        """A 1 gp wobble reads as nothing whether the item costs 10 or 10,000."""
+        self.assertEqual(engine.price_drift(11, 10), 0.0)
+        self.assertEqual(engine.price_drift(10_001, 10_000), 0.0)
+
+    def test_a_real_fall_on_a_dear_item_survives(self):
+        self.assertAlmostEqual(engine.price_drift(6_800, 7_000), -0.0284, places=4)
+
+    def test_salmon_is_no_longer_read_as_a_12_percent_move(self):
+        """Three gp on a 26 gp item was 11.8% of momentum and cost the flip
+        three quarters of its expected profit."""
+        before = engine.adverse_selection_factor(-0.50, (28.5 - 25.5) / 25.5)
+        after = engine.adverse_selection_factor(-0.50, engine.price_drift(28.5, 25.5))
+        self.assertAlmostEqual(before, 0.279, places=2)
+        self.assertGreater(after, before * 1.5)
+
+    def test_direction_is_preserved(self):
+        self.assertGreater(engine.price_drift(110, 100), 0)
+        self.assertLess(engine.price_drift(90, 100), 0)
+
+    def test_missing_or_zero_inputs_are_not_drift(self):
         self.assertEqual(engine.price_drift(None, 100), 0.0)
         self.assertEqual(engine.price_drift(102, 0), 0.0)
+        self.assertEqual(engine.price_drift(102, None), 0.0)
 
 
 class TouchCompetitorsTests(unittest.TestCase):

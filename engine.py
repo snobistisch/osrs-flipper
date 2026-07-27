@@ -35,7 +35,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import stats
 
@@ -60,6 +60,10 @@ F2P_SLOTS = 3
 MEMBER_SLOTS = 8
 
 MAX_CASH_STACK = 2_147_483_647    # the game's coin cap
+
+# Prices are whole gp, so this is the smallest move the market can make and the
+# resolution of every percentage computed from two prices. DERIVED.
+PRICE_TICK = 1
 
 SECONDS_PER_HOUR = 3600.0
 HOURS_PER_DAY = 24.0
@@ -122,6 +126,18 @@ class Calibration:
     # the old fixed-gp queue constant misranked them.
     # CALIBRATE: regress observed fill rate on distance from the touch.
     aggressiveness_scale: float = 0.25
+
+    # How far the volume-weighted reference may sit from the last print before
+    # the two stop being estimates of the same price. Only consulted when the
+    # last two prints show no spread at all and the reference is the only
+    # two-sided evidence left — see executable_prices. Measured on live data on
+    # 2026-07-27 across the 359 items where that happens: the divergence
+    # between the two mids has a median of 3%, a 75th percentile of 10% and a
+    # 90th of 25%. Above that the population is items trading a handful of
+    # units an hour, where the average rests on one or two trades: yellow boots
+    # at 1 unit/hour printed 1918/2013 against a reference of 3145/5000.
+    # CALIBRATE: from the journal, as the fill rate of flips admitted this way.
+    reference_fallback_max_divergence: float = 0.25
 
     # Floor on how long one leg can take. Not a market property: placing an
     # offer, returning to the GE and collecting takes a human about a minute,
@@ -356,22 +372,81 @@ def reference_price(
     return int(round(sum(avg * vol for avg, vol in parts) / total_volume))
 
 
+class Executable(NamedTuple):
+    buy: int
+    sell: int
+    # True when the pessimistic blend collapsed and the prices came from the
+    # volume-weighted averages instead. The caller warns; the score does not
+    # change, because the reliability machinery downstream already prices thin
+    # or contradictory evidence.
+    from_reference: bool = False
+
+
 def executable_prices(
     latest_low: int,
     latest_high: int,
     ref_low: Optional[int] = None,
     ref_high: Optional[int] = None,
-) -> Tuple[int, int]:
+    calibration: Calibration = DEFAULT_CALIBRATION,
+) -> Executable:
     """Conservative (buy, sell) estimate for what will actually fill.
 
     /latest is the single most recent trade per side, so one outlier offer can
     set it anywhere. Take the pessimistic combination per side: you buy at the
     HIGHER of (last instant-sell, reference low) and sell at the LOWER of
     (last instant-buy, reference high).
+
+    That blend is right while the two sides of /latest are independent
+    observations of the two sides of the book. It is wrong when they are not,
+    and it fails in a way that used to discard the best flips in the game. If
+    the last instant-buy and the last instant-sell are the same price — one
+    trade that crossed, or two prints from moments when the price had moved —
+    the blend returns buy >= sell, the margin comes out zero, and the item is
+    rejected before anything scores it. Measured on live data on 2026-07-27:
+    248 free-to-play items were rejected that way, and the volume-weighted
+    averages showed a real spread on 88 of them. Salmon was one — /latest said
+    24/24 with both sides printed at the same instant, while the hour's
+    averages said 24 -> 27, a 12.5% tax-free margin on 2,652 units an hour.
+
+    Two prints that show no spread are not evidence that there is no spread.
+    They are the absence of evidence, and the 5m/1h volume-weighted averages
+    measure both sides over many trades, which is the better estimator. So when
+    the blend collapses, fall back to the reference pair.
+
+    One guard survives, and it is not a quality judgement: the two sources must
+    still be describing the same market. Raw shrimps printed 30/27 against a
+    reference of 5/6 — the two estimates of the same price are 81% apart, so
+    one of them is about something that is no longer true and there is nothing
+    to trade on. Measured across the 359 items where the blend collapsed, the
+    divergence between the two mids has a median of 3% and a 90th percentile of
+    25%; past that the population is items trading a handful of units an hour,
+    whose "average" rests on one or two prints. See
+    `reference_fallback_max_divergence`.
+
+    Everything that is merely *unreliable* rather than contradictory is scored
+    and then discounted by shrinkage and the deep check, which is the division
+    of labour the rest of the model already assumes.
     """
     buy = latest_low if ref_low is None else max(latest_low, ref_low)
     sell = latest_high if ref_high is None else min(latest_high, ref_high)
-    return buy, sell
+    if buy < sell:
+        return Executable(buy, sell, False)
+
+    if ref_low is None or ref_high is None:
+        return Executable(buy, sell, False)
+    reference_buy = int(round(ref_low))
+    reference_sell = int(round(ref_high))
+    if reference_buy >= reference_sell:
+        return Executable(buy, sell, False)      # not two-sided either
+
+    latest_mid = (latest_low + latest_high) / 2.0
+    if latest_mid <= 0:
+        return Executable(buy, sell, False)
+    reference_mid = (reference_buy + reference_sell) / 2.0
+    divergence = abs(reference_mid / latest_mid - 1.0)
+    if divergence > calibration.reference_fallback_max_divergence:
+        return Executable(buy, sell, False)      # the sources contradict
+    return Executable(reference_buy, reference_sell, True)
 
 
 def ge_tax(sell_price: int, tax_exempt: bool = False) -> int:
@@ -634,11 +709,49 @@ def order_flow_imbalance(high_volume: float, low_volume: float) -> float:
     return (high_volume - low_volume) / total
 
 
+def resolvable_drift(mid_price: float) -> float:
+    """Smallest price change the game's own grid can express, as a fraction.
+
+    Prices are whole gp. A 10 gp item cannot move less than 10%; a 7,000 gp
+    item cannot move less than 0.014%. Any measured drift at or below this is
+    the grid, not the market.
+    """
+    if mid_price <= 0:
+        return 0.0
+    return PRICE_TICK / mid_price
+
+
 def price_drift(mid_5m: Optional[float], mid_1h: Optional[float]) -> float:
-    """Recent momentum, as a fraction of price. Negative means falling."""
+    """Recent momentum, as a fraction of price. Negative means falling.
+
+    Net of what the price grid can resolve, and that correction is the whole
+    reason this is not a one-line subtraction. Measured across free-to-play
+    items on 2026-07-27, the median absolute drift by price quartile was:
+
+        cheapest quarter (median 10 gp)      7.07%
+        second           (median 109 gp)     1.97%
+        third            (median 495 gp)     0.93%
+        dearest quarter  (median 7,396 gp)   0.61%
+
+    A twelvefold difference produced by nothing but price. Prices move in whole
+    gp, so on a 10 gp item the smallest possible change is 10% and on a 7,000
+    gp item it is 0.014% — the raw percentage was mostly a measure of how cheap
+    the item is. Fed into adverse_selection_factor at a penalty of 4 to 8 times
+    the drift, it wiped most of the expected profit from every cheap item in
+    the game and left expensive ones untouched, which is precisely the bias
+    that filled the top of the ranking with 1%-margin flips on dear items.
+
+    Salmon printed a 5-minute mid of 28.5 against an hour of 25.5: three gp,
+    read as 11.8% of momentum, discounting the flip to 27% of its profit. Three
+    gp on a 26 gp item is three ticks.
+    """
     if mid_5m is None or mid_1h is None or mid_1h <= 0:
         return 0.0
-    return (mid_5m - mid_1h) / mid_1h
+    raw = (mid_5m - mid_1h) / mid_1h
+    floor = resolvable_drift(mid_1h)
+    if abs(raw) <= floor:
+        return 0.0
+    return math.copysign(abs(raw) - floor, raw)
 
 
 def adverse_selection_factor(

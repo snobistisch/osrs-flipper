@@ -110,6 +110,29 @@ kind on a thin volatile one. What decays is not time but price certainty, so
 the discount is driven by the item's own fitted volatility over the elapsed
 time.
 
+### 4b. A percentage of a cheap price is not a percentage of an expensive one
+
+Prices are whole gp, so a 10 gp item cannot move less than 10% and a 7,000 gp
+item cannot move less than 0.014%. Momentum measured as a raw percentage is
+therefore mostly a measure of how cheap the item is. Across free-to-play items,
+median absolute drift by price quartile:
+
+| price quartile | median price | median absolute drift |
+|---|---|---|
+| cheapest | 10 gp | 7.07% |
+| second | 109 gp | 1.97% |
+| third | 495 gp | 0.93% |
+| dearest | 7,396 gp | 0.61% |
+
+A twelvefold gap produced by nothing but the price grid. Fed into the adverse
+selection discount at four to eight times the drift, it removed most of the
+expected profit from every cheap item in the game and left expensive ones
+untouched — which is how the top of the ranking filled with 1%-margin flips on
+dear items. Salmon printed a five-minute mid of 28.5 against an hour of 25.5:
+three gp on a 26 gp item, read as 11.8% of momentum, discounting the flip to
+27% of its profit. Drift is now measured net of one tick, so the same 1 gp
+wobble reads as nothing whether the item costs 10 gp or 10,000.
+
 ### 5. The last print is not the market
 
 A few hundred salmon dumped at 30 gp reads as "buy at 30" to every intraday
@@ -217,7 +240,18 @@ the list.
 
 Now only structural facts reject: no mapping entry, a missing side of the quote,
 nothing traded on one side, a margin that cannot survive the tax, or a single
-unit you cannot afford. Everything else is scored, and the filters in the
+unit you cannot afford.
+
+One of those gates was still lying. `/latest` gives the last trade per side, and
+when both sides print at the same price — one trade that crossed, or two prints
+from moments when the price had moved — the conservative blend of the last
+print and the volume-weighted reference returns buy ≥ sell, and the item is
+rejected as having no margin. Measured on live data, that discarded 248
+free-to-play items in one snapshot, and the hour's averages showed a real spread
+on 88 of them. Two prints showing no spread are not evidence that there is no
+spread; they are the absence of evidence. The averages measure both sides over
+many trades and are now used when the blend collapses, guarded only by the two
+sources still describing the same market. Everything else is scored, and the filters in the
 sidebar and on the command line hide rows **after** scoring and shrinkage — so
 narrowing the view never reorders what is left.
 

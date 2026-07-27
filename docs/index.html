@@ -590,6 +590,10 @@ const TAX_RATE = 0.02;
 const TAX_CAP = 5_000_000;
 const WINDOW_HOURS = 4;                    // the buy-limit window
 const MAX_CASH_STACK = 2_147_483_647;
+
+/* Prices are whole gp, so this is the smallest move the market can make and
+   the resolution of every percentage computed from two prices. DERIVED. */
+const PRICE_TICK = 1;
 const SECONDS_PER_HOUR = 3600;
 const HOURS_PER_DAY = 24;
 
@@ -634,6 +638,13 @@ const NATURE_RUNE_FALLBACK = 100;
 const CAL = {
   competitors_at_touch: 4.0,       // CALIBRATE: offers you queue behind
   aggressiveness_scale: 0.25,      // CALIBRATE: share of spread that jumps it
+  // How far the volume-weighted reference may sit from the last print before
+  // the two stop being estimates of the same price. Only consulted when the
+  // last two prints show no spread at all — see executablePrices. Measured on
+  // live data across the 359 items where that happens: median divergence 3%,
+  // p75 10%, p90 25%. Above that it is items trading a handful of units an
+  // hour, where the average rests on one or two trades. CALIBRATE.
+  reference_fallback_max_divergence: 0.25,
   min_leg_seconds: 60,             // DERIVED: placing and collecting takes time
   adverse_selection_gamma: 0.5,    // CALIBRATE
   drift_penalty_falling: 8.0,      // CALIBRATE
@@ -735,12 +746,39 @@ function referencePrice(avg5m, vol5m, avg1h, vol1h) {
 /* /latest is the single most recent trade per side, so one outlier offer can
    set it anywhere. Take the pessimistic combination per side: buy at the
    HIGHER of (last instant-sell, reference low), sell at the LOWER of (last
-   instant-buy, reference high). */
+   instant-buy, reference high).
+
+   That blend is right while the two sides of /latest are independent
+   observations of the two sides of the book, and wrong when they are not. If
+   the last instant-buy and the last instant-sell are the same price — one
+   trade that crossed, or two prints from moments when the price had moved —
+   the blend returns buy >= sell, the margin comes out zero and the item is
+   rejected before anything scores it. Measured on live data on 2026-07-27:
+   248 free-to-play items rejected that way, with the volume-weighted averages
+   showing a real spread on 88 of them. Salmon was one: /latest 24/24 printed
+   at the same instant, against an hour's averages of 24 -> 27, a 12.5%
+   tax-free margin on 2,652 units an hour.
+
+   Two prints showing no spread are not evidence that there is no spread. So
+   when the blend collapses, fall back to the volume-weighted averages, which
+   measure both sides over many trades. The one guard is that the two sources
+   must still describe the same market — see reference_fallback_max_divergence.
+   Returns [buy, sell, fromReference]. */
 function executablePrices(latestLow, latestHigh, refLow, refHigh) {
-  return [
-    refLow == null ? latestLow : Math.max(latestLow, refLow),
-    refHigh == null ? latestHigh : Math.min(latestHigh, refHigh),
-  ];
+  const buy = refLow == null ? latestLow : Math.max(latestLow, refLow);
+  const sell = refHigh == null ? latestHigh : Math.min(latestHigh, refHigh);
+  if (buy < sell) return [buy, sell, false];
+  if (refLow == null || refHigh == null) return [buy, sell, false];
+
+  const referenceBuy = Math.round(refLow);
+  const referenceSell = Math.round(refHigh);
+  if (referenceBuy >= referenceSell) return [buy, sell, false];
+
+  const latestMid = (latestLow + latestHigh) / 2;
+  if (latestMid <= 0) return [buy, sell, false];
+  const divergence = Math.abs(((referenceBuy + referenceSell) / 2) / latestMid - 1);
+  if (divergence > CAL.reference_fallback_max_divergence) return [buy, sell, false];
+  return [referenceBuy, referenceSell, true];
 }
 
 /* ---- queue position ---- */
@@ -857,9 +895,33 @@ function orderFlowImbalance(highVolume, lowVolume) {
   return total <= 0 ? 0 : (highVolume - lowVolume) / total;
 }
 
+/* Smallest price change the game's own grid can express, as a fraction. */
+const resolvableDrift = (midPrice) => midPrice <= 0 ? 0 : PRICE_TICK / midPrice;
+
+/* Recent momentum, net of what the price grid can resolve — and that
+   correction is the whole reason this is not a subtraction of two numbers.
+   Measured across free-to-play items on 2026-07-27, median absolute drift by
+   price quartile:
+
+       cheapest quarter (median 10 gp)      7.07%
+       second           (median 109 gp)     1.97%
+       third            (median 495 gp)     0.93%
+       dearest quarter  (median 7,396 gp)   0.61%
+
+   A twelvefold difference produced by nothing but price. Prices move in whole
+   gp, so a 10 gp item cannot move less than 10% and a 7,000 gp one cannot move
+   less than 0.014%. Fed into adverseSelectionFactor at 4 to 8 times the drift,
+   the raw percentage wiped most of the expected profit from every cheap item
+   and left dear ones untouched — the bias that filled the top of the ranking
+   with 1%-margin flips on expensive items. Salmon printed a 5-minute mid of
+   28.5 against an hour of 25.5: three gp, read as 11.8% of momentum, which
+   discounted the flip to 27% of its profit. */
 function priceDrift(mid5m, mid1h) {
   if (mid5m == null || mid1h == null || mid1h <= 0) return 0;
-  return (mid5m - mid1h) / mid1h;
+  const raw = (mid5m - mid1h) / mid1h;
+  const floor = resolvableDrift(mid1h);
+  if (Math.abs(raw) <= floor) return 0;
+  return Math.sign(raw) * (Math.abs(raw) - floor);
 }
 
 /* Two independent readings of the same hazard: order flow says who is being
@@ -2042,6 +2104,10 @@ function bucketMid(activity) {
 /* Plain-language reasons this flip might not pay what it quotes. */
 function flipWarnings(row, breakdown, affordable, exempt) {
   const notes = [];
+  if (row.pricedFromReference) {
+    notes.push("the last two prints showed no spread, so these prices come " +
+      "from the hour's volume-weighted averages rather than from a live quote");
+  }
   if (breakdown.alchArbitrageGp != null && breakdown.alchArbitrageGp > 0) {
     // Not free money: alching is capped at roughly 1,200 casts an hour and
     // needs 55 Magic. It caps the downside rather than replacing the sell leg.
@@ -2117,7 +2183,8 @@ function screen(items, quotes, act5m, act1h, config, now) {
     const refHigh = referencePrice(
       a5m?.avgHighPrice ?? null, a5m?.highPriceVolume ?? 0,
       a1h?.avgHighPrice ?? null, highVol1h);
-    const [buy, sell] = executablePrices(low, high, refLow, refHigh);
+    const [buy, sell, pricedFromReference] =
+      executablePrices(low, high, refLow, refHigh);
 
     const exempt = Boolean(item.exempt);
     const margin = netMargin(buy, sell, exempt);
@@ -2149,7 +2216,7 @@ function screen(items, quotes, act5m, act1h, config, now) {
       listAt: taxBoundaryUndercut(sell, exempt),
       tax: geTax(sell, exempt), exempt, margin, roi: roi(buy, sell, exempt),
       limit: item.limit, volume: thinVolume, qty, drift, ofi, age, depth,
-      members: item.members,
+      members: item.members, pricedFromReference,
       // Both sides, so it can be compared against the 14-day average bucket
       // volume on the same footing. `volume` above is the thin side, which is
       // the right number for fill times and the wrong one for a spike ratio.
