@@ -275,8 +275,13 @@ def _evaluate(
         return "cannot afford one"
 
     depth = engine.undercut_depth(buy, sell, tax_exempt)
+    # Sizing uses the same queue share the score will: on a crowded item you
+    # cannot fill more than the crowd leaves you, so pretending otherwise here
+    # would size an offer the fill model then has to discount back down.
+    crowd = engine.touch_competitors(thin_volume, item.limit,
+                                     config.calibration)
     share = engine.aggressiveness(engine.price_edge(depth, sell - buy),
-                                  config.calibration)
+                                  config.calibration, crowd)
 
     qty = engine.flippable_qty(
         item.limit,
@@ -297,7 +302,7 @@ def _evaluate(
         buy_volume_1h=low_vol_1h, sell_volume_1h=high_vol_1h,
         quote_age=age, ofi=ofi, drift=drift, now=now,
         highalch=item.highalch, nature_rune_cost=config.nature_rune_cost,
-        calibration=config.calibration)
+        competitors=crowd, calibration=config.calibration)
 
     floor = engine.alch_floor(item.highalch, config.nature_rune_cost)
     return FlipRow(
@@ -425,8 +430,12 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
     reachable_sell = max(0.0, row.thin_volume_1h * max(view.sell_fill_share, 0.01))
 
     depth = row.undercut_depth
+    # Crowd from the item's REAL volume, not the reachable slice: a low fill
+    # share means fewer units arrive at your price, not fewer rivals queued.
+    crowd = engine.touch_competitors(row.thin_volume_1h, row.limit,
+                                     config.calibration)
     share = engine.aggressiveness(engine.price_edge(depth, row.sell - row.buy),
-                                  config.calibration)
+                                  config.calibration, crowd)
     qty = engine.flippable_qty(
         row.limit,
         engine.fillable_quantity(min(reachable_buy, reachable_sell), share,
@@ -440,6 +449,7 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         buy_volume_1h=reachable_buy, sell_volume_1h=reachable_sell,
         quote_age=row.quote_age, ofi=row.ofi, drift=row.drift, now=now,
         sigma_daily=sigma, ou_fit=view.ou, regime_score=view.regime_score,
+        competitors=crowd,
         highalch=None if row.alch_floor is None
         else row.alch_floor + config.nature_rune_cost,
         nature_rune_cost=config.nature_rune_cost,

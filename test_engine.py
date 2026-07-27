@@ -543,5 +543,76 @@ class PriceTests(unittest.TestCase):
         self.assertEqual(engine.price_drift(102, 0), 0.0)
 
 
+class TouchCompetitorsTests(unittest.TestCase):
+    """The queue at the touch is not four people on every item in the game.
+
+    A constant here was what let the model report a two-hour round trip on a
+    fire rune flip that takes a day, and these tests exist so that number
+    cannot quietly become a constant again.
+    """
+
+    def test_a_quiet_item_keeps_the_floor(self):
+        # 10,000 units a window against a 13,000 limit: under one participant.
+        crowd = engine.touch_competitors(2_500, 13_000)
+        self.assertEqual(crowd, engine.DEFAULT_CALIBRATION.competitors_at_touch)
+
+    def test_a_botted_commodity_is_crowded(self):
+        # Fire rune: 1.68m units an hour against a 50,000 limit.
+        crowd = engine.touch_competitors(1_681_042, 50_000)
+        self.assertAlmostEqual(crowd, 134.5, delta=0.5)
+
+    def test_it_is_the_participants_the_volume_implies(self):
+        self.assertAlmostEqual(
+            engine.touch_competitors(1_000, 100),
+            1_000 * engine.WINDOW_HOURS / 100)
+
+    def test_an_item_with_no_published_limit_keeps_the_floor(self):
+        crowd = engine.touch_competitors(1_000_000, None)
+        self.assertEqual(crowd, engine.DEFAULT_CALIBRATION.competitors_at_touch)
+        self.assertEqual(engine.touch_competitors(1_000_000, 0),
+                         engine.DEFAULT_CALIBRATION.competitors_at_touch)
+
+    def test_no_volume_keeps_the_floor(self):
+        self.assertEqual(engine.touch_competitors(0, 50_000),
+                         engine.DEFAULT_CALIBRATION.competitors_at_touch)
+
+    def test_where_it_binds_you_fill_one_buy_limit_per_window(self):
+        """The property that makes it believable rather than just pessimistic.
+
+        On a crowded item your share is limit/volume_per_window, so your fill
+        rate is one buy limit per window — you cannot beat your own buy limit,
+        which is the answer an hour of watching the Grand Exchange gives you.
+        """
+        for volume, limit in ((1_681_042, 50_000), (673_628, 13_000),
+                              (2_429_316, 30_000)):
+            crowd = engine.touch_competitors(volume, limit)
+            share = engine.aggressiveness(0.0, competitors=crowd)
+            seconds = engine.expected_fill_seconds(
+                limit, engine.fill_rate(volume, share))
+            hours = seconds / engine.SECONDS_PER_HOUR
+            self.assertAlmostEqual(hours, engine.WINDOW_HOURS, delta=0.01)
+
+    def test_conceding_spread_still_jumps_the_queue(self):
+        """Crowding is only binding at the touch. Undercut room still works."""
+        crowd = engine.touch_competitors(1_681_042, 50_000)
+        at_touch = engine.aggressiveness(0.0, competitors=crowd)
+        inside = engine.aggressiveness(0.5, competitors=crowd)
+        self.assertGreater(inside, 10 * at_touch)
+
+    def test_the_crowd_makes_a_botted_flip_slower_than_a_quiet_one(self):
+        """The regression the whole change exists to prevent."""
+        botted = engine.score_flip(
+            buy=5, sell=6, margin=1, qty=25_000, depth=0,
+            buy_volume_1h=1_681_042, sell_volume_1h=1_681_042,
+            quote_age=10, ofi=0.0, drift=0.0, now=1_700_000_000,
+            competitors=engine.touch_competitors(1_681_042, 50_000))
+        quiet = engine.score_flip(
+            buy=5, sell=6, margin=1, qty=25_000, depth=0,
+            buy_volume_1h=1_681_042, sell_volume_1h=1_681_042,
+            quote_age=10, ofi=0.0, drift=0.0, now=1_700_000_000)
+        self.assertGreater(botted.total_seconds, 10 * quiet.total_seconds)
+        self.assertLess(botted.gp_per_slot_hour, quiet.gp_per_slot_hour)
+
+
 if __name__ == "__main__":
     unittest.main()

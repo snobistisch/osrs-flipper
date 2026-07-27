@@ -197,6 +197,13 @@ class PortSyncTests(unittest.TestCase):
     def test_no_leftover_stale_banner(self):
         self.assertNotIn("runs an older version of the ranking", self.source)
 
+    def test_the_queue_is_sized_per_item_in_the_port_too(self):
+        """A port still dividing by a flat competitors_at_touch would rank
+        botted commodities top while the Python side buries them."""
+        self.assertIn("function touchCompetitors(", self.source)
+        self.assertIn("touchCompetitors(thinVolume, item.limit)", self.source)
+        self.assertIn("touchCompetitors(row.volume, row.limit)", self.source)
+
     def test_removed_factors_are_not_still_referenced(self):
         # Functions the rebuild deleted. Their presence means a half-done port.
         for gone in ("queueFactor", "levelFactor", "stabilityFactor",

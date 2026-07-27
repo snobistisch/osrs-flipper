@@ -773,13 +773,40 @@ function undercutDepth(buy, sell, exempt) {
    on a 300 gp one. */
 const priceEdge = (depth, spread) => spread <= 0 ? 0 : Math.max(0, depth / spread);
 
-/* Share of arriving volume your offer captures. At the touch you are one of
-   several offers and take roughly 1/N of what arrives; concede enough of the
-   spread and you are taking essentially everything. An item with no room to
-   improve sits at its queue share and cannot buy its way out — which is
-   exactly the trap this number exists to price. */
-function aggressiveness(edge) {
-  const share = 1 / Math.max(1, CAL.competitors_at_touch);
+/* How many offers you are queued behind at the touch price.
+
+   This used to be the constant CAL.competitors_at_touch, and that constant was
+   the model's worst assumption. It said four — on every item, including the
+   ones where the spread is a single gp and every flipper in the game is
+   looking at the same free money. On fire runes it handed you 25% of 1.7
+   million units an hour and reported a two-hour round trip on a flip that
+   takes a day.
+
+   There is an observable lower bound on the crowd, and it needs no new data.
+   Every participant is capped at buyLimit units per window, so producing the
+   window's observed volume takes at least volumePerWindow / buyLimit of them.
+   Fire runes: 6.7m units a window against a 50,000 limit, so at minimum 134
+   participants, not four. Limpwurt root comes to 9.5 and the floor keeps it
+   near the old behaviour.
+
+   Where the crowd term binds, your share is buyLimit / volumePerWindow, so
+   your fill rate is exactly one buy limit per window: on a crowded item you
+   cannot beat your own buy limit. That property is what makes this believable
+   rather than merely pessimistic. */
+function touchCompetitors(volumePerHour, buyLimit) {
+  const base = Math.max(1, CAL.competitors_at_touch);
+  if (!buyLimit || buyLimit <= 0 || volumePerHour <= 0) return base;
+  return Math.max(base, (volumePerHour * CAL.horizon_hours) / buyLimit);
+}
+
+/* Share of arriving volume your offer captures. At the touch you are one of N
+   offers and take roughly 1/N of what arrives; concede enough of the spread
+   and you are taking essentially everything. An item with no room to improve
+   sits at its queue share and cannot buy its way out — the trap this exists to
+   price, and it only bites once N reflects how crowded the item really is. */
+function aggressiveness(edge, competitors) {
+  const crowd = competitors != null ? competitors : CAL.competitors_at_touch;
+  const share = 1 / Math.max(1, crowd);
   if (edge <= 0) return share;
   return share + (1 - share) * (1 - Math.exp(-edge / Math.max(CAL.aggressiveness_scale, 1e-9)));
 }
@@ -1018,7 +1045,11 @@ function updateRiskFactor(nowSeconds, expectedHoldSeconds) {
    detail panel shows where the quoted profit went. */
 function scoreFlip(o) {
   const mid = (o.buy + o.sell) / 2;
-  const share = aggressiveness(priceEdge(o.depth, o.sell - o.buy));
+  // The caller passes the crowd, because it has to be sized on the item's real
+  // traded volume: the deep check hands this function the REACHABLE volume per
+  // leg, and deriving the queue from that would let a low fill share make the
+  // queue look shorter, which is exactly backwards.
+  const share = aggressiveness(priceEdge(o.depth, o.sell - o.buy), o.competitors);
   const buyRate = fillRate(o.buyVolume1h, share);
   const sellRate = fillRate(o.sellVolume1h, share);
   const buySeconds = expectedFillSeconds(o.qty, buyRate);
@@ -2096,7 +2127,11 @@ function screen(items, quotes, act5m, act1h, config, now) {
     if (affordable === 0) { funnel["cannot afford one"]++; continue; }
 
     const depth = undercutDepth(buy, sell, exempt);
-    const share = aggressiveness(priceEdge(depth, sell - buy));
+    // Sizing uses the same queue share the score will: on a crowded item you
+    // cannot fill more than the crowd leaves you, so pretending otherwise here
+    // would size an offer the fill model then has to discount back down.
+    const crowd = touchCompetitors(thinVolume, item.limit);
+    const share = aggressiveness(priceEdge(depth, sell - buy), crowd);
     const qty = Math.max(1, flippableQty(
       item.limit, fillableQuantity(thinVolume, share, legHorizonHours()), affordable));
 
@@ -2104,7 +2139,7 @@ function screen(items, quotes, act5m, act1h, config, now) {
     const ofi = orderFlowImbalance(highVol1h, lowVol1h);
     const breakdown = scoreFlip({
       buy, sell, margin, qty, depth, buyVolume1h: lowVol1h,
-      sellVolume1h: highVol1h, quoteAge: age, ofi, drift, now,
+      sellVolume1h: highVol1h, quoteAge: age, ofi, drift, now, competitors: crowd,
       highalch: item.highalch, natureCost: config.natureCost,
     });
 
@@ -2165,7 +2200,10 @@ async function refineTopRows(rows, config, now) {
       // its margin — it is a flip that takes twenty times as long.
       const reachableBuy = Math.max(0, row.volume * Math.max(view.buyFillShare, 0.01));
       const reachableSell = Math.max(0, row.volume * Math.max(view.sellFillShare, 0.01));
-      const share = aggressiveness(priceEdge(row.depth, row.sell - row.buy));
+      // Crowd from the item's REAL volume, not the reachable slice: a low fill
+      // share means fewer units arrive at your price, not fewer rivals queued.
+      const crowd = touchCompetitors(row.volume, row.limit);
+      const share = aggressiveness(priceEdge(row.depth, row.sell - row.buy), crowd);
       const qty = Math.max(1, flippableQty(
         row.limit,
         fillableQuantity(Math.min(reachableBuy, reachableSell), share, legHorizonHours()),
@@ -2173,7 +2211,7 @@ async function refineTopRows(rows, config, now) {
 
       const breakdown = scoreFlip({
         buy: row.buy, sell: row.sell, margin: row.margin, qty, depth: row.depth,
-        buyVolume1h: reachableBuy, sellVolume1h: reachableSell,
+        buyVolume1h: reachableBuy, sellVolume1h: reachableSell, competitors: crowd,
         quoteAge: row.age, ofi: row.ofi, drift: row.drift, now,
         sigmaDaily: view.ou ? view.ou.sigma : null, ou: view.ou,
         regimeScore: view.regimeScore,

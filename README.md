@@ -34,7 +34,30 @@ together give an expected time for each leg and a probability that both clear
 inside the window. **Round trip** in the output is that estimate, and it is the
 denominator of the ranking.
 
-### 2. You have to get to the front of the queue
+### 2. You have to get to the front of the queue, and you are not alone in it
+
+How many offers you are queued behind used to be a constant: four, on every
+item in the game. That was the worst assumption in the model. On fire runes it
+handed you a quarter of 1.7 million units an hour and reported a two-hour round
+trip on a flip that takes a day, which put bot-supplied runes at the top of the
+ranking where they do not belong.
+
+The crowd is now sized per item, from data already in hand. Every participant
+is capped at the buy limit per window, so producing the observed volume takes
+at least `volume_per_window / buy_limit` of them. Fire runes: 6.7m units a
+window against a 50,000 limit, so 134 participants at minimum, not four.
+Limpwurt root comes to 9.5, and the floor of four keeps quiet items where they
+were.
+
+The formula has one property that makes it believable rather than merely
+pessimistic: where the crowd term binds, your share is
+`buy_limit / volume_per_window`, so your fill rate is exactly one buy limit per
+window. **On a crowded item you cannot beat your own buy limit** — which is the
+answer an hour of watching the Grand Exchange gives you. Conceding spread still
+jumps the queue, so this only bites where it should: items whose spread is a
+single gp and where there is nothing to concede.
+
+
 
 The GE matches offers **on price first, then on offer age**. At the same price
 an offer placed days ago has near-absolute priority. So there are two ways to

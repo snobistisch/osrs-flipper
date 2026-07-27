@@ -102,9 +102,16 @@ class Calibration:
     """
 
     # -- fill model ---------------------------------------------------------
-    # How many offers you are queued behind at the touch price. Your share of
-    # arriving volume at that price is 1/competitors. CALIBRATE: from the tick
-    # archive, as observed fill rate divided by total volume at the touch.
+    # FLOOR on how many offers you are queued behind at the touch price; your
+    # share of arriving volume there is 1/competitors. This was a flat constant
+    # and it was the single worst assumption in the model: four competitors on
+    # every item in the game, including fire runes, where it handed you a
+    # quarter of 1.7 million units an hour and called a day-long flip a
+    # two-hour one. touch_competitors now raises it per item from the volume
+    # the item actually has to move against its buy limit, and this value only
+    # applies where that crowd term does not bind — a quiet item nobody else is
+    # watching. CALIBRATE: from the tick archive, as observed fill rate divided
+    # by total volume at the touch.
     competitors_at_touch: float = 4.0
 
     # How much of the spread you must concede before you have essentially
@@ -462,20 +469,62 @@ def undercut_depth(buy: int, sell: int, tax_exempt: bool = False) -> int:
     return lo
 
 
+def touch_competitors(volume_per_hour: float, buy_limit: Optional[int],
+                      calibration: Calibration = DEFAULT_CALIBRATION) -> float:
+    """How many offers you are queued behind at the touch price.
+
+    This used to be the constant `competitors_at_touch`, and that constant was
+    the model's worst assumption. It said four — on every item, including the
+    ones where the spread is a single gp and every flipper in the game is
+    looking at the same free money. On fire runes it therefore handed you 25%
+    of 1.7 million units an hour and reported a two-hour round trip on a flip
+    that takes a day.
+
+    There is an observable lower bound on the size of the crowd, and it needs
+    no new data. Every participant is capped at `buy_limit` units per window,
+    so producing the window's observed volume takes at least
+    `volume_per_window / buy_limit` of them. Fire runes: 6.7m units a window
+    against a 50,000 limit, so at minimum 134 participants, not four. An
+    ordinary item — limpwurt root, 124,000 a window against a 13,000 limit —
+    comes to 9.5, and the floor keeps it near the old behaviour.
+
+    The formula has a property worth stating, because it is what makes it
+    believable rather than merely pessimistic: where the crowd term binds,
+    your share is `buy_limit / volume_per_window`, so your fill rate is exactly
+    one buy limit per window. On a crowded item you cannot beat your own buy
+    limit, which is the correct answer and the one an hour of watching the
+    Grand Exchange gives you.
+
+    It is a lower bound, not a count: volume includes consumers and bots, and
+    not everyone trading is queued at the touch. CALIBRATE against the journal
+    once it holds enough censored observations to fit fill times properly.
+    """
+    base = max(1.0, calibration.competitors_at_touch)
+    if not buy_limit or buy_limit <= 0 or volume_per_hour <= 0:
+        return base
+    per_window = volume_per_hour * calibration.horizon_hours
+    return max(base, per_window / float(buy_limit))
+
+
 def aggressiveness(edge: float,
-                   calibration: Calibration = DEFAULT_CALIBRATION) -> float:
+                   calibration: Calibration = DEFAULT_CALIBRATION,
+                   competitors: Optional[float] = None) -> float:
     """Share of arriving volume your offer captures, given how far inside the
     touch you are willing to price.
 
-    At the touch you are one of several offers at that price and take roughly
-    1/N of what arrives. Concede some of the spread and you move ahead of them;
-    concede enough and you are taking essentially everything that arrives.
+    At the touch you are one of N offers at that price and take roughly 1/N of
+    what arrives, where N comes from touch_competitors. Concede some of the
+    spread and you move ahead of them; concede enough and you are taking
+    essentially everything that arrives.
 
     `edge` is the concession as a fraction of the spread, so an item with no
-    room to improve (the air rune at 5/6) sits at its queue share and cannot
-    buy its way out, which is exactly the trap the number exists to price.
+    room to improve — the air rune at 5/6, where the spread is one gp and the
+    gp is the tick — sits at its queue share and cannot buy its way out. That
+    is the trap this exists to price, and it only bites once N reflects how
+    crowded the item really is.
     """
-    share = 1.0 / max(1.0, calibration.competitors_at_touch)
+    crowd = competitors if competitors is not None else calibration.competitors_at_touch
+    share = 1.0 / max(1.0, crowd)
     if edge <= 0:
         return share
     scale = max(calibration.aggressiveness_scale, 1e-9)
@@ -874,18 +923,26 @@ def score_flip(
     regime_score: float = 0.0,
     highalch: Optional[int] = None,
     nature_rune_cost: int = 100,
+    competitors: Optional[float] = None,
     calibration: Calibration = DEFAULT_CALIBRATION,
 ) -> ScoreBreakdown:
     """Expected gp per slot-hour for one flip, with its decomposition.
 
     `buy_volume_1h` is seller-initiated volume (what fills your buy offer);
     `sell_volume_1h` is buyer-initiated volume (what fills your sell offer).
+    `competitors` is how many offers you are queued behind at the touch, from
+    touch_competitors. The caller computes it because it has to be sized on the
+    item's real traded volume: the deep check passes REACHABLE volume for the
+    two legs, and deriving the crowd from that would let a low fill share make
+    the queue look shorter, which is exactly backwards.
     """
     mid = (buy + sell) / 2.0
-    share = aggressiveness(price_edge(depth, sell - buy), calibration)
+    share = aggressiveness(price_edge(depth, sell - buy), calibration,
+                           competitors)
+    buy_share = sell_share = share
 
-    buy_rate = fill_rate(buy_volume_1h, share)
-    sell_rate = fill_rate(sell_volume_1h, share)
+    buy_rate = fill_rate(buy_volume_1h, buy_share)
+    sell_rate = fill_rate(sell_volume_1h, sell_share)
     buy_seconds = expected_fill_seconds(qty, buy_rate, calibration)
     sell_seconds = expected_fill_seconds(qty, sell_rate, calibration)
     total_seconds = buy_seconds + sell_seconds
@@ -927,7 +984,8 @@ def score_flip(
 
     return ScoreBreakdown(
         qty=qty, margin=margin, raw_profit=raw_profit, capital_needed=qty * buy,
-        buy_share=share, sell_share=share, buy_rate=buy_rate, sell_rate=sell_rate,
+        buy_share=buy_share, sell_share=sell_share,
+        buy_rate=buy_rate, sell_rate=sell_rate,
         buy_seconds=buy_seconds, sell_seconds=sell_seconds,
         total_seconds=total_seconds, p_fill_buy=p_buy, p_fill_sell=p_sell,
         p_fill_both=p_both, adverse_selection=adverse, holding_risk=hold,
