@@ -269,7 +269,20 @@ the bevels and the gold Cinzel headings stay, while the data is set the way a
 dealing screen sets data — monospace figures that line up digit for digit, tight
 rows, a status line carrying the clock and whether the feed is still live, and a
 tape of the busiest items along the top. `F1`/`F2`/`F3` switch tabs, `R`
-refreshes, `Esc` closes the detail panel. Three tabs:
+refreshes, `Esc` closes the detail panel.
+
+The price chart is laid out the same way: an OHLC strip above it, the price
+axis on the right with the last print tagged against it, a crosshair that
+labels the level under the cursor, a 20-bucket moving average, and volume split
+by which side of the book it came from. It draws candles by default, and those
+candles are honest about what the API gives: each bucket reports the
+volume-weighted average of buyer-initiated trades and of seller-initiated ones,
+so the **body** is this bucket's mid against the previous one — a genuine
+open-to-close move — while the **wick** is the gap between the two sides, which
+is a spread and not the high-low range of traded prices. Read as OHLC it would
+mislead, so the chart says which it is.
+
+Three tabs:
 **Flip** ranks by gp per slot per hour, **Merch** pulls a year of daily prices
 for a watchlist and is the only view that fetches per item (once, on demand,
 cached six hours in IndexedDB), **Crash** reads the deep-checked candidates for

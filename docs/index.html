@@ -388,8 +388,30 @@ td.bad { color: var(--down); }
   font-size: 0.72rem; color: var(--text-dim);
   font-family: var(--mono); letter-spacing: 0.02em;
 }
-.steps { display: flex; gap: 0.4rem; margin: 0.8rem 0; flex-wrap: wrap; }
+.steps { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+.steps button {
+  font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.06em;
+  padding: 0.25rem 0.6rem;
+}
 .steps button.on { background: #5a4a30; color: var(--gold-bright); border-color: var(--gold); }
+.chart-controls {
+  display: flex; gap: 1.2rem; flex-wrap: wrap;
+  align-items: center; margin: 0.5rem 0 0.6rem;
+}
+
+/* The OHLC strip every terminal puts above a chart. */
+#ohlc {
+  display: flex; gap: 1.3rem; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+  padding: 0.35rem 0.1rem; margin-top: 0.9rem;
+  color: var(--text);
+}
+#ohlc i {
+  font-style: normal; color: var(--text-dim);
+  letter-spacing: 0.1em; margin-right: 0.45em; font-size: 0.72rem;
+}
 .legend { display: flex; gap: 1.2rem; font-size: 0.85rem; margin-bottom: 0.4rem; flex-wrap: wrap; }
 .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 0.35rem; vertical-align: baseline; }
 .chart-box { position: relative; }
@@ -730,23 +752,35 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
         </div>
       </div>
       <ul class="notes small" id="d-notes"></ul>
-      <div class="steps" id="d-steps">
-        <button data-step="5m">5m</button>
-        <button data-step="1h" class="on">1h</button>
-        <button data-step="6h">6h</button>
-        <button data-step="24h">24h</button>
+      <div id="ohlc"></div>
+      <div class="chart-controls">
+        <div class="steps" id="d-steps">
+          <button data-step="5m">5m</button>
+          <button data-step="1h" class="on">1h</button>
+          <button data-step="6h">6h</button>
+          <button data-step="24h">24h</button>
+        </div>
+        <div class="steps" id="d-mode">
+          <button data-mode="candle" class="on">Candles</button>
+          <button data-mode="line">Lines</button>
+        </div>
       </div>
       <div class="legend">
         <span><span class="swatch" style="background:var(--buy)"></span>Instant-buy (your sell fills here)</span>
         <span><span class="swatch" style="background:var(--sell)"></span>Instant-sell (your buy fills here)</span>
+        <span><span class="swatch" style="background:var(--gold);border-radius:0;height:3px"></span>20-bucket average</span>
       </div>
       <div class="chart-box" id="chart-box">
         <div id="chart"></div>
         <div id="tip"></div>
       </div>
-      <p class="small dim">A structural margin shows both lines running parallel
-        with steady volume. A one-off spike shows one line jumping on a single
-        near-zero-volume bucket.</p>
+      <p class="small dim">A structural margin shows both sides running
+        parallel with steady volume. A one-off spike shows one side jumping on a
+        single near-zero-volume bucket. <strong>On the candles the body is this
+        bucket's mid against the one before it, and the wick is the gap between
+        the two sides of the book</strong> — the wiki reports averages per side
+        rather than traded extremes, so the wick is a spread, not a high-low
+        range.</p>
     </section>
 
     <div id="keys">
@@ -2559,6 +2593,7 @@ const state = {
   tab: "flip",
   merchRows: [],   // the watchlist, once the Merch tab has been opened
   merchState: "idle",   // idle | loading | ready | failed
+  chartMode: "candle",   // candle | line
   merchSort: "merchScore",
   merchDesc: true,
   lastLoad: null,  // when the last successful fetch landed, for the live light
@@ -3254,6 +3289,9 @@ function showDetail(id) {
 
 async function loadChart() {
   const chart = $("#chart");
+  // The tooltip belongs to the chart that is being replaced; leaving it up
+  // pins a reading from a timeframe that is no longer on screen.
+  $("#tip").style.opacity = 0;
   chart.innerHTML = `<p class="small dim">Loading price history…</p>`;
   try {
     const data = await fetchTimeseries(state.selected, state.timestep);
@@ -3266,6 +3304,7 @@ async function loadChart() {
     const row = state.rows.find((r) => r.id === state.selected);
     const refLine = row && row.deep && row.medianMid != null
       ? { value: row.medianMid, label: "14d median" } : null;
+    renderSessionStats(points);
     chart.innerHTML = renderChart(points, refLine);
     wireChartHover(points, refLine ? refLine.value : null);
   } catch (err) {
@@ -3275,7 +3314,59 @@ async function loadChart() {
 }
 
 /* Inline SVG: price lines on top, volume bars beneath, sharing an x scale. */
-const CHART = { w: 900, h: 300, volH: 110, padL: 62, padR: 12, padT: 12, padB: 26 };
+const CHART = { w: 900, h: 320, volH: 96, padL: 10, padR: 74, padT: 14, padB: 26 };
+
+/* The price axis sits on the RIGHT with the last print tagged against it,
+   which is how every dealing screen is laid out: the number you care about is
+   the one at the end of the series, so it belongs next to where the series
+   ends. */
+
+const midOf = (d) => {
+  if (d.avgHighPrice != null && d.avgLowPrice != null) {
+    return (d.avgHighPrice + d.avgLowPrice) / 2;
+  }
+  return d.avgHighPrice != null ? d.avgHighPrice : (d.avgLowPrice ?? null);
+};
+
+/* Simple moving average of the mid, over whichever buckets actually traded.
+   Skipped on short series, where it would be a line through almost nothing. */
+const SMA_PERIOD = 20;
+
+function movingAverage(points, period = SMA_PERIOD) {
+  if (points.length < period * 2) return [];
+  const out = [];
+  const window = [];
+  for (const d of points) {
+    const mid = midOf(d);
+    if (mid != null) window.push(mid);
+    if (window.length > period) window.shift();
+    out.push(window.length === period
+      ? { timestamp: d.timestamp, value: window.reduce((a, b) => a + b, 0) / period }
+      : null);
+  }
+  return out;
+}
+
+/* Open, high, low, close and the change across the window on screen. Stated
+   the way a terminal states them, and each one is a real reading: open and
+   close are the first and last mid, the range is the widest the two sides of
+   the book got. */
+function sessionStats(points) {
+  const traded = points.filter((d) => midOf(d) != null);
+  if (!traded.length) return null;
+  const highs = points.map((d) => d.avgHighPrice).filter((v) => v != null);
+  const lows = points.map((d) => d.avgLowPrice).filter((v) => v != null);
+  const open = midOf(traded[0]);
+  const close = midOf(traded[traded.length - 1]);
+  return {
+    open, close,
+    high: highs.length ? Math.max(...highs) : close,
+    low: lows.length ? Math.min(...lows) : close,
+    change: open > 0 ? (close - open) / open : 0,
+    volume: points.reduce((sum, d) =>
+      sum + (d.highPriceVolume || 0) + (d.lowPriceVolume || 0), 0),
+  };
+}
 
 function chartScales(points, refValue) {
   const times = points.map((d) => d.timestamp);
@@ -3297,21 +3388,44 @@ function chartScales(points, refValue) {
   };
 }
 
-function renderChart(points, refLine) {
-  const s = chartScales(points, refLine ? refLine.value : null);
-  const { w, h, volH, padL, padR, padT, padB } = CHART;
+/* Candles built from what the API actually reports, which is not OHLC and is
+   not pretended to be. Each bucket gives the volume-weighted average of
+   buyer-initiated trades and of seller-initiated trades — the two sides of the
+   book — so:
 
-  // The 14-day median as a dashed anchor: how far today's prices sit from
-  // the item's normal level is the manipulation tell.
-  let refMark = "";
-  if (refLine) {
-    const y = s.y(refLine.value).toFixed(1);
-    refMark = `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}"
-        stroke="#ffb83f" stroke-width="1.5" stroke-dasharray="6 5" opacity="0.7"/>
-      <text x="${w - padR - 4}" y="${(s.y(refLine.value) - 6).toFixed(1)}"
-        fill="#ffb83f" font-size="12" text-anchor="end">${refLine.label} · ${num(refLine.value)} gp</text>`;
-  }
+     body  the mid of this bucket against the mid of the one before it, which
+           is a genuine open-to-close move
+     wick  that bucket's seller average up to its buyer average, which is the
+           spread rather than the extremes of traded prices
 
+   A trader reading the wick as a high-low range is off by the difference
+   between a spread and a range, so the legend says which it is. */
+function renderCandles(points, s) {
+  const slot = (CHART.w - CHART.padL - CHART.padR) / points.length;
+  const bodyW = Math.max(1, Math.min(9, slot * 0.68));
+  let previous = null;
+  return points.map((d) => {
+    const mid = midOf(d);
+    if (mid == null) return "";
+    const x = s.x(d.timestamp);
+    const open = previous == null ? mid : previous;
+    previous = mid;
+    const rising = mid >= open;
+    const colour = rising ? "var(--up)" : "var(--down)";
+    const top = s.y(Math.max(open, mid)), bottom = s.y(Math.min(open, mid));
+    const wickTop = d.avgHighPrice != null ? s.y(d.avgHighPrice) : top;
+    const wickBottom = d.avgLowPrice != null ? s.y(d.avgLowPrice) : bottom;
+    return `<line x1="${x.toFixed(1)}" y1="${wickTop.toFixed(1)}"
+              x2="${x.toFixed(1)}" y2="${wickBottom.toFixed(1)}"
+              stroke="${colour}" stroke-width="1" opacity="0.75"/>
+      <rect x="${(x - bodyW / 2).toFixed(1)}" y="${top.toFixed(1)}"
+            width="${bodyW.toFixed(1)}"
+            height="${Math.max(1, bottom - top).toFixed(1)}"
+            fill="${colour}" opacity="0.95"/>`;
+  }).join("");
+}
+
+function renderLines(points, s) {
   const line = (key, color) => {
     const segments = [];
     let current = [];
@@ -3328,23 +3442,66 @@ function renderChart(points, refLine) {
       `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}"
          stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`).join("");
   };
+  return line("avgHighPrice", "var(--buy)") + line("avgLowPrice", "var(--sell)");
+}
 
-  const ticks = 4;
+function renderChart(points, refLine) {
+  const s = chartScales(points, refLine ? refLine.value : null);
+  const { w, h, volH, padL, padR, padT, padB } = CHART;
+  const axisX = w - padR;
+
+  // The 14-day median as a dashed anchor: how far today's prices sit from
+  // the item's normal level is the manipulation tell.
+  let refMark = "";
+  if (refLine) {
+    const y = s.y(refLine.value).toFixed(1);
+    refMark = `<line x1="${padL}" y1="${y}" x2="${axisX}" y2="${y}"
+        stroke="#ffb83f" stroke-width="1.5" stroke-dasharray="6 5" opacity="0.7"/>
+      <text x="${padL + 4}" y="${(s.y(refLine.value) - 6).toFixed(1)}"
+        fill="#ffb83f" font-size="11">${refLine.label} · ${num(refLine.value)} gp</text>`;
+  }
+
+  const ticks = 5;
   const gridLines = Array.from({ length: ticks + 1 }, (_, i) => {
     const p = s.lo + (s.hi - s.lo) * (i / ticks);
     const y = s.y(p).toFixed(1);
-    return `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}"
+    return `<line x1="${padL}" y1="${y}" x2="${axisX}" y2="${y}"
               stroke="var(--grid)" stroke-width="1"/>
-            <text x="${padL - 8}" y="${y}" fill="var(--text-dim)" font-size="12"
-              text-anchor="end" dominant-baseline="middle">${num(Math.round(p))}</text>`;
+            <text x="${axisX + 6}" y="${y}" fill="var(--text-dim)" font-size="11"
+              dominant-baseline="middle">${num(Math.round(p))}</text>`;
   }).join("");
 
   const timeLabels = Array.from({ length: 5 }, (_, i) => {
     const t = s.t0 + (s.t1 - s.t0) * (i / 4);
     const anchor = i === 0 ? "start" : i === 4 ? "end" : "middle";
     return `<text x="${s.x(t).toFixed(1)}" y="${h - 6}" fill="var(--text-dim)"
-              font-size="12" text-anchor="${anchor}">${timeLabel(t)}</text>`;
+              font-size="11" text-anchor="${anchor}">${timeLabel(t)}</text>`;
   }).join("");
+
+  const series = state.chartMode === "candle"
+    ? renderCandles(points, s) : renderLines(points, s);
+
+  const sma = movingAverage(points)
+    .filter((d) => d)
+    .map((d) => `${s.x(d.timestamp).toFixed(1)},${s.y(d.value).toFixed(1)}`);
+  const smaLine = sma.length > 1
+    ? `<polyline points="${sma.join(" ")}" fill="none" stroke="var(--gold)"
+         stroke-width="1.4" opacity="0.8" stroke-linejoin="round"/>` : "";
+
+  // The last print, tagged against the axis. On a dealing screen this is the
+  // one number that is always readable without looking anything up.
+  const lastTraded = [...points].reverse().find((d) => midOf(d) != null);
+  let lastTag = "";
+  if (lastTraded) {
+    const value = Math.round(midOf(lastTraded));
+    const y = s.y(value);
+    lastTag = `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${axisX}" y2="${y.toFixed(1)}"
+        stroke="var(--gold)" stroke-width="1" stroke-dasharray="2 3" opacity="0.55"/>
+      <rect x="${axisX + 1}" y="${(y - 8).toFixed(1)}" width="${padR - 4}" height="16"
+        fill="var(--gold)" rx="2"/>
+      <text x="${axisX + 5}" y="${y.toFixed(1)}" fill="#241c12" font-size="11"
+        font-weight="700" dominant-baseline="middle">${num(value)}</text>`;
+  }
 
   const maxVol = Math.max(1, ...points.map((d) =>
     Math.max(d.highPriceVolume || 0, d.lowPriceVolume || 0)));
@@ -3353,37 +3510,48 @@ function renderChart(points, refLine) {
     const x = s.x(d.timestamp);
     const bar = (vol, color, offset) => {
       if (!vol) return "";
-      const barH = (vol / maxVol) * (volH - 30);
-      return `<rect x="${(x + offset).toFixed(1)}" y="${(volH - 20 - barH).toFixed(1)}"
+      const barH = (vol / maxVol) * (volH - 26);
+      return `<rect x="${(x + offset).toFixed(1)}" y="${(volH - 18 - barH).toFixed(1)}"
                 width="${barW.toFixed(1)}" height="${barH.toFixed(1)}"
                 fill="${color}" opacity="0.9"/>`;
     };
+    // Split by side rather than coloured by candle direction: which side of
+    // the book the volume came from says more here than whether the bucket
+    // closed up, and the two lines are already keyed to those colours.
     return bar(d.highPriceVolume, "var(--buy)", -barW - 0.5) +
            bar(d.lowPriceVolume, "var(--sell)", 0.5);
   }).join("");
 
   return `
     <svg viewBox="0 0 ${w} ${h}" role="img" id="price-svg"
-         aria-label="Price history: instant-buy and instant-sell averages">
+         aria-label="Price history with the last print tagged on the right axis">
       ${gridLines}
       ${refMark}
-      ${line("avgHighPrice", "var(--buy)")}
-      ${line("avgLowPrice", "var(--sell)")}
+      ${series}
+      ${smaLine}
+      ${lastTag}
       ${timeLabels}
       <line id="crosshair" x1="0" y1="${padT}" x2="0" y2="${h - padB}"
-            stroke="#898781" stroke-width="1" opacity="0"/>
-      <circle id="dot-high" r="4" fill="var(--buy)" opacity="0"/>
-      <circle id="dot-low" r="4" fill="var(--sell)" opacity="0"/>
-      <rect x="${padL}" y="${padT}" width="${w - padL - padR}"
+            stroke="#8d8880" stroke-width="1" stroke-dasharray="3 3" opacity="0"/>
+      <line id="crosshair-y" x1="${padL}" y1="0" x2="${axisX}" y2="0"
+            stroke="#8d8880" stroke-width="1" stroke-dasharray="3 3" opacity="0"/>
+      <g id="cursor-price" opacity="0">
+        <rect x="${axisX + 1}" y="-8" width="${padR - 4}" height="16"
+              fill="#8d8880" rx="2"/>
+        <text x="${axisX + 5}" y="0" fill="#1d1710" font-size="11"
+              font-weight="700" dominant-baseline="middle"></text>
+      </g>
+      <circle id="dot-high" r="3.5" fill="var(--buy)" opacity="0"/>
+      <circle id="dot-low" r="3.5" fill="var(--sell)" opacity="0"/>
+      <rect x="${padL}" y="${padT}" width="${axisX - padL}"
             height="${h - padT - padB}" fill="transparent" id="hit"/>
     </svg>
     <svg viewBox="0 0 ${w} ${volH}" role="img" aria-label="Traded volume per bucket">
-      <text x="${padL - 8}" y="14" fill="var(--text-dim)" font-size="12"
-        text-anchor="end">${num(maxVol)}</text>
-      <line x1="${padL}" y1="${volH - 20}" x2="${w - padR}" y2="${volH - 20}"
+      <text x="${axisX + 6}" y="12" fill="var(--text-dim)" font-size="11">${num(maxVol)}</text>
+      <line x1="${padL}" y1="${volH - 18}" x2="${axisX}" y2="${volH - 18}"
         stroke="var(--grid)" stroke-width="1"/>
-      <text x="${padL - 8}" y="${volH - 20}" fill="var(--text-dim)" font-size="12"
-        text-anchor="end" dominant-baseline="middle">0</text>
+      <text x="${axisX + 6}" y="${volH - 18}" fill="var(--text-dim)" font-size="11"
+        dominant-baseline="middle">0</text>
       ${bars}
     </svg>`;
 }
@@ -3404,19 +3572,25 @@ function wireChartHover(points, refValue) {
   const box = $("#chart-box");
   const s = chartScales(points, refValue);
   const crosshair = svg.querySelector("#crosshair");
+  const crosshairY = svg.querySelector("#crosshair-y");
+  const cursorPrice = svg.querySelector("#cursor-price");
+  const cursorRect = cursorPrice.querySelector("rect");
+  const cursorText = cursorPrice.querySelector("text");
   const dotHigh = svg.querySelector("#dot-high");
   const dotLow = svg.querySelector("#dot-low");
 
   const hide = () => {
     tip.style.opacity = 0;
-    crosshair.setAttribute("opacity", 0);
-    dotHigh.setAttribute("opacity", 0);
-    dotLow.setAttribute("opacity", 0);
+    for (const el of [crosshair, crosshairY, cursorPrice, dotHigh, dotLow]) {
+      el.setAttribute("opacity", 0);
+    }
   };
 
   svg.addEventListener("pointermove", (event) => {
     const rect = svg.getBoundingClientRect();
-    const svgX = ((event.clientX - rect.left) / rect.width) * CHART.w;
+    const scale = CHART.w / rect.width;
+    const svgX = (event.clientX - rect.left) * scale;
+    const svgY = (event.clientY - rect.top) * scale;
     let nearest = points[0], best = Infinity;
     for (const d of points) {
       const dist = Math.abs(s.x(d.timestamp) - svgX);
@@ -3426,6 +3600,19 @@ function wireChartHover(points, refValue) {
     crosshair.setAttribute("x1", x);
     crosshair.setAttribute("x2", x);
     crosshair.setAttribute("opacity", 1);
+
+    // The horizontal arm with the price under the cursor tagged against the
+    // axis: reading a level off a chart by eye is what this replaces.
+    const clampedY = Math.max(CHART.padT, Math.min(CHART.h - CHART.padB, svgY));
+    crosshairY.setAttribute("y1", clampedY);
+    crosshairY.setAttribute("y2", clampedY);
+    crosshairY.setAttribute("opacity", 1);
+    const priceUnderCursor = s.lo + (s.hi - s.lo) *
+      (1 - (clampedY - CHART.padT) / (CHART.h - CHART.padT - CHART.padB));
+    cursorRect.setAttribute("y", clampedY - 8);
+    cursorText.setAttribute("y", clampedY);
+    cursorText.textContent = num(Math.round(priceUnderCursor));
+    cursorPrice.setAttribute("opacity", 1);
 
     const place = (dot, value) => {
       if (value == null) { dot.setAttribute("opacity", 0); return; }
@@ -3437,11 +3624,14 @@ function wireChartHover(points, refValue) {
     place(dotLow, nearest.avgLowPrice);
 
     const fmt = (v) => v == null ? "no trades" : num(v) + " gp";
+    const spread = (nearest.avgHighPrice != null && nearest.avgLowPrice != null)
+      ? nearest.avgHighPrice - nearest.avgLowPrice : null;
     tip.innerHTML = `<strong>${timeLabel(nearest.timestamp)}</strong><br>
       <span class="swatch" style="background:var(--buy)"></span>
         ${fmt(nearest.avgHighPrice)} · ${num(nearest.highPriceVolume || 0)} units<br>
       <span class="swatch" style="background:var(--sell)"></span>
-        ${fmt(nearest.avgLowPrice)} · ${num(nearest.lowPriceVolume || 0)} units`;
+        ${fmt(nearest.avgLowPrice)} · ${num(nearest.lowPriceVolume || 0)} units${
+      spread != null ? `<br><span class="dim">spread ${num(spread)} gp</span>` : ""}`;
     tip.style.opacity = 1;
 
     const boxRect = box.getBoundingClientRect();
@@ -3450,6 +3640,25 @@ function wireChartHover(points, refValue) {
     tip.style.top = (event.clientY - boxRect.top + 14) + "px";
   });
   svg.addEventListener("pointerleave", hide);
+}
+
+/* The OHLC strip a terminal puts above every chart. Open and close are the
+   first and last mid on screen; the range is the widest the two sides of the
+   book reached. */
+function renderSessionStats(points) {
+  const strip = $("#ohlc");
+  const stats = sessionStats(points);
+  if (!stats) { strip.innerHTML = ""; return; }
+  const cls = stats.change > 0 ? "tick-up" : stats.change < 0 ? "tick-down" : "tick-flat";
+  const sign = stats.change > 0 ? "+" : "";
+  strip.innerHTML = [
+    ["O", num(Math.round(stats.open))],
+    ["H", num(Math.round(stats.high))],
+    ["L", num(Math.round(stats.low))],
+    ["C", num(Math.round(stats.close))],
+    ["VOL", formatGp(Math.round(stats.volume))],
+  ].map(([k, v]) => `<span><i>${k}</i>${v}</span>`).join("") +
+    `<span class="${cls}"><i>CHG</i>${sign}${(stats.change * 100).toFixed(2)}%</span>`;
 }
 
 /* ==================== wiring ==================== */
@@ -3570,6 +3779,15 @@ $("#holdings tbody").addEventListener("click", (event) => {
   list.splice(Number(drop.dataset.drop), 1);
   saveHoldings(list);
   renderPortfolio();
+});
+
+$("#d-mode").addEventListener("click", (event) => {
+  const btn = event.target.closest("button[data-mode]");
+  if (!btn) return;
+  state.chartMode = btn.dataset.mode;
+  document.querySelectorAll("#d-mode button")
+    .forEach((b) => b.classList.toggle("on", b === btn));
+  loadChart();
 });
 
 $("#d-steps").addEventListener("click", (event) => {
