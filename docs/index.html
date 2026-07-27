@@ -2330,13 +2330,13 @@ function show(allRows, config, statusText) {
   $("#status").className = "small dim";
   $("#status").textContent = statusText +
     (hiddenText ? `  ·  hidden by your filters: ${hiddenText}` : "");
-  renderTable();
   // The crash view is a different reading of these same rows, so a refresh
-  // has to redraw it too.
-  if (state.tab === "crash") renderMerchTable();
-  if (state.tab === "flip" && state.selected != null) {
+  // has to redraw whichever of the two is on screen.
+  renderActiveTable();
+  if (state.tab !== "merch" && state.selected != null) {
     const row = state.rows.find((r) => r.id === state.selected);
     if (row) showDetail(row.id);
+    else $("#detail").classList.add("hidden");
   }
 }
 
@@ -2504,20 +2504,31 @@ function selectTab(tab) {
   $("#merch-wrap").classList.toggle("hidden", flip);
   $("#merch-note").classList.toggle("hidden", flip);
   $("#portfolio").classList.toggle("hidden", tab !== "merch");
-  if (flip) {
-    $("#detail").classList.toggle("hidden", state.selected == null);
-    renderTable();
-    return;
-  }
-  $("#detail").classList.add("hidden");
+
+  // Flip and Crash are two readings of the same rows, so the detail panel —
+  // chart, factor breakdown, warnings — belongs to both. Only Merch has no
+  // detail to show: those rows come from a different fetch and are not scored
+  // as flips at all.
   if (tab === "merch") {
+    $("#detail").classList.add("hidden");
     state.merchSort = "merchScore";
     loadMerchTab();
     renderPortfolio();
-  } else {
-    state.merchSort = "recovery";
-    renderMerchTable();
+    return;
   }
+  if (tab === "crash") state.merchSort = "recovery";
+  renderActiveTable();
+  if (state.selected != null && state.rows.some((r) => r.id === state.selected)) {
+    showDetail(state.selected);
+  } else {
+    $("#detail").classList.add("hidden");
+  }
+}
+
+/* Redraw whichever table the current tab is showing. */
+function renderActiveTable() {
+  if (state.tab === "flip") renderTable();
+  else renderMerchTable();
 }
 
 /* The Merch tab is the only thing in the app that fetches per item, so it does
@@ -2566,7 +2577,7 @@ function renderMerchTable() {
       return;
     }
     body.innerHTML = rows.map((r) => `
-      <tr data-id="${r.id}">
+      <tr data-id="${r.id}"${state.selected === r.id ? ' class="selected"' : ""}>
         <td>${escapeHtml(r.name)}</td>
         <td>${num(r.buy)}</td>
         <td class="bad">${Math.round(r.crash.depth * 100)}%</td>
@@ -2698,7 +2709,7 @@ function showDetail(id) {
   const row = state.rows.find((r) => r.id === id);
   if (!row) return;
   state.selected = id;
-  renderTable();
+  renderActiveTable();
   $("#detail").classList.remove("hidden");
   $("#d-name").textContent = row.name;
   $("#d-prices").textContent = `${num(row.buy)} → ${num(row.sell)}`;
@@ -3050,13 +3061,10 @@ $("#merch thead").addEventListener("click", (event) => {
 $("#merch tbody").addEventListener("click", (event) => {
   const hold = event.target.closest("button[data-hold]");
   if (hold) { addHolding(Number(hold.dataset.hold)); return; }
-  // Clicking a crash row jumps back to the flip table with it selected, so the
-  // price chart and the score breakdown are one click away.
+  // Open the detail panel underneath the crash table. It used to switch to the
+  // Flip tab first, which threw away the view you had just navigated to.
   const row = event.target.closest("tr[data-id]");
-  if (row && state.tab === "crash") {
-    selectTab("flip");
-    showDetail(Number(row.dataset.id));
-  }
+  if (row && state.tab === "crash") showDetail(Number(row.dataset.id));
 });
 
 $("#holdings tbody").addEventListener("click", (event) => {
