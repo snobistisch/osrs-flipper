@@ -262,7 +262,14 @@ version](https://snobistisch.github.io/osrs-flipper/) is one self-contained
 HTML file and runs the same ranking. Enter a budget and it goes, and the first
 thing it shows is one card per offer slot: what to buy, how many, what to list
 it at, and how much of the bank to commit. The table underneath is the working
-out. Three tabs:
+out.
+
+It is laid out as a trading terminal wearing RuneScape's clothes: the palette,
+the bevels and the gold Cinzel headings stay, while the data is set the way a
+dealing screen sets data — monospace figures that line up digit for digit, tight
+rows, a status line carrying the clock and whether the feed is still live, and a
+tape of the busiest items along the top. `F1`/`F2`/`F3` switch tabs, `R`
+refreshes, `Esc` closes the detail panel. Three tabs:
 **Flip** ranks by gp per slot per hour, **Merch** pulls a year of daily prices
 for a watchlist and is the only view that fetches per item (once, on demand,
 cached six hours in IndexedDB), **Crash** reads the deep-checked candidates for
