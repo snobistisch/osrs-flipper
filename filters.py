@@ -35,6 +35,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import engine
 import exemptions
+import merch
 from api import Activity, Item, Quote
 
 
@@ -59,6 +60,12 @@ class FilterConfig:
     min_price: int = 1                     # gp per item, on the buy estimate
     max_price: Optional[int] = None        # None = no cap
     tax_free_only: bool = False            # only flips whose sell pays no tax
+    # Hide bot-supplied f2p staples: cheap, high buy limit, free-to-play. They
+    # rank well and clear fast, and some people would rather not trade against
+    # a script whose supply curve answers a price rise by producing more. A
+    # preference, so it hides rows like every other one here — the items are
+    # still scored, and turning this on never reorders what is left.
+    hide_botted: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +80,7 @@ class FlipRow:
     margin: int              # per item, after tax, at the quoted prices
     roi: float
     limit: Optional[int]     # None = wiki publishes no buy limit
+    members: bool            # needed to tell a botted f2p staple from an item
     thin_volume_1h: int
     qty_per_window: int
     capital_needed: int      # gp this flip ties up in one slot
@@ -135,7 +143,7 @@ FUNNEL_STAGES = (
 
 PREFERENCE_STAGES = (
     "quote too old", "volume too thin", "price out of range", "pays tax",
-    "roi too low", "no undercut room", "shown",
+    "roi too low", "no undercut room", "bot-supplied", "shown",
 )
 
 
@@ -297,7 +305,8 @@ def _evaluate(
         latest_low=quote.low, latest_high=quote.high,
         tax=engine.ge_tax(sell, tax_exempt), margin=margin,
         roi=engine.roi(buy, sell, tax_exempt),
-        limit=item.limit, thin_volume_1h=thin_volume, qty_per_window=qty,
+        limit=item.limit, members=bool(item.members),
+        thin_volume_1h=thin_volume, qty_per_window=qty,
         volume_1h_total=int(high_vol_1h + low_vol_1h),
         capital_needed=breakdown.capital_needed,
         gross_profit=breakdown.raw_profit, undercut_depth=depth,
@@ -491,6 +500,10 @@ def apply_preferences(result: ScreenResult,
             continue
         if row.undercut_depth < config.min_undercut_depth:
             hidden["no undercut room"] += 1
+            continue
+        if config.hide_botted and merch.is_botted(row.buy, row.members,
+                                                  row.limit):
+            hidden["bot-supplied"] += 1
             continue
         kept.append(row)
     hidden["shown"] = len(kept)

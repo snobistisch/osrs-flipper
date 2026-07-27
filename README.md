@@ -202,7 +202,10 @@ narrowing the view never reorders what is left.
 
 Nothing to install: the [hosted
 version](https://snobistisch.github.io/osrs-flipper/) is one self-contained
-HTML file and runs the same ranking. Enter a budget and it goes. Three tabs:
+HTML file and runs the same ranking. Enter a budget and it goes, and the first
+thing it shows is one card per offer slot: what to buy, how many, what to list
+it at, and how much of the bank to commit. The table underneath is the working
+out. Three tabs:
 **Flip** ranks by gp per slot per hour, **Merch** pulls a year of daily prices
 for a watchlist and is the only view that fetches per item (once, on demand,
 cached six hours in IndexedDB), **Crash** reads the deep-checked candidates for
@@ -228,7 +231,11 @@ python3 cli.py --capital 1m --slots 3
 
 `--members` for members items, `--slots 8` if you have them, `--top 40` for a
 longer list. The display filters (`--min-roi`, `--min-vol`, `--max-age`,
-`--min-depth`) all default to off. `--mode crash` reads the same fetch for
+`--min-depth`) all default to off, as does `--no-bots`, which hides
+bot-supplied free-to-play staples — under 100 gp, buy limit over 10,000. They
+rank well and clear fast; the supply curve is a script that answers a price
+rise by producing more. Like every filter here it hides rows after scoring, so
+turning it on never reorders what is left. `--mode crash` reads the same fetch for
 price dislocation instead of throughput; the long-horizon merch view lives in
 `agent.py merch`, because it needs a different set of requests.
 

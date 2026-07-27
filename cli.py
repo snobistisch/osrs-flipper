@@ -65,6 +65,9 @@ def parse_args(argv):
                       help="max buy price per item, e.g. 10k or 1m")
     view.add_argument("--tax-free", action="store_true",
                       help="only flips that pay zero GE tax (sell under 50 gp)")
+    view.add_argument("--no-bots", action="store_true",
+                      help="hide bot-supplied f2p staples: free-to-play, buy "
+                           "limit over 10,000, under 100 gp")
     return p.parse_args(argv)
 
 
@@ -75,7 +78,7 @@ def config_from(opts, nature_cost: int) -> filters.FilterConfig:
         max_quote_age=opts.max_age, min_thin_volume_1h=opts.min_vol,
         min_roi=opts.min_roi, min_undercut_depth=opts.min_depth,
         min_price=opts.min_price, max_price=opts.max_price,
-        tax_free_only=opts.tax_free)
+        tax_free_only=opts.tax_free, hide_botted=opts.no_bots)
 
 
 def print_crash_table(result, opts):

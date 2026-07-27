@@ -63,6 +63,31 @@
 .tag-DIP, .tag-SUPPLY_DROP { border-color: #b8862f; color: var(--gold); }
 .tag-DIPPED_STABLE, .tag-MERCH { border-color: var(--good); color: var(--good); }
 .tag-SUPPLY_CRUNCH { border-color: var(--sell); color: var(--gold-bright); }
+#plan { margin: 0 0 1.4rem; }
+#plan h2 { font-size: 1.15rem; margin-bottom: 0.6rem; }
+#plan-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.6rem;
+}
+.plan-card {
+  background: var(--panel);
+  border: 2px solid var(--edge);
+  border-left: 4px solid var(--gold);
+  border-radius: 3px;
+  padding: 0.6rem 0.75rem;
+  cursor: pointer;
+}
+.plan-card:hover { border-color: var(--edge-light); border-left-color: var(--gold-bright); }
+.plan-rank { color: var(--text-dim); font-size: 0.8rem; letter-spacing: 0.08em; }
+.plan-name {
+  font-family: Cinzel, "Times New Roman", serif;
+  color: var(--gold); font-size: 1.05rem; margin: 0.1rem 0 0.4rem;
+}
+.plan-line { font-size: 0.9rem; }
+.plan-line strong { color: var(--value); font-weight: 600; }
+.plan-foot { color: var(--text-dim); font-size: 0.82rem; margin-top: 0.4rem; }
+.plan-warn { color: #ffb59a; font-size: 0.82rem; margin-top: 0.3rem; }
 .hold-btn {
   background: var(--panel-dark);
   color: var(--text-dim);
@@ -403,6 +428,14 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
       ammo, tools, teleport tablets, bonds — are exempt outright. Either way
       the whole spread is yours.</div>
     <div class="field checkline">
+      <input type="checkbox" id="f-nobots">
+      <label for="f-nobots" style="margin:0">Hide bot-supplied items</label>
+    </div>
+    <div class="small dim" style="margin:-0.6rem 0 1.1rem">Free-to-play, buy
+      limit over 10,000, under 100 gp. They rank well and clear fast — the
+      supply curve is a script that answers a price rise by producing more.
+      They stay scored either way; this only hides them.</div>
+    <div class="field checkline">
       <input type="checkbox" id="f-members">
       <label for="f-members" style="margin:0">Include members items</label>
     </div>
@@ -424,6 +457,12 @@ footer { margin-top: 2.5rem; color: var(--text-dim); font-size: 0.85rem; }
     <p class="small dim" id="tab-blurb"></p>
 
     <div id="status" class="small dim"></div>
+
+    <section id="plan" class="hidden">
+      <h2>What to do now</h2>
+      <div id="plan-cards"></div>
+      <p class="small dim" id="plan-note"></p>
+    </section>
 
     <div class="table-wrap" id="flip-wrap">
       <table id="flips">
@@ -2190,6 +2229,7 @@ function applyPreferences(rows, config) {
   const hidden = {
     "quote too old": 0, "volume too thin": 0, "price out of range": 0,
     "pays tax": 0, "roi too low": 0, "no undercut room": 0,
+    "bot-supplied": 0,
   };
   const kept = [];
   for (const row of rows) {
@@ -2201,6 +2241,9 @@ function applyPreferences(rows, config) {
     if (config.taxFreeOnly && row.tax > 0) { hidden["pays tax"]++; continue; }
     if (row.roi < config.minRoi) { hidden["roi too low"]++; continue; }
     if (row.depth < config.minUndercutDepth) { hidden["no undercut room"]++; continue; }
+    if (config.hideBotted && isBotted(row.buy, row.members, row.limit)) {
+      hidden["bot-supplied"]++; continue;
+    }
     kept.push(row);
   }
   return { kept, hidden };
@@ -2251,6 +2294,7 @@ function readConfig() {
     minPrice: parsePriceInput("#f-price-min") ?? 1,
     maxPrice: parsePriceInput("#f-price-max"),
     taxFreeOnly: $("#f-taxfree").checked,
+    hideBotted: $("#f-nobots").checked,
   };
 }
 
@@ -2325,6 +2369,7 @@ function show(allRows, config, statusText) {
   const { kept, hidden } = applyPreferences(allRows, config);
   allocateCapital(kept, config.capital, config.slots);
   state.rows = kept;
+  state.config = config;      // the plan needs it again on a tab switch
   const hiddenText = Object.entries(hidden).filter(([, v]) => v > 0)
     .map(([k, v]) => `${num(v)} ${k}`).join(", ");
   $("#status").className = "small dim";
@@ -2333,6 +2378,8 @@ function show(allRows, config, statusText) {
   // The crash view is a different reading of these same rows, so a refresh
   // has to redraw whichever of the two is on screen.
   renderActiveTable();
+  renderPlan(config);
+  $("#plan").classList.toggle("hidden", state.tab !== "flip" || !kept.length);
   if (state.tab !== "merch" && state.selected != null) {
     const row = state.rows.find((r) => r.id === state.selected);
     if (row) showDetail(row.id);
@@ -2354,6 +2401,69 @@ function sortedRows() {
 }
 
 const TABLE_COLUMNS = 16;
+
+/* ---- the plan ----
+   The table answers "what is worth flipping". This answers the question people
+   actually arrive with: what do I put in my slots right now. Same rows, same
+   ranking — the only thing added is the quantity and the gp to commit, which
+   allocateCapital has already worked out and which the table buries in two
+   columns twelve apart. */
+
+const PLAN_SIZE = 3;
+
+function renderPlan(config) {
+  const cards = $("#plan-cards");
+  const rows = state.rows.slice(0, PLAN_SIZE);
+  if (!rows.length) {
+    $("#plan").classList.add("hidden");
+    return;
+  }
+  $("#plan").classList.remove("hidden");
+
+  cards.innerHTML = rows.map((r, index) => {
+    // allocated is set for the top `slots` rows; below that the honest answer
+    // is the equal split the affordability check already used.
+    const commit = r.allocated != null ? r.allocated
+      : Math.min(r.capitalNeeded, capitalPerSlot(config.capital, config.slots));
+    const units = Math.max(1, Math.min(r.qty, Math.floor(commit / r.buy)));
+    return `
+      <div class="plan-card" data-id="${r.id}">
+        <div class="plan-rank">SLOT ${index + 1}</div>
+        <div class="plan-name">${escapeHtml(r.name)}</div>
+        <div class="plan-line">Buy <strong>${num(units)}</strong> at
+          <strong>${num(r.buy)}</strong> gp</div>
+        <div class="plan-line">List at <strong>${num(r.listAt)}</strong> gp</div>
+        <div class="plan-foot">${formatGp(commit)} gp committed ·
+          ${num(Math.round(r.perSlotHour))} gp/slot/h ·
+          ${formatDuration(r.totalSeconds)} round trip</div>
+        ${r.warnings.length
+          ? `<div class="plan-warn">${escapeHtml(r.warnings[0])}</div>` : ""}
+      </div>`;
+  }).join("");
+
+  const slots = config.slots;
+  const parts = [];
+
+  // An item cannot absorb more than its buy limit allows, so the plan often
+  // commits less than the budget. Saying so beats leaving people to add three
+  // numbers up and wonder where the rest went.
+  const committed = rows.reduce((sum, r) => sum + (r.allocated != null
+    ? r.allocated
+    : Math.min(r.capitalNeeded, capitalPerSlot(config.capital, config.slots))), 0);
+  if (committed < config.capital * 0.95) {
+    parts.push(`${formatGp(committed)} of your ${formatGp(config.capital)} ` +
+      `goes in here — the rest is more than these buy limits can absorb` +
+      (slots > rows.length ? "." : ", and there is nothing better to put it in."));
+  }
+  if (slots > rows.length) {
+    parts.push(`Your other ${slots - rows.length} slot${
+      slots - rows.length === 1 ? "" : "s"} go to the next rows in the table.`);
+  }
+  parts.push("Quantities are what the buy limit, the traded volume and your " +
+    "budget all allow; the gp figure is the score-weighted split, not an " +
+    "equal one. Click a card for the full breakdown.");
+  $("#plan-note").textContent = parts.join(" ");
+}
 
 /* Badge markup, shared by the flip table and the merch/crash table. */
 function tagHtml(tags) {
@@ -2504,6 +2614,8 @@ function selectTab(tab) {
   $("#merch-wrap").classList.toggle("hidden", flip);
   $("#merch-note").classList.toggle("hidden", flip);
   $("#portfolio").classList.toggle("hidden", tab !== "merch");
+  // The plan is the flip ranking's answer, so it belongs to that tab only.
+  $("#plan").classList.toggle("hidden", !flip || !state.rows.length);
 
   // Flip and Crash are two readings of the same rows, so the detail panel —
   // chart, factor breakdown, warnings — belongs to both. Only Merch has no
@@ -3018,6 +3130,7 @@ let filterTimer = null;
 });
 $("#f-members").addEventListener("change", loadAndRender);
 $("#f-taxfree").addEventListener("change", loadAndRender);
+$("#f-nobots").addEventListener("change", loadAndRender);
 ["#f-price-min", "#f-price-max"].forEach((sel) => {
   $(sel).addEventListener("input", () => {
     clearTimeout(filterTimer);
@@ -3042,6 +3155,11 @@ document.querySelectorAll("#flips thead th").forEach((th) => {
 $("#flips tbody").addEventListener("click", (event) => {
   const tr = event.target.closest("tr[data-id]");
   if (tr) showDetail(Number(tr.dataset.id));
+});
+
+$("#plan-cards").addEventListener("click", (event) => {
+  const card = event.target.closest(".plan-card");
+  if (card) showDetail(Number(card.dataset.id));
 });
 
 $("#tabs").addEventListener("click", (event) => {

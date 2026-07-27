@@ -20,6 +20,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import engine
+import filters
 import merch
 import stats
 
@@ -464,6 +465,60 @@ class ClassificationTests(unittest.TestCase):
             supply=merch.SUPPLY_CRUNCH)
         self.assertEqual(tags, [merch.MERCH, merch.RAID, merch.SUPPLY_CRUNCH,
                                 merch.CRASH])
+
+
+class HideBottedFilterTests(unittest.TestCase):
+    """The display filter hides bot-supplied rows without rescoring anything."""
+
+    def _row(self, **overrides):
+        defaults = dict(
+            item_id=1, name="Item", buy=15, sell=20, latest_low=15,
+            latest_high=20, tax=0, margin=5, roi=0.33, limit=13_000,
+            members=False, thin_volume_1h=5000, qty_per_window=100,
+            capital_needed=1500, gross_profit=500, undercut_depth=1, drift=0.0,
+            ofi=0.0, quote_age=10, tax_exempt=True, sell_listed_at=20,
+            expected_buy_seconds=60, expected_sell_seconds=60,
+            expected_total_seconds=120, p_fill=0.9, expected_gp=400,
+            raw_gp_per_slot_hour=1000, gp_per_slot_hour=900,
+            edge_probability=0.8)
+        defaults.update(overrides)
+        return filters.FlipRow(**defaults)
+
+    def _apply(self, rows, hide):
+        result = filters.ScreenResult(rows=rows, funnel={})
+        return filters.apply_preferences(
+            result, filters.FilterConfig(hide_botted=hide))
+
+    def test_off_by_default_nothing_is_hidden(self):
+        kept = self._apply([self._row()], hide=False)
+        self.assertEqual(len(kept.rows), 1)
+        self.assertEqual(kept.hidden["bot-supplied"], 0)
+
+    def test_on_it_hides_the_bot_staple(self):
+        kept = self._apply([self._row()], hide=True)
+        self.assertEqual(kept.rows, [])
+        self.assertEqual(kept.hidden["bot-supplied"], 1)
+
+    def test_it_leaves_members_items_alone(self):
+        kept = self._apply([self._row(members=True)], hide=True)
+        self.assertEqual(len(kept.rows), 1)
+
+    def test_it_leaves_expensive_f2p_items_alone(self):
+        kept = self._apply([self._row(buy=5000)], hide=True)
+        self.assertEqual(len(kept.rows), 1)
+
+    def test_it_leaves_low_limit_items_alone(self):
+        kept = self._apply([self._row(limit=100)], hide=True)
+        self.assertEqual(len(kept.rows), 1)
+
+    def test_it_does_not_reorder_what_is_left(self):
+        rows = [self._row(item_id=1, name="Botted"),
+                self._row(item_id=2, name="Clean", members=True,
+                          gp_per_slot_hour=500),
+                self._row(item_id=3, name="Also clean", members=True,
+                          gp_per_slot_hour=100)]
+        kept = self._apply(rows, hide=True)
+        self.assertEqual([r.name for r in kept.rows], ["Clean", "Also clean"])
 
 
 class WatchlistTests(unittest.TestCase):

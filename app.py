@@ -184,6 +184,11 @@ def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfi
                                help="Sells under 50 gp round the 2% tax down "
                                     "to zero, as do ~57 exempt items "
                                     "(tax_exempt.json).")
+        hide_botted = st.checkbox(
+            "Hide bot-supplied items", value=False,
+            help="Free-to-play, buy limit over 10,000, under 100 gp. They rank "
+                 "well and clear fast; the supply curve is a script that "
+                 "answers a price rise by producing more.")
         top_n = st.slider("Rows", 10, 100, 50, step=10)
         st.caption("Nature rune {:,} gp (live) — the cost side of the high-alch "
                    "floor. Prices refetch at most once per 30 s (wiki "
@@ -202,7 +207,7 @@ def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfi
         min_roi=min_roi / 100, min_undercut_depth=min_depth,
         min_price=parse_price(min_price_raw) or 1,
         max_price=parse_price(max_price_raw),
-        tax_free_only=tax_free), top_n
+        tax_free_only=tax_free, hide_botted=hide_botted), top_n
 
 
 def ranked_table(rows, top_n):
