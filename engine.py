@@ -189,6 +189,20 @@ class Calibration:
     # CALIBRATE: regress observed fill rate on distance from the touch.
     aggressiveness_scale: float = 0.25
 
+    # Uncertainty in the realised fill rate. The public feed contains executed
+    # trades, not queue depth or our position in it, so the point estimate
+    # above must not be presented as certainty. A mean-one lognormal multiplier
+    # gives a deliberately wide prior until journal outcomes can fit it.
+    # CALIBRATE: realised quantity / predicted quantity for timed offers.
+    fill_rate_log_sigma: float = 0.75
+    max_completion_probability: float = 0.99
+
+    # An unattended buy cannot create its own sell offer. Overnight therefore
+    # ends with collection on return, followed by a separate liquidation
+    # window. This is a workflow prior, exposed in the output rather than
+    # pretending both legs happened while the player slept.
+    overnight_liquidation_hours: float = 4.0
+
     # How far the volume-weighted reference may sit from the last print before
     # the two stop being estimates of the same price. Only consulted when the
     # last two prints show no spread at all and the reference is the only
@@ -716,6 +730,66 @@ def fill_probability(expected_seconds: float, horizon_seconds: float) -> float:
     return 1.0 - math.exp(-horizon_seconds / expected_seconds)
 
 
+@dataclass(frozen=True)
+class FillEstimate:
+    """Quantity distribution implied by an uncertain realised fill rate."""
+    requested: float
+    expected: float
+    p_complete: float
+    low: float
+    high: float
+
+
+def _normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
+def fill_estimate(qty: float, rate: float, horizon_seconds: float,
+                  calibration: Calibration = DEFAULT_CALIBRATION) -> FillEstimate:
+    """Expected partial fill and an 80% interval for a timed offer.
+
+    The Wiki/RuneLite feed measures completed trades but exposes neither the
+    standing queue nor transaction batch sizes. Treating a whole batch as one
+    exponential event therefore invents false precision and discards partial
+    fills. Instead, realised throughput is ``rate * M`` where ``M`` is a
+    mean-one lognormal multiplier. The integral of ``min(qty, capacity*M)``
+    has a closed form, so this stays fast enough for the full item universe.
+    """
+    requested = max(0.0, float(qty))
+    if requested <= 0 or rate <= 0 or horizon_seconds <= 0:
+        return FillEstimate(requested, 0.0, 0.0, 0.0, 0.0)
+    capacity = rate * horizon_seconds
+    sigma = max(1e-6, float(calibration.fill_rate_log_sigma))
+    mu = -0.5 * sigma * sigma                 # E[M] = 1
+    threshold = requested / capacity
+    log_threshold = math.log(max(threshold, 1e-300))
+    z = (log_threshold - mu) / sigma
+    p_complete = 1.0 - _normal_cdf(z)
+    truncated_mean = math.exp(mu + 0.5 * sigma * sigma) * _normal_cdf(
+        (log_threshold - mu - sigma * sigma) / sigma)
+    expected = capacity * truncated_mean + requested * p_complete
+    z80 = 1.2815515655446004
+    low = min(requested, capacity * math.exp(mu - z80 * sigma))
+    high = min(requested, capacity * math.exp(mu + z80 * sigma))
+    return FillEstimate(requested, min(requested, expected),
+                        max(0.0, min(calibration.max_completion_probability,
+                                     p_complete)), low, high)
+
+
+def buy_limit_windows(horizon_hours: float) -> int:
+    """Conservative count of rolling four-hour limit windows reached."""
+    return max(1, int(math.ceil(max(0.0, horizon_hours) / WINDOW_HOURS)))
+
+
+def effective_buy_limit(limit: Optional[int], horizon_hours: float,
+                        mode: TradeMode) -> Optional[int]:
+    if limit is None:
+        return None
+    cycles = (buy_limit_windows(horizon_hours)
+              if TradeMode(mode) is TradeMode.OVERNIGHT else 1)
+    return max(0, int(limit)) * cycles
+
+
 def round_trip_probability(buy_seconds: float, sell_seconds: float,
                            horizon_seconds: float) -> float:
     """Probability that two sequential exponential legs finish by ``horizon``.
@@ -1020,17 +1094,35 @@ def alch_profit(highalch: Optional[int], buy_price: int,
 # Times slip, so this is a scheduling prior, not a guarantee.
 UPDATE_WEEKDAY = 2        # Monday = 0
 UPDATE_HOUR_UTC = 11
+UPDATE_MINUTE_UTC = 30
+MAINTENANCE_WEEKDAY = 1   # recurring Tuesday maintenance prior; exceptions exist
+MAINTENANCE_HOUR_UTC = 9
 
 
 def seconds_until_update(now: float) -> float:
     """Seconds from `now` (unix) to the next weekly update window."""
     current = datetime.fromtimestamp(now, tz=timezone.utc)
     days_ahead = (UPDATE_WEEKDAY - current.weekday()) % 7
-    target = current.replace(hour=UPDATE_HOUR_UTC, minute=0, second=0,
+    target = current.replace(hour=UPDATE_HOUR_UTC, minute=UPDATE_MINUTE_UTC, second=0,
                              microsecond=0) + timedelta(days=days_ahead)
     if target <= current:
         target += timedelta(days=7)
     return (target - current).total_seconds()
+
+
+def seconds_until_market_event(now: float) -> float:
+    """Time to the next recurring update/maintenance risk window.
+
+    Jagex can announce exceptions, so this is explicitly a recurring prior,
+    not an external live calendar. The UI says so and stale plans are gated.
+    """
+    current = datetime.fromtimestamp(now, timezone.utc)
+    days_ahead = (MAINTENANCE_WEEKDAY - current.weekday()) % 7
+    maintenance = current.replace(hour=MAINTENANCE_HOUR_UTC, minute=0,
+                                  second=0, microsecond=0) + timedelta(days=days_ahead)
+    if maintenance <= current:
+        maintenance += timedelta(days=7)
+    return min(seconds_until_update(now), (maintenance - current).total_seconds())
 
 
 def update_risk_factor(now: float, expected_hold_seconds: float,
@@ -1047,7 +1139,7 @@ def update_risk_factor(now: float, expected_hold_seconds: float,
     horizon = expected_hold_seconds
     if horizon == float("inf"):
         horizon = calibration.horizon_hours * SECONDS_PER_HOUR
-    until = seconds_until_update(now)
+    until = seconds_until_market_event(now)
     lead = calibration.update_risk_lead_hours * SECONDS_PER_HOUR
     exposure = horizon + lead
     if until >= exposure:
@@ -1088,6 +1180,11 @@ class ScoreBreakdown:
     p_fill_both: float
     p_stranded: float
     expected_round_trip_qty: float
+    expected_buy_qty: float
+    expected_sell_qty: float
+    fill_low_qty: float
+    fill_high_qty: float
+    liquidation_hours: float
 
     adverse_selection: float
     holding_risk: float
@@ -1139,6 +1236,10 @@ def score_flip(
     highalch: Optional[int] = None,
     nature_rune_cost: int = 100,
     competitors: Optional[float] = None,
+    buy_improvement: Optional[int] = None,
+    sell_improvement: Optional[int] = None,
+    buy_share: Optional[float] = None,
+    sell_share: Optional[float] = None,
     mode: TradeMode = DEFAULT_TRADE_MODE,
     horizon_hours: Optional[float] = None,
     calibration: Calibration = DEFAULT_CALIBRATION,
@@ -1154,9 +1255,21 @@ def score_flip(
     the queue look shorter, which is exactly backwards.
     """
     mid = (buy + sell) / 2.0
-    share = aggressiveness(price_edge(depth, sell - buy), calibration,
-                           competitors)
-    buy_share = sell_share = share
+    # New callers pass the ACTUAL price improvements represented by ``buy``
+    # and ``sell``. ``depth`` remains as a compatibility fallback for the pure
+    # model API, but the screening pipeline never receives queue priority for
+    # a concession that is absent from the displayed order prices.
+    spread = max(1.0, float(sell - buy
+                           + (buy_improvement or 0)
+                           + (sell_improvement or 0)))
+    if buy_share is None:
+        actual_buy_edge = depth if buy_improvement is None else buy_improvement
+        buy_share = aggressiveness(price_edge(actual_buy_edge, spread),
+                                   calibration, competitors)
+    if sell_share is None:
+        actual_sell_edge = depth if sell_improvement is None else sell_improvement
+        sell_share = aggressiveness(price_edge(actual_sell_edge, spread),
+                                    calibration, competitors)
 
     buy_rate = fill_rate(buy_volume_1h, buy_share)
     sell_rate = fill_rate(sell_volume_1h, sell_share)
@@ -1172,13 +1285,37 @@ def score_flip(
     if effective_horizon <= 0:
         raise ValueError("horizon_hours must be positive")
     horizon_seconds = effective_horizon * SECONDS_PER_HOUR
-    p_buy = fill_probability(buy_seconds, horizon_seconds)
-    p_both = round_trip_probability(buy_seconds, sell_seconds, horizon_seconds)
-    p_stranded = stranded_inventory_probability(
-        buy_seconds, sell_seconds, horizon_seconds)
-    # Conditional display value: the probability that the sell finishes in
-    # time after a buy has occurred.  The joint value above drives the model.
-    p_sell = p_both / p_buy if p_buy > 0 else 0.0
+    liquidation_hours = 0.0
+    if mode is TradeMode.OVERNIGHT:
+        buy_fill = fill_estimate(qty, buy_rate, horizon_seconds, calibration)
+        liquidation_hours = calibration.overnight_liquidation_hours
+        sell_fill = fill_estimate(buy_fill.expected, sell_rate,
+                                  liquidation_hours * SECONDS_PER_HOUR,
+                                  calibration)
+        expected_buy_qty = buy_fill.expected
+        expected_sell_qty = sell_fill.expected
+        p_buy = buy_fill.p_complete
+        p_sell = sell_fill.p_complete
+        # In this mode p_fill means "buy order complete by return". A sell
+        # order does not exist until the player is back online.
+        p_both = p_buy
+        p_stranded = ((expected_buy_qty - expected_sell_qty) / qty
+                      if qty > 0 else 0.0)
+        fill_low, fill_high = buy_fill.low, buy_fill.high
+    else:
+        leg_seconds = horizon_seconds / LEGS_PER_ROUND_TRIP
+        buy_fill = fill_estimate(qty, buy_rate, leg_seconds, calibration)
+        sell_fill = fill_estimate(buy_fill.expected, sell_rate, leg_seconds,
+                                  calibration)
+        sell_full = fill_estimate(qty, sell_rate, leg_seconds, calibration)
+        expected_buy_qty = buy_fill.expected
+        expected_sell_qty = sell_fill.expected
+        p_buy = buy_fill.p_complete
+        p_sell = sell_full.p_complete
+        p_both = p_buy * p_sell
+        p_stranded = ((expected_buy_qty - expected_sell_qty) / qty
+                      if qty > 0 else 0.0)
+        fill_low, fill_high = sell_fill.low, sell_fill.high
 
     sigma = sigma_daily if sigma_daily is not None else (
         ou_fit.sigma if ou_fit is not None else calibration.default_sigma_daily)
@@ -1196,8 +1333,9 @@ def score_flip(
     update = update_risk_factor(now, total_seconds, calibration)
 
     raw_profit = margin * qty
+    completed_profit = margin * expected_sell_qty
     if mode is TradeMode.ACTIVE:
-        expected = (raw_profit * p_both * adverse * hold * stale * reversion
+        expected = (completed_profit * adverse * hold * stale * reversion
                     * alch * update)
         downside_risk = 0.0
     else:
@@ -1214,8 +1352,8 @@ def score_flip(
         if (floor_loss is not None
                 and floor_loss < calibration.alch_relevant_distance):
             stress_move = min(stress_move, floor_loss)
-        downside_risk = qty * buy * p_stranded * stress_move
-        completed_value = (raw_profit * p_both * adverse * stale * reversion
+        downside_risk = max(0.0, expected_buy_qty - expected_sell_qty) * buy * stress_move
+        completed_value = (completed_profit * adverse * stale * reversion
                            * alch * update)
         expected = completed_value - downside_risk
 
@@ -1234,7 +1372,11 @@ def score_flip(
         buy_seconds=buy_seconds, sell_seconds=sell_seconds,
         total_seconds=total_seconds, p_fill_buy=p_buy, p_fill_sell=p_sell,
         p_fill_both=p_both, p_stranded=p_stranded,
-        expected_round_trip_qty=qty * p_both,
+        expected_round_trip_qty=expected_sell_qty,
+        expected_buy_qty=expected_buy_qty,
+        expected_sell_qty=expected_sell_qty,
+        fill_low_qty=fill_low, fill_high_qty=fill_high,
+        liquidation_hours=liquidation_hours,
         adverse_selection=adverse, holding_risk=hold,
         staleness=stale, mean_reversion=reversion, alch=alch, update_risk=update,
         expected_profit=expected, gp_per_slot_hour=per_slot_hour,

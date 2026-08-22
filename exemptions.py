@@ -16,6 +16,7 @@ and a renamed item is easier to spot than a silently stale id.
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Dict, FrozenSet, Iterable, Optional, Set
 
@@ -78,6 +79,22 @@ def resolve(items: Optional[Dict[int, object]] = None,
                 ids.add(int(item_id))
                 seen.add(key)
     return ExemptionSet(ids, wanted - seen if items else ())
+
+
+def freshness_warning(config: Optional[dict] = None, max_age_days: int = 90,
+                      today: Optional[date] = None) -> Optional[str]:
+    """Warn when the hand-maintained exemption source needs re-verification."""
+    config = config or load_config()
+    raw = config.get("_verified_date")
+    try:
+        verified = date.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return "tax exemption config has no machine-readable verification date"
+    age = ((today or date.today()) - verified).days
+    if age > max_age_days:
+        return ("tax exemption config is {} days old; re-check it against the "
+                "current GE tax-exempt list".format(age))
+    return None
 
 
 def nature_rune_cost(quotes: Optional[Dict[int, object]] = None) -> int:

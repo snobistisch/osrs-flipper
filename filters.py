@@ -31,6 +31,7 @@ missing from /mapping, /5m, or /1h.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import re
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import engine
@@ -136,6 +137,28 @@ class FlipRow:
 
     factors: Dict[str, float] = field(default_factory=dict)
     warnings: Tuple[str, ...] = field(default=())
+    expected_buy_qty: float = 0.0
+    expected_sell_qty: float = 0.0
+    fill_low_qty: float = 0.0
+    fill_high_qty: float = 0.0
+    liquidation_hours: float = 0.0
+
+    # Concrete execution and inputs retained for quantity-aware allocation.
+    base_buy: Optional[int] = None
+    base_sell: Optional[int] = None
+    buy_improvement: int = 0
+    sell_improvement: int = 0
+    buy_share: float = 0.0
+    sell_share: float = 0.0
+    model_buy_volume_1h: float = 0.0
+    model_sell_volume_1h: float = 0.0
+    competitors: float = 1.0
+    priced_from_reference: bool = False
+    sigma_daily: Optional[float] = None
+    ou_fit: Optional[object] = None
+    scored_at: float = 0.0
+    category: str = "other"
+    limit_group: Optional[str] = None
 
     # High alchemy
     alch_floor: Optional[int] = None
@@ -218,15 +241,10 @@ def screen(
     rows: List[FlipRow] = []
     funnel = {stage: 0 for stage in FUNNEL_STAGES}
     funnel["in /latest"] = len(quotes)
-    # Affordability still uses the equal split: what one flip can absorb has to
-    # be known before it is scored, and the score-weighted allocation needs the
-    # scores. The equal split is the cap used for sizing; allocate() reports
-    # the proportional split that should actually be deployed.
-    per_slot = engine.capital_per_slot(config.capital, config.slots)
     for item_id, quote in quotes.items():
         result = _evaluate(item_id, quote, items.get(item_id),
                            activity_5m.get(item_id), activity_1h.get(item_id),
-                           config, per_slot, now, exempt, volume_lookup)
+                           config, config.capital, now, exempt, volume_lookup)
         if isinstance(result, str):
             funnel[result] += 1
         else:
@@ -248,6 +266,122 @@ def _mid(activity: Optional[Activity]) -> Optional[float]:
     return high if high is not None else low
 
 
+def connected_limit_group(name: str) -> Optional[str]:
+    """Known shared-limit family, conservatively inferred from item names.
+
+    The Wiki documents connected limits but the mapping endpoint does not
+    expose a group id. Potion dose variants are the material flipping case and
+    are safe to infer; unrelated charged jewellery is deliberately not merged.
+    """
+    lower = name.lower().strip()
+    dose = re.search(r"\(([1-4])\)$", lower)
+    potion_words = ("potion", "brew", "restore", "antipoison", "antidote",
+                    "serum", "mix", "overload")
+    if dose and any(word in lower for word in potion_words):
+        return "potion:" + re.sub(r"\([1-4]\)$", "", lower).strip()
+    return None
+
+
+def item_category(name: str) -> str:
+    lower = name.lower()
+    families = (
+        ("potions", ("potion", "brew", "restore", "antipoison", "antidote")),
+        ("runes", (" rune", "rune ")),
+        ("food", ("shark", "karambwan", "manta ray", "lobster", "salmon", "tuna")),
+        ("logs", (" logs",)),
+        ("ores-bars", (" ore", " bar")),
+        ("armour", ("platebody", "platelegs", "helm", "armour", "shield")),
+        ("weapons", ("sword", "bow", "staff", "whip", "scimitar", "godsword")),
+    )
+    for category, words in families:
+        if any(word in " " + lower for word in words):
+            return category
+    return "other"
+
+
+def _concession_points(maximum: int) -> List[int]:
+    if maximum <= 0:
+        return [0]
+    if maximum <= 12:
+        return list(range(maximum + 1))
+    values = {0, 1, 2, maximum}
+    values.update(int(round(maximum * fraction))
+                  for fraction in (0.05, 0.10, 0.20, 0.35, 0.50, 0.75))
+    return sorted(max(0, min(maximum, value)) for value in values)
+
+
+def _optimise_execution(
+    *, base_buy: int, base_sell: int, tax_exempt: bool,
+    limit: Optional[int], available_capital: int,
+    buy_volume_1h: float, sell_volume_1h: float,
+    quote_age: int, ofi: float, drift: float, now: float,
+    highalch: Optional[int], competitors: float, config: FilterConfig,
+    sigma_daily: Optional[float] = None, ou_fit: Optional[object] = None,
+    regime_score: float = 0.0,
+) -> Optional[Tuple[int, int, int, int, int, engine.ScoreBreakdown]]:
+    """Choose concrete order prices and quantity as one decision.
+
+    Every queue-share benefit is paid for in ``buy``/``sell`` first. This
+    closes the old loophole where maximum affordable priority supplied the fill
+    probability while untouched prices supplied the profit.
+    """
+    free_sell = engine.tax_boundary_undercut(base_sell, tax_exempt)
+    max_total = max(0, base_sell - base_buy - 1)
+    buy_points = _concession_points(max_total)
+    sell_points = _concession_points(max(0, max_total - (base_sell - free_sell)))
+    effective_limit = engine.effective_buy_limit(
+        limit, config.horizon_hours, config.trade_mode)
+    best = None
+    best_value = float("-inf")
+    original_spread = max(1, base_sell - base_buy)
+    for buy_improvement in buy_points:
+        buy = base_buy + buy_improvement
+        affordable = available_capital // buy if buy > 0 else 0
+        if affordable <= 0:
+            continue
+        for extra_sell in sell_points:
+            sell = free_sell - extra_sell
+            margin = engine.net_margin(buy, sell, tax_exempt)
+            if margin <= 0:
+                continue
+            sell_improvement = base_sell - sell
+            buy_share = engine.aggressiveness(
+                engine.price_edge(buy_improvement, original_spread),
+                config.calibration, competitors)
+            sell_share = engine.aggressiveness(
+                engine.price_edge(sell_improvement, original_spread),
+                config.calibration, competitors)
+            if config.trade_mode is engine.TradeMode.OVERNIGHT:
+                capacity = engine.fillable_quantity(
+                    buy_volume_1h, buy_share, config.horizon_hours)
+            else:
+                capacity = min(
+                    engine.fillable_quantity(buy_volume_1h, buy_share,
+                                             config.horizon_hours / 2),
+                    engine.fillable_quantity(sell_volume_1h, sell_share,
+                                             config.horizon_hours / 2))
+            qty = engine.flippable_qty(effective_limit, capacity, affordable)
+            qty = max(1, qty)
+            breakdown = engine.score_flip(
+                buy=buy, sell=sell, margin=margin, qty=qty, depth=0,
+                buy_volume_1h=buy_volume_1h, sell_volume_1h=sell_volume_1h,
+                quote_age=quote_age, ofi=ofi, drift=drift, now=now,
+                sigma_daily=sigma_daily, ou_fit=ou_fit,
+                regime_score=regime_score,
+                highalch=highalch, nature_rune_cost=config.nature_rune_cost,
+                competitors=competitors,
+                buy_improvement=buy_improvement,
+                sell_improvement=sell_improvement,
+                buy_share=buy_share, sell_share=sell_share,
+                mode=config.trade_mode, horizon_hours=config.horizon_hours,
+                calibration=config.calibration)
+            if breakdown.ranking_value > best_value:
+                best_value = breakdown.ranking_value
+                best = (buy, sell, buy_improvement, sell_improvement,
+                        qty, breakdown)
+    return best
+
+
 def _evaluate(
     item_id: int,
     quote: Quote,
@@ -255,7 +389,7 @@ def _evaluate(
     act_5m: Optional[Activity],
     act_1h: Optional[Activity],
     config: FilterConfig,
-    per_slot: int,
+    available_capital: int,
     now: float,
     exempt: exemptions.ExemptionSet,
     volume_lookup: Optional["VolumeLookup"] = None,
@@ -305,40 +439,26 @@ def _evaluate(
     if margin <= 0:
         return "margin not positive"
 
-    affordable = per_slot // buy if buy > 0 else 0
+    affordable = available_capital // buy if buy > 0 else 0
     if affordable == 0:
         return "cannot afford one"
 
     depth = engine.undercut_depth(buy, sell, tax_exempt)
-    # Sizing uses the same queue share the score will: on a crowded item you
-    # cannot fill more than the crowd leaves you, so pretending otherwise here
-    # would size an offer the fill model then has to discount back down.
     crowd = engine.touch_competitors(thin_volume, item.limit,
                                      config.calibration)
-    share = engine.aggressiveness(engine.price_edge(depth, sell - buy),
-                                  config.calibration, crowd)
-
-    qty = engine.flippable_qty(
-        item.limit,
-        engine.fillable_quantity(thin_volume, share,
-                                 config.horizon_hours / engine.LEGS_PER_ROUND_TRIP),
-        affordable)
-    if qty <= 0:
-        # The market cannot hand over a single unit inside the horizon at this
-        # queue position. Not a rejection of the item, but there is nothing to
-        # size, so score it at one unit and let the fill model discount it.
-        qty = 1
-
     drift = engine.price_drift(_mid(act_5m), _mid(act_1h))
     ofi = engine.order_flow_imbalance(high_vol_1h, low_vol_1h)
-
-    breakdown = engine.score_flip(
-        buy=buy, sell=sell, margin=margin, qty=qty, depth=depth,
+    choice = _optimise_execution(
+        base_buy=buy, base_sell=sell, tax_exempt=tax_exempt,
+        limit=item.limit, available_capital=available_capital,
         buy_volume_1h=low_vol_1h, sell_volume_1h=high_vol_1h,
         quote_age=age, ofi=ofi, drift=drift, now=now,
-        highalch=item.highalch, nature_rune_cost=config.nature_rune_cost,
-        competitors=crowd, mode=config.trade_mode,
-        horizon_hours=config.horizon_hours, calibration=config.calibration)
+        highalch=item.highalch, competitors=crowd, config=config)
+    if choice is None:
+        return "margin not positive"
+    buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice
+    margin = engine.net_margin(buy, sell, tax_exempt)
+    affordable = available_capital // buy
 
     floor = engine.alch_floor(item.highalch, config.nature_rune_cost)
     return FlipRow(
@@ -352,13 +472,18 @@ def _evaluate(
         capital_needed=breakdown.capital_needed,
         gross_profit=breakdown.raw_profit, undercut_depth=depth,
         drift=drift, ofi=ofi, quote_age=age, tax_exempt=tax_exempt,
-        sell_listed_at=engine.tax_boundary_undercut(sell, tax_exempt),
+        sell_listed_at=sell,
         expected_buy_seconds=breakdown.buy_seconds,
         expected_sell_seconds=breakdown.sell_seconds,
         expected_total_seconds=breakdown.total_seconds,
         p_fill=breakdown.p_fill_both,
         p_stranded=breakdown.p_stranded,
         expected_round_trip_qty=breakdown.expected_round_trip_qty,
+        expected_buy_qty=breakdown.expected_buy_qty,
+        expected_sell_qty=breakdown.expected_sell_qty,
+        fill_low_qty=breakdown.fill_low_qty,
+        fill_high_qty=breakdown.fill_high_qty,
+        liquidation_hours=breakdown.liquidation_hours,
         expected_gp=breakdown.expected_profit,
         raw_gp_per_slot_hour=breakdown.gp_per_slot_hour,
         gp_per_slot_hour=breakdown.gp_per_slot_hour,
@@ -368,12 +493,23 @@ def _evaluate(
         downside_risk_gp=breakdown.downside_risk_gp,
         trade_mode=breakdown.mode, horizon_hours=breakdown.horizon_hours,
         factors=breakdown.factors(),
+        base_buy=priced.buy, base_sell=priced.sell,
+        buy_improvement=buy_improvement,
+        sell_improvement=sell_improvement,
+        buy_share=breakdown.buy_share, sell_share=breakdown.sell_share,
+        model_buy_volume_1h=low_vol_1h,
+        model_sell_volume_1h=high_vol_1h,
+        competitors=crowd,
+        priced_from_reference=priced.from_reference,
+        scored_at=now,
+        category=item_category(item.name),
+        limit_group=connected_limit_group(item.name),
         alch_floor=floor,
         alch_distance=engine.alch_distance(buy, floor),
         alch_arbitrage_gp=breakdown.alch_arbitrage_gp,
         warnings=_warnings(depth, drift, ofi, affordable, qty, item.limit,
                            priced.from_reference,
-                           breakdown, sell, tax_exempt),
+                           breakdown, priced.sell, tax_exempt),
     )
 
 
@@ -478,35 +614,32 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
     reachable_buy = max(0.0, row.thin_volume_1h * max(view.buy_fill_share, 0.01))
     reachable_sell = max(0.0, row.thin_volume_1h * max(view.sell_fill_share, 0.01))
 
-    depth = row.undercut_depth
     # Crowd from the item's REAL volume, not the reachable slice: a low fill
     # share means fewer units arrive at your price, not fewer rivals queued.
     crowd = engine.touch_competitors(row.thin_volume_1h, row.limit,
                                      config.calibration)
-    share = engine.aggressiveness(engine.price_edge(depth, row.sell - row.buy),
-                                  config.calibration, crowd)
-    qty = engine.flippable_qty(
-        row.limit,
-        engine.fillable_quantity(min(reachable_buy, reachable_sell), share,
-                                 config.horizon_hours / engine.LEGS_PER_ROUND_TRIP),
-        row.capital_needed // row.buy if row.buy > 0 else None)
-    qty = max(1, qty)
-
     sigma = view.ou.sigma if view.ou is not None else None
-    breakdown = engine.score_flip(
-        buy=row.buy, sell=row.sell, margin=row.margin, qty=qty, depth=depth,
+    highalch = (None if row.alch_floor is None
+                else row.alch_floor + config.nature_rune_cost)
+    choice = _optimise_execution(
+        base_buy=row.base_buy or row.buy, base_sell=row.base_sell or row.sell,
+        tax_exempt=row.tax_exempt, limit=row.limit,
+        available_capital=config.capital,
         buy_volume_1h=reachable_buy, sell_volume_1h=reachable_sell,
         quote_age=row.quote_age, ofi=row.ofi, drift=row.drift, now=now,
-        sigma_daily=sigma, ou_fit=view.ou, regime_score=view.regime_score,
-        competitors=crowd,
-        highalch=None if row.alch_floor is None
-        else row.alch_floor + config.nature_rune_cost,
-        nature_rune_cost=config.nature_rune_cost,
-        mode=config.trade_mode, horizon_hours=config.horizon_hours,
-        calibration=config.calibration)
+        highalch=highalch, competitors=crowd, config=config,
+        sigma_daily=sigma, ou_fit=view.ou, regime_score=view.regime_score)
+    if choice is None:
+        return replace(row, deep_checked=True, warnings=row.warnings + (
+            "history left no positive concrete execution price",))
+    buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice
+    margin = engine.net_margin(buy, sell, row.tax_exempt)
 
     return replace(
         row,
+        buy=buy, sell=sell, sell_listed_at=sell,
+        tax=engine.ge_tax(sell, row.tax_exempt), margin=margin,
+        roi=engine.roi(buy, sell, row.tax_exempt),
         qty_per_window=qty, capital_needed=breakdown.capital_needed,
         gross_profit=breakdown.raw_profit,
         expected_buy_seconds=breakdown.buy_seconds,
@@ -515,6 +648,11 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         p_fill=breakdown.p_fill_both,
         p_stranded=breakdown.p_stranded,
         expected_round_trip_qty=breakdown.expected_round_trip_qty,
+        expected_buy_qty=breakdown.expected_buy_qty,
+        expected_sell_qty=breakdown.expected_sell_qty,
+        fill_low_qty=breakdown.fill_low_qty,
+        fill_high_qty=breakdown.fill_high_qty,
+        liquidation_hours=breakdown.liquidation_hours,
         expected_gp=breakdown.expected_profit,
         raw_gp_per_slot_hour=breakdown.gp_per_slot_hour,
         gp_per_slot_hour=breakdown.gp_per_slot_hour,
@@ -523,6 +661,12 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         downside_risk_gp=breakdown.downside_risk_gp,
         trade_mode=breakdown.mode, horizon_hours=breakdown.horizon_hours,
         factors=breakdown.factors(),
+        buy_improvement=buy_improvement,
+        sell_improvement=sell_improvement,
+        buy_share=breakdown.buy_share, sell_share=breakdown.sell_share,
+        model_buy_volume_1h=reachable_buy,
+        model_sell_volume_1h=reachable_sell,
+        competitors=crowd, sigma_daily=sigma, ou_fit=view.ou, scored_at=now,
         alch_arbitrage_gp=breakdown.alch_arbitrage_gp,
         deep_checked=True, fill_share=view.fill_share, trend=view.trend,
         baseline_low=view.baseline_low, median_mid=view.median_mid,
@@ -579,27 +723,108 @@ def apply_preferences(result: ScreenResult,
 
 
 def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
-    """Construct an executable plan, leaving non-positive slots open."""
+    """Construct an executable portfolio and re-score every final quantity.
+
+    Candidate sizing already used the whole bank, not an equal split. This
+    stage considers a wider shortlist, applies a small correlated-category cap,
+    respects connected buy-limit families, then recomputes partial-fill EV at
+    the exact integer quantity actually funded.
+    """
     rows = list(result.rows)
     if not rows:
         return result
-    count = min(len(rows), config.slots)
-    candidates = rows[:count]
+    shortlist = rows[:min(len(rows), max(40, config.slots * 6))]
+    selected: List[FlipRow] = []
+    category_count: Dict[str, int] = {}
+    remaining_seed = config.capital
+    for row in shortlist:
+        if len(selected) >= config.slots:
+            break
+        if row.ranking_value <= 0 or row.expected_gp <= 0 or row.buy > remaining_seed:
+            continue
+        # Three related slots is diversification, four is a concentrated bet.
+        if category_count.get(row.category, 0) >= 3:
+            continue
+        selected.append(row)
+        category_count[row.category] = category_count.get(row.category, 0) + 1
+        remaining_seed -= row.buy
+
     amounts = engine.allocate_portfolio(
-        [row.ranking_value if row.expected_gp > 0 else 0.0
-         for row in candidates],
-        config.capital, [row.buy for row in candidates],
-        [row.capital_needed for row in candidates], config.slots)
-    for index, amount in enumerate(amounts):
-        row = rows[index]
+        [row.ranking_value for row in selected], config.capital,
+        [row.buy for row in selected], [row.capital_needed for row in selected],
+        config.slots)
+
+    group_used: Dict[str, int] = {}
+    funded: List[FlipRow] = []
+    for row, amount in zip(selected, amounts):
         quantity = amount // row.buy if amount > 0 and row.buy > 0 else 0
-        scale = quantity / row.qty_per_window if row.qty_per_window > 0 else 0.0
-        rows[index] = replace(
-            row, allocated_capital=amount, allocated_quantity=quantity,
-            allocated_expected_gp=row.expected_gp * scale)
-    return ScreenResult(rows=rows, funnel=result.funnel,
+        if row.limit_group and row.limit is not None:
+            group_cap = engine.effective_buy_limit(
+                row.limit, config.horizon_hours, config.trade_mode) or 0
+            left = max(0, group_cap - group_used.get(row.limit_group, 0))
+            quantity = min(quantity, left)
+            group_used[row.limit_group] = group_used.get(row.limit_group, 0) + quantity
+        if quantity <= 0:
+            continue
+        rescored = _rescore_quantity(row, quantity, config)
+        funded.append(replace(
+            rescored, allocated_capital=quantity * row.buy,
+            allocated_quantity=quantity,
+            allocated_expected_gp=rescored.expected_gp))
+
+    funded.sort(key=lambda row: row.ranking_value, reverse=True)
+    funded_ids = {row.item_id for row in funded}
+    ordered = funded + [row for row in rows if row.item_id not in funded_ids]
+    return ScreenResult(rows=ordered, funnel=result.funnel,
                         shrinkage=result.shrinkage,
                         deep_checked=result.deep_checked, hidden=result.hidden)
+
+
+def _rescore_quantity(row: FlipRow, quantity: int,
+                      config: FilterConfig) -> FlipRow:
+    """Re-evaluate fill uncertainty and EV for the funded integer quantity."""
+    breakdown = engine.score_flip(
+        buy=row.buy, sell=row.sell, margin=row.margin, qty=quantity, depth=0,
+        buy_volume_1h=row.model_buy_volume_1h,
+        sell_volume_1h=row.model_sell_volume_1h,
+        quote_age=row.quote_age, ofi=row.ofi, drift=row.drift,
+        now=row.scored_at, sigma_daily=row.sigma_daily, ou_fit=row.ou_fit,
+        regime_score=row.regime_score or 0.0,
+        highalch=None if row.alch_floor is None
+        else row.alch_floor + config.nature_rune_cost,
+        nature_rune_cost=config.nature_rune_cost,
+        competitors=row.competitors,
+        buy_improvement=row.buy_improvement,
+        sell_improvement=row.sell_improvement,
+        buy_share=row.buy_share, sell_share=row.sell_share,
+        mode=config.trade_mode, horizon_hours=config.horizon_hours,
+        calibration=config.calibration)
+    retained = (row.ranking_value / row.raw_ranking_value
+                if row.raw_ranking_value > 0 else 1.0)
+    ranking = breakdown.ranking_value * max(0.0, retained)
+    return replace(
+        row, qty_per_window=quantity,
+        capital_needed=breakdown.capital_needed,
+        gross_profit=breakdown.raw_profit,
+        expected_buy_seconds=breakdown.buy_seconds,
+        expected_sell_seconds=breakdown.sell_seconds,
+        expected_total_seconds=breakdown.total_seconds,
+        p_fill=breakdown.p_fill_both, p_stranded=breakdown.p_stranded,
+        expected_round_trip_qty=breakdown.expected_round_trip_qty,
+        expected_buy_qty=breakdown.expected_buy_qty,
+        expected_sell_qty=breakdown.expected_sell_qty,
+        fill_low_qty=breakdown.fill_low_qty,
+        fill_high_qty=breakdown.fill_high_qty,
+        liquidation_hours=breakdown.liquidation_hours,
+        expected_gp=breakdown.expected_profit,
+        raw_gp_per_slot_hour=breakdown.gp_per_slot_hour,
+        gp_per_slot_hour=(ranking if config.trade_mode is engine.TradeMode.ACTIVE
+                          else breakdown.gp_per_slot_hour),
+        raw_ranking_value=breakdown.ranking_value,
+        ranking_value=ranking,
+        downside_risk_gp=breakdown.downside_risk_gp,
+        factors=breakdown.factors(),
+        alch_arbitrage_gp=breakdown.alch_arbitrage_gp)
 
 
 def rank_flips(
@@ -688,16 +913,30 @@ def _warnings(depth: int, drift: float, ofi: float, affordable: int, qty: int,
     if breakdown.total_seconds == float("inf"):
         notes.append("no realistic fill on one side — the book is one-sided")
     elif breakdown.total_seconds > 8 * engine.SECONDS_PER_HOUR:
-        notes.append("expected round trip {} — the slot is the cost, not the gp"
-                     .format(engine.format_duration(breakdown.total_seconds)))
+        if breakdown.mode is engine.TradeMode.OVERNIGHT:
+            notes.append("estimated buy plus post-return liquidation time {} — "
+                         "plan for inventory management after login"
+                         .format(engine.format_duration(
+                             breakdown.total_seconds)))
+        else:
+            notes.append("expected round trip {} — the slot is the cost, not the gp"
+                         .format(engine.format_duration(
+                             breakdown.total_seconds)))
     if breakdown.p_fill_both < 0.25:
-        notes.append("only {:.0%} chance both legs clear inside {:.0f}h"
-                     .format(breakdown.p_fill_both,
-                             breakdown.horizon_hours))
+        if breakdown.mode is engine.TradeMode.OVERNIGHT:
+            notes.append("only {:.0%} chance the full buy order fills before "
+                         "you return in {:.0f}h"
+                         .format(breakdown.p_fill_both,
+                                 breakdown.horizon_hours))
+        else:
+            notes.append("only {:.0%} chance both planned quantities clear "
+                         "inside {:.0f}h"
+                         .format(breakdown.p_fill_both,
+                                 breakdown.horizon_hours))
     if (breakdown.mode is engine.TradeMode.OVERNIGHT
             and breakdown.p_stranded >= 0.20):
-        notes.append("{:.0%} chance you return holding bought inventory; "
-                     "stress downside is {:,.0f} gp"
+        notes.append("about {:.0%} of the planned quantity may remain after "
+                     "the post-return sell window; stress downside is {:,.0f} gp"
                      .format(breakdown.p_stranded,
                              breakdown.downside_risk_gp))
     if drift <= -0.02:
@@ -708,8 +947,6 @@ def _warnings(depth: int, drift: float, ofi: float, affordable: int, qty: int,
     if ofi <= -0.3:
         notes.append("sellers are {:.0%} of aggressor volume — you would be "
                      "catching what they are dumping".format(abs(ofi)))
-    if qty and affordable <= qty:
-        notes.append("capital-bound, not limit-bound — a bigger slot buys more")
     if limit is None:
         notes.append("no published buy limit")
     listed = engine.tax_boundary_undercut(sell, tax_exempt)
@@ -717,3 +954,29 @@ def _warnings(depth: int, drift: float, ofi: float, affordable: int, qty: int,
         notes.append("list the sell at {:,}, not {:,} — identical net revenue "
                      "after tax, better queue position".format(listed, sell))
     return tuple(notes)
+
+
+def confidence_label(row: FlipRow) -> str:
+    """One confidence policy shared by the Python surfaces.
+
+    This is model-evidence confidence, never a guarantee of execution. A quote
+    reconstructed from bucket averages or a detected regime shift cannot be
+    High however attractive its point estimate looks.
+    """
+    retained = (row.ranking_value / row.raw_ranking_value
+                if row.raw_ranking_value > 0 else 0.0)
+    interval_width = ((row.fill_high_qty - row.fill_low_qty) /
+                      max(1.0, row.qty_per_window))
+    regime = row.regime_score or 0.0
+    stale = row.quote_age > 300
+    if stale or regime >= engine.DEFAULT_CALIBRATION.regime_shift_threshold:
+        return "Speculative"
+    if (not row.priced_from_reference and row.deep_checked
+            and row.edge_probability >= 0.80 and row.p_fill >= 0.50
+            and row.thin_volume_1h >= 200 and retained >= 0.85
+            and interval_width <= 0.55):
+        return "High"
+    if (row.edge_probability >= 0.55 and row.p_fill >= 0.25
+            and row.quote_age <= 180 and interval_width <= 0.85):
+        return "Medium"
+    return "Speculative"

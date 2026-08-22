@@ -123,6 +123,15 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn('mode === "overnight" ? expected : perSlotHour',
                       self.source)
         self.assertIn("downsideRisk", self.source)
+        for function in ("fillEstimate", "optimiseExecution",
+                         "rescoreAllocated", "effectiveBuyLimit"):
+            self.assertIn("function {}(".format(function), self.source)
+
+    def test_live_execution_workflow_is_present(self):
+        self.assertIn("Manual offer tracker", self.source)
+        self.assertIn("data-track", self.source)
+        self.assertIn("partial_buy", self.source)
+        self.assertIn("60_000", self.source)
 
     def test_plan_uses_the_derived_slot_count_not_a_three_card_constant(self):
         self.assertNotIn("const PLAN_SIZE = 3", self.source)

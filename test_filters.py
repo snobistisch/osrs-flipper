@@ -1,5 +1,6 @@
 """Unit tests for filters.py — run with: python3 -m unittest test_filters -v"""
 import dataclasses
+from datetime import date
 import math
 import unittest
 
@@ -92,6 +93,14 @@ class StructuralGateTests(unittest.TestCase):
                         {1: act_1h()}, capital=100,
                         account=engine.AccountType.FREE_TO_PLAY)
         self.assertEqual(result.funnel["cannot afford one"], 1)
+
+    def test_affordability_uses_the_whole_bank_not_an_equal_slot_split(self):
+        result = screen(
+            {1: item(limit=8)}, {1: quote(low=200_000, high=250_000)},
+            {1: act_5m(avg_low=200_000, avg_high=250_000)},
+            {1: act_1h(avg_low=200_000, avg_high=250_000)},
+            capital=1_000_000)
+        self.assertEqual(result.funnel["scored"], 1)
 
     def test_funnel_always_sums_to_the_quote_count(self):
         items = {1: item(1), 2: item(2, members=True), 3: item(3)}
@@ -354,6 +363,12 @@ class ExemptionTests(unittest.TestCase):
         self.assertGreater(free.rows[0].margin, taxed.rows[0].margin)
         self.assertTrue(free.rows[0].tax_exempt)
 
+    def test_hand_maintained_list_has_a_freshness_guard(self):
+        config = {"_verified_date": "2026-01-01"}
+        warning = exemptions.freshness_warning(
+            config, max_age_days=90, today=date(2026, 8, 22))
+        self.assertIn("re-check", warning)
+
 
 class HistoryStageTests(unittest.TestCase):
     def buckets(self, level, volume=2_000, count=56):
@@ -477,6 +492,60 @@ class AllocationStageTests(unittest.TestCase):
         cfg = filters.FilterConfig()
         empty = filters.ScreenResult(rows=[], funnel={})
         self.assertEqual(filters.allocate(empty, cfg).rows, [])
+
+    def test_final_quantity_is_rescored_not_linearly_scaled(self):
+        items = {i: item(i, name="Item {}".format(i), limit=100_000)
+                 for i in (1, 2)}
+        quotes = {1: quote(low=100, high=130), 2: quote(low=100, high=125)}
+        acts5 = {i: act_5m(avg_low=100, avg_high=q.high) for i, q in quotes.items()}
+        acts1 = {i: act_1h(avg_low=100, avg_high=q.high,
+                           high_volume=500, low_volume=500)
+                 for i, q in quotes.items()}
+        cfg = filters.FilterConfig(capital=20_000)
+        screened = filters.screen(items, quotes, acts5, acts1, cfg, NOW,
+                                  NO_EXEMPTIONS)
+        before = {r.item_id: r for r in screened.rows}
+        allocated = filters.allocate(screened, cfg)
+        row = next(r for r in allocated.rows if (r.allocated_quantity or 0) > 0)
+        old = before[row.item_id]
+        linear = old.expected_gp * row.allocated_quantity / old.qty_per_window
+        self.assertNotAlmostEqual(row.allocated_expected_gp, linear, places=4)
+
+
+class ExecutionDecisionTests(unittest.TestCase):
+    def test_queue_priority_is_present_in_the_shown_prices(self):
+        result = one(
+            quotes={1: quote(low=173, high=192)},
+            acts_5m={1: act_5m(avg_low=173, avg_high=192)},
+            acts_1h={1: act_1h(avg_low=173, avg_high=192,
+                              high_volume=1_000, low_volume=1_000)})
+        row = result.rows[0]
+        self.assertEqual(row.buy, row.base_buy + row.buy_improvement)
+        self.assertEqual(row.sell, row.base_sell - row.sell_improvement)
+        self.assertEqual(row.margin,
+                         engine.net_margin(row.buy, row.sell, row.tax_exempt))
+        self.assertAlmostEqual(row.buy_share, engine.aggressiveness(
+            engine.price_edge(row.buy_improvement,
+                              row.base_sell - row.base_buy),
+            competitors=row.competitors))
+
+    def test_connected_potion_doses_share_a_limit_group(self):
+        self.assertEqual(filters.connected_limit_group("Prayer potion(4)"),
+                         filters.connected_limit_group("Prayer potion(1)"))
+        self.assertIsNone(filters.connected_limit_group("Games necklace(4)"))
+
+    def test_reference_fallback_can_never_be_high_confidence(self):
+        result = one(
+            quotes={1: quote(low=100, high=100)},
+            acts_5m={1: act_5m(avg_low=95, avg_high=110)},
+            acts_1h={1: act_1h(avg_low=95, avg_high=110)})
+        row = dataclasses.replace(
+            result.rows[0], deep_checked=True, edge_probability=.99,
+            p_fill=.99, fill_low_qty=95, fill_high_qty=100,
+            qty_per_window=100, raw_ranking_value=100,
+            ranking_value=100)
+        self.assertTrue(row.priced_from_reference)
+        self.assertNotEqual(filters.confidence_label(row), "High")
 
 
 class VolumeLookupTests(unittest.TestCase):

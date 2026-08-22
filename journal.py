@@ -249,10 +249,9 @@ class Journal:
         all_rows = self.rows()
         closed = [r for r in all_rows if r["sell_price"] is not None]
         cancelled = [r for r in all_rows if r["outcome"] == "cancelled"]
-        predicted = [r for r in closed if r["predicted_margin"] is not None]
+        predicted = [r for r in closed if predicted_profit(r) is not None]
         durations = [d for d in (flip_seconds(r) for r in closed) if d]
-        predicted_profit = sum(
-            r["predicted_margin"] * r["quantity"] for r in predicted)
+        predicted_total = sum(predicted_profit(r) or 0 for r in predicted)
         realised_on_predicted = sum(realised_profit(r) for r in predicted)
         return {
             "flips_closed": len(closed),
@@ -261,10 +260,10 @@ class Journal:
                           if closed or cancelled else 0.0),
             "realised_profit": sum(realised_profit(r) for r in closed),
             "flips_with_prediction": len(predicted),
-            "predicted_profit": predicted_profit,
+            "predicted_profit": predicted_total,
             "realised_on_predicted": realised_on_predicted,
-            "capture": (realised_on_predicted / predicted_profit
-                        if predicted_profit else 0.0),
+            "capture": (realised_on_predicted / predicted_total
+                        if predicted_total else 0.0),
             "median_flip_seconds": _median(durations),
             "realised_gp_per_slot_hour": _realised_rate(closed),
             "sharpe": _sharpe(closed),
@@ -280,17 +279,16 @@ class Journal:
         """
         rows = [r for r in self.rows()
                 if r["sell_price"] is not None
-                and r["predicted_margin"] is not None
-                and r["predicted_margin"] * r["quantity"] > 0]
+                and predicted_profit(r) is not None
+                and (predicted_profit(r) or 0) > 0]
         if not rows:
             return []
-        rows.sort(key=lambda r: r["predicted_margin"] * r["quantity"],
-                  reverse=True)
+        rows.sort(key=lambda r: predicted_profit(r) or 0, reverse=True)
         size = max(1, len(rows) // deciles)
         out = []
         for index in range(0, len(rows), size):
             group = rows[index:index + size]
-            promised = sum(r["predicted_margin"] * r["quantity"] for r in group)
+            promised = sum(predicted_profit(r) or 0 for r in group)
             got = sum(realised_profit(r) for r in group)
             out.append({
                 "bucket": len(out) + 1,
@@ -337,7 +335,7 @@ class Journal:
         for row in self.rows():
             if row["sell_price"] is None or not row["factors_json"]:
                 continue
-            predicted = (row["predicted_margin"] or 0) * row["quantity"]
+            predicted = predicted_profit(row) or 0
             if predicted <= 0:
                 continue
             try:
@@ -372,6 +370,20 @@ def realised_profit(row) -> Optional[int]:
     exempt = _row_is_exempt(row)
     margin = engine.net_margin(row["buy_price"], row["sell_price"], exempt)
     return margin * row["quantity"]
+
+
+def predicted_profit(row) -> Optional[float]:
+    """Risk-adjusted prediction when available, legacy gross fallback else.
+
+    Comparing realised profit with margin × quantity silently evaluates a
+    different, best-case model and makes every fill/risk discount look like an
+    error. v2 rows store the actual prediction the decision used.
+    """
+    if "predicted_expected_gp" in row.keys() and row["predicted_expected_gp"] is not None:
+        return float(row["predicted_expected_gp"])
+    if row["predicted_margin"] is None:
+        return None
+    return float(row["predicted_margin"] * row["quantity"])
 
 
 def _row_is_exempt(row) -> bool:

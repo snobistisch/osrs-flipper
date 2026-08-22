@@ -161,6 +161,22 @@ class FillModelTests(unittest.TestCase):
         self.assertEqual(engine.fillable_quantity(1_000, 1.0, 4), 4_000)
         self.assertEqual(engine.fillable_quantity(1_000, 0.25, 4), 1_000)
 
+    def test_batch_fill_reports_partial_quantity_and_uncertainty(self):
+        estimate = engine.fill_estimate(1_000, 1_000 / HOUR, HOUR, CAL)
+        self.assertGreater(estimate.expected, 0)
+        self.assertLess(estimate.expected, estimate.requested)
+        self.assertLess(estimate.low, estimate.high)
+        self.assertLessEqual(estimate.p_complete,
+                             CAL.max_completion_probability)
+
+    def test_overnight_reaches_multiple_rolling_limit_windows(self):
+        self.assertEqual(engine.effective_buy_limit(
+            100, 8, engine.TradeMode.OVERNIGHT), 200)
+        self.assertEqual(engine.effective_buy_limit(
+            100, 10, engine.TradeMode.OVERNIGHT), 300)
+        self.assertEqual(engine.effective_buy_limit(
+            100, 10, engine.TradeMode.ACTIVE), 100)
+
     def test_flippable_qty_takes_the_binding_cap(self):
         self.assertEqual(engine.flippable_qty(100, 5_000, 4_000), 100)
         self.assertEqual(engine.flippable_qty(None, 5_000, 4_000), 4_000)
@@ -322,6 +338,10 @@ class UpdateRiskTests(unittest.TestCase):
             self.assertGreater(engine.seconds_until_update(when), 0)
             self.assertLessEqual(engine.seconds_until_update(when),
                                  7 * 24 * HOUR)
+
+    def test_recurring_update_prior_is_wednesday_1130_utc(self):
+        at_eleven = self.wednesday(11)
+        self.assertEqual(engine.seconds_until_update(at_eleven), 30 * 60)
 
 
 class ScoreTests(unittest.TestCase):
@@ -523,6 +543,15 @@ class ModeTests(unittest.TestCase):
                                sell_volume_1h=100)
         self.assertGreater(dangerous.downside_risk_gp, safe.downside_risk_gp)
         self.assertLess(dangerous.ranking_value, dangerous.raw_profit)
+
+    def test_overnight_buys_while_away_then_sells_after_return(self):
+        result = self.score(mode=engine.TradeMode.OVERNIGHT, horizon_hours=8,
+                            qty=1_000, buy_volume_1h=1_000,
+                            sell_volume_1h=100)
+        self.assertEqual(result.liquidation_hours,
+                         engine.DEFAULT_CALIBRATION.overnight_liquidation_hours)
+        self.assertGreater(result.expected_buy_qty, result.expected_sell_qty)
+        self.assertEqual(result.p_fill_both, result.p_fill_buy)
 
 
 class SlotHourTests(unittest.TestCase):

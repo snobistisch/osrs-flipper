@@ -22,16 +22,21 @@ There are two first-class flip strategies:
 - **Active** — while you are playing. Ranks expected GP per occupied slot-hour,
   rewarding fast round trips and capital recycling.
 - **Overnight** — while you are offline, with 6/8/10/12-hour horizons (8h by
-  default). Ranks expected profit before return rather than repeated cycles.
-  The sequential buy/sell completion probability is modelled directly, and
-  expected value subtracts stress loss for the dangerous state where the buy
-  fills but the sell is still open when you return. Volatility, falling drift,
+  default). The buy offer rests while you are away; bought items land in the
+  collection box and cannot create a sell offer by themselves. The model
+  therefore estimates partial inventory on return across the rolling 4-hour
+  limit windows, followed by a separate 4-hour liquidation window. Expected
+  value subtracts stress loss for inventory still unsold after that window.
+  Volatility, falling drift,
   seller-heavy flow, the alch floor, regime/mean-reversion context, update risk,
   quote age and historical reach all affect that result.
 
-The portfolio layer funds at most one candidate per slot, rounds to whole
-items, respects bank, buy limits and reachable quantity, and leaves a slot open
-when the candidate has no positive risk-adjusted expected value.
+The portfolio layer evaluates candidates against the whole bank—never an equal
+split made before ranking—then funds at most one candidate per slot, rounds to
+whole items, respects connected potion-dose limits, applies a three-slot cap to
+correlated item categories, and re-scores the exact funded quantity. It leaves
+a slot or part of the bank open when reachable volume and risk do not justify
+deployment.
 
 A quoted margin is not profit. It is profit *if* both legs of the flip fill,
 and nothing guarantees that. Everything here exists to turn a quoted margin
@@ -51,11 +56,13 @@ occupied a slot for exactly that long. A flip that clears in twelve minutes for
 four hours to make 40,000 earns 10,000. The old metric ranked the second one
 four times higher.
 
-Fill time is now a modelled random variable. Traded volume on each side of the
-book gives an arrival rate, undercut room gives your share of it, and the two
-together give an expected time for each leg and a probability that both clear
-inside the window. **Round trip** in the output is that estimate, and it is the
-denominator of the ranking.
+Fill throughput is now a distribution rather than one all-or-nothing batch
+event. Traded volume on each side gives an arrival rate, but the public feed
+contains executions—not queue depth, offer position or transaction batch
+sizes. A mean-one lognormal rate prior therefore produces expected partial
+quantity, an 80% quantity range and a capped full-completion probability.
+**Round trip** in Active is the sequential estimate and the denominator of the
+ranking; Overnight reports the buy fill by return separately from liquidation.
 
 ### 2. You have to get to the front of the queue, and you are not alone in it
 
@@ -91,13 +98,13 @@ reads as a 20% return across a 50,000 buy limit — but jumping the queue would
 mean buying at 6 to sell at 5, a guaranteed loss. There is **zero room to
 compete**, so you sit behind thousands of offers for one coin.
 
-Every item carries an **undercut room** number: how many gp of price
-improvement it can absorb on each side while still profiting. Leather at
-173/192 has 7 gp of room; air runes have 0. That number is no longer a score
-multiplier of its own — it feeds the fill rate, because how far ahead of the
-queue you can buy your way is precisely what determines how fast you fill.
-Items with no room are not filtered out; they fill slowly, and the ranking says
-so.
+Every item carries an **undercut room** number, but room is not free priority.
+The optimizer enumerates concrete buy and sell concessions, recalculates tax,
+margin, quantity and partial-fill EV for each, and prints the exact winning
+prices. Leather quoted at 173/192 may justify paying inside that spread, but its
+card then shows the dearer buy and/or cheaper sell; the model can never combine
+an aggressive fill rate with untouched passive-price profit. Items with no
+room are not filtered out; they fill slowly, and the ranking says so.
 
 ### 3. Your offer fills when you least want it to
 
@@ -207,9 +214,26 @@ instead of ranking anyway.
   teleport tablets — was charged 2% it does not owe, which is most of the
   spread on a 200 gp lobster, and biased the ranking against exactly the items
   a capital-constrained free-to-play flipper lives on.
-- **Updates ship on Wednesdays.** A position still open when one lands is the
-  uninformed side of every trade that follows, so flips whose expected round
-  trip runs into an update are discounted.
+- **Updates generally ship Wednesday around 11:30 UTC**, with a recurring
+  Tuesday maintenance risk window and announced exceptions. A position still
+  open when either prior lands is discounted; the app does not claim this
+  static prior is a live Jagex calendar.
+
+### Execution is part of the decision
+
+The browser refreshes prices every 60 seconds, highlights changed plans and
+disables “Track offer” actions once the feed is stale. Its local manual offer
+tracker records planned, placed, partial-buy, bought, sell, partial-sell, sold
+and cancelled states. At roughly 20 minutes without progress it suggests a
+cancel/reprice decision; partial inventory is collected and managed explicitly.
+It never places or automates an in-game offer. Cancelled offers remain useful
+censored observations instead of disappearing from the record.
+
+The confidence badge means confidence in the model evidence, not certainty of
+execution. A price reconstructed from hourly averages can never be High;
+stale quotes and detected regime shifts are Speculative. Journal capture and
+factor diagnostics compare realised profit with the risk-adjusted expected GP
+that drove the decision, not with best-case margin × quantity.
 
 ### 8. A year is a different question from an hour
 
@@ -529,6 +553,31 @@ Checked against live data, the two agree to within a fraction of a percent on
 the pre-shrinkage score, the remaining gap being that they poll `/latest`
 seconds apart. Shrunken scores drift slightly more, because shrinkage depends
 on the whole cross-section and the two runs see a marginally different one.
+
+## Research basis
+
+The execution model was checked against the current [OSRS Wiki Grand Exchange
+mechanics](https://oldschool.runescape.wiki/w/Grand_Exchange): eight member or
+three F2P slots, price-before-age matching, rolling four-hour buy limits,
+connected potion-dose limits, no sell limit and the 2% floor-rounded/capped
+sell tax. RuneLite's [Grand Exchange plugin
+source](https://github.com/runelite/runelite/blob/master/runelite-client/src/main/java/net/runelite/client/plugins/grandexchange/GrandExchangePlugin.java)
+confirms what can actually be observed client-side: offer states and executed
+quantity deltas, not a public order book. The uncertainty model follows that
+data boundary instead of inventing queue depth.
+
+Operational guidance—timed partial fills, cancel/reprice discipline,
+diversification and separate overnight buy/return/sell phases—was compared with
+current community practice in a recent [active flipping
+guide](https://www.reddit.com/r/OSRSflipping/comments/1uskrcb/beginner_guide_flipping_basics/)
+and [overnight workflow
+guide](https://www.reddit.com/r/OSRSflipping/comments/1vtt6qe/how_to_overnight_flip_for_complete_beginners/),
+then kept manual to stay on the safe side of game rules. The broader case for treating this as an intervened virtual economy,
+not an idealized frictionless market, is consistent with the empirical OSRS
+economy study [*Grand Exchange: An Analysis of a Virtual
+Economy*](https://arxiv.org/abs/2210.07970). Community rules of thumb are never
+used as ground truth for a price; only live market data and recorded user
+outcomes drive numbers.
 
 ## API etiquette
 

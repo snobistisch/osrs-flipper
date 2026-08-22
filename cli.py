@@ -36,7 +36,7 @@ def parse_args(argv):
                                           engine.TradeMode],
                    default=engine.DEFAULT_TRADE_MODE.value,
                    help="active ranks slot turnover; overnight ranks "
-                        "risk-adjusted profit before return")
+                        "buy-fill-by-return plus post-return liquidation")
     p.add_argument("--overnight-hours", type=float,
                    default=engine.DEFAULT_OVERNIGHT_HOURS,
                    help="unattended horizon (default: 8; useful presets "
@@ -157,21 +157,29 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
 
     metric = "EV/SLOT/H" if config.trade_mode is engine.TradeMode.ACTIVE else "HORIZON EV"
     header = ("{:<24} {:>8} {:>8} {:>7} {:>6} {:>7} {:>8} {:>10} {:>7} {:>11}")
+    timing = "ROUND TRIP" if config.trade_mode is engine.TradeMode.ACTIVE else "RETURN+SELL"
+    probability = "P(TRIP)" if config.trade_mode is engine.TradeMode.ACTIVE else "P(BUY)"
     print(header.format("ITEM", "BUY", "SELL", "MARGIN", "ROI", "QTY",
-                        "COMMIT", "ROUND TRIP", "P(FILL)", metric))
+                        "COMMIT", timing, probability, metric))
     for row in result.rows[:opts.top]:
         value = (row.gp_per_slot_hour if config.trade_mode is
                  engine.TradeMode.ACTIVE else row.ranking_value)
+        timing_value = (engine.format_duration(row.expected_total_seconds)
+                        if config.trade_mode is engine.TradeMode.ACTIVE else
+                        "{:.0f}h+{:.0f}h".format(
+                            row.horizon_hours, row.liquidation_hours))
         print("{:<24.24} {:>8,} {:>8,} {:>7,} {:>5.1f}% {:>7,} {:>8} "
               "{:>10} {:>6.0f}% {:>11,.0f}".format(
                   row.name, row.buy, row.sell, row.margin,
                   row.roi * 100, row.allocated_quantity or 0,
                   engine.format_gp(row.allocated_capital or 0),
-                  engine.format_duration(row.expected_total_seconds),
+                  timing_value,
                   row.p_fill * 100, value))
         if config.trade_mode is engine.TradeMode.OVERNIGHT:
-            print("{:<24} · {:.0%} stranded-inventory risk; {:,.0f} gp stress "
-                  "downside".format("", row.p_stranded,
+            print("{:<24} · {:,.0f} expected bought by return; {:.0%} may remain "
+                  "after {:.0f}h liquidation; {:,.0f} gp stress downside".format(
+                                      "", row.expected_buy_qty, row.p_stranded,
+                                      row.liquidation_hours,
                                       row.downside_risk_gp))
         for note in row.warnings:
             print("{:<24} · {}".format("", note))
@@ -183,9 +191,9 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
               "held for four hours at twice the margin.")
         ranking_explanation = "EV/SLOT/H"
     else:
-        print("ROUND TRIP is diagnostic in Overnight mode. HORIZON EV ranks the "
-              "profit expected before your selected return time, after the "
-              "probability and stress cost of stranded inventory.")
+        print("RETURN+SELL = unattended buy horizon followed by a separate "
+              "post-return liquidation window. HORIZON EV includes partial "
+              "fills and the stress cost of inventory still unsold.")
         ranking_explanation = "HORIZON EV"
     print("MEASURED = the score before shrinkage; {} is after. Ranking hundreds "
           "of noisy estimates surfaces the biggest errors rather than the "

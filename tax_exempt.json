@@ -1,5 +1,6 @@
 {
   "_source": "OSRS Wiki, Grand Exchange page, 'Convenience fee and item sink'.",
+  "_verified_date": "2026-07-27",
   "_verified": "July 2026, cross-checked name by name against a live /mapping.",
   "_note": "The wiki API exposes no tax-exempt flag, so this list is maintained by hand. Names are matched case-insensitively against /mapping and any name that matches nothing is reported by the CLI and the dashboard — check that count after every game update rather than trusting this file.",
   "_naming_traps": [

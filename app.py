@@ -156,7 +156,8 @@ def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfi
             format_func=lambda value: ("Active" if value is
                                        engine.TradeMode.ACTIVE else "Overnight"),
             help="Active maximizes expected GP per occupied slot-hour. "
-                 "Overnight maximizes risk-adjusted profit before you return.")
+                 "Overnight leaves buy offers while you are away, then models "
+                 "a separate sell window after you return.")
         overnight_hours = engine.DEFAULT_OVERNIGHT_HOURS
         if mode is engine.TradeMode.OVERNIGHT:
             overnight_hours = st.select_slider(
@@ -165,8 +166,7 @@ def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfi
                 format_func=lambda value: "{:.0f} hours".format(value))
         slots = account.slots
         st.metric("Budget", engine.format_gp(capital) + " gp",
-                  delta="{} gp per flip if split evenly".format(
-                      engine.format_gp(engine.capital_per_slot(capital, slots))),
+                  delta="pooled across {} slots; not pre-split".format(slots),
                   delta_color="off", help="{:,} gp".format(capital))
         if st.button("Change budget"):
             del st.session_state["capital"]
@@ -227,7 +227,10 @@ def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfi
         tax_free_only=tax_free, hide_botted=hide_botted), top_n
 
 
-def ranked_table(rows, top_n):
+def ranked_table(rows, top_n, config):
+    overnight = config.trade_mode is engine.TradeMode.OVERNIGHT
+    time_heading = "Buy by return" if overnight else "Round trip"
+    probability_heading = "P(full buy) %" if overnight else "P(full trip) %"
     df = pd.DataFrame([{
         "Item": r.name, "Buy": r.buy, "List at": r.sell_listed_at,
         "Qty": r.allocated_quantity or r.qty_per_window,
@@ -235,9 +238,12 @@ def ranked_table(rows, top_n):
                                   r.allocated_expected_gp is not None
                                   else r.expected_gp),
         "ROI %": r.roi * 100,
-        "Round trip": engine.format_duration(r.expected_total_seconds),
-        "P(fill) %": r.p_fill * 100,
-        "Confidence": confidence_label(r),
+        time_heading: ("{:.0f}h away + {:.0f}h sell window".format(
+            r.horizon_hours, r.liquidation_hours) if overnight else
+            engine.format_duration(r.expected_total_seconds)),
+        probability_heading: r.p_fill * 100,
+        "Fill range": "{:,.0f}–{:,.0f}".format(r.fill_low_qty, r.fill_high_qty),
+        "Model confidence": filters.confidence_label(r),
         "Decision value": round(r.ranking_value),
     } for r in rows[:top_n]])
     gp = st.column_config.NumberColumn(format="localized")
@@ -248,26 +254,16 @@ def ranked_table(rows, top_n):
             help="Where to place the sell offer. The GE tax rounds down, so "
                  "every price inside a 50 gp band nets the seller the same — "
                  "the lowest one buys queue priority for free."),
-        "Round trip": st.column_config.TextColumn(
-            help="Expected time for both legs at your queue position. This is "
-                 "the denominator of EV/slot/h."),
-        "P(fill) %": st.column_config.NumberColumn(
-            format="%.0f%%", help="Chance both legs clear inside 4 hours."),
+        time_heading: st.column_config.TextColumn(
+            help=("Buy offer rests while you are away; liquidation starts only "
+                  "after you return." if overnight else
+                  "Expected time for both sequential legs at the shown prices.")),
+        probability_heading: st.column_config.NumberColumn(
+            format="%.0f%%", help=("Chance the full buy order fills before return."
+                                    if overnight else
+                                    "Chance the full planned quantity clears on both legs.")),
         "ROI %": st.column_config.NumberColumn(format="%.1f%%"),
     })
-
-
-def confidence_label(row) -> str:
-    """Systematic player-facing label from posterior evidence and history."""
-    history_support = row.deep_checked and row.fill_share is not None
-    shrink_retained = (row.ranking_value / row.raw_ranking_value
-                       if row.raw_ranking_value > 0 else 0.0)
-    if (row.edge_probability >= 0.80 and history_support and row.p_fill >= 0.65
-            and row.thin_volume_1h >= 200 and shrink_retained >= 0.85):
-        return "High"
-    if row.edge_probability >= 0.55 and row.p_fill >= 0.40:
-        return "Medium"
-    return "Speculative"
 
 
 def slot_plan(rows, config):
@@ -298,11 +294,20 @@ def slot_plan(rows, config):
                 expected = (row.allocated_expected_gp if
                             row.allocated_expected_gp is not None else
                             row.expected_gp)
-                st.caption("EV {:,.0f} gp · fill {:.0%} · {} · {} confidence"
-                           .format(expected, row.p_fill,
-                                   engine.format_duration(
-                                       row.expected_total_seconds),
-                                   confidence_label(row)))
+                if config.trade_mode is engine.TradeMode.OVERNIGHT:
+                    timing = ("buy {:,.0f} expected ({:,.0f}–{:,.0f}) by return; "
+                              "then {:.0f}h to sell"
+                              .format(row.expected_buy_qty, row.fill_low_qty,
+                                      row.fill_high_qty, row.liquidation_hours))
+                    fill_label = "full buy"
+                else:
+                    timing = "{} ETA · {:,.0f}–{:,.0f} completed".format(
+                        engine.format_duration(row.expected_total_seconds),
+                        row.fill_low_qty, row.fill_high_qty)
+                    fill_label = "full trip"
+                st.caption("EV {:,.0f} gp · {} {:.0%} · {} · {} model confidence"
+                           .format(expected, fill_label, row.p_fill, timing,
+                                   filters.confidence_label(row)))
                 if st.button("Inspect", key="slot-{}-{}".format(slot,
                                                                   row.item_id)):
                     st.session_state.selected_item_id = row.item_id
@@ -311,12 +316,13 @@ def slot_plan(rows, config):
         st.warning("{} slot{} better left open: the remaining candidates do "
                    "not have positive risk-adjusted EV or cannot buy one "
                    "executable unit.".format(unused, "" if unused == 1 else "s"))
-    st.caption("EV/slot/h ranks the table: expected profit divided by the time "
-               "the slot is actually occupied, then shrunk toward the market "
-               "average by an amount set by how much volume the estimate rests "
-               "on. A wide Measured-to-EV gap means the measured number was "
-               "mostly thin data. Blank Fill/Reverts = outside the "
-               "deep-checked shortlist.")
+    st.caption(("Horizon EV ranks expected post-return liquidation profit and "
+                "inventory downside; no sell is assumed while you are offline. "
+                if config.trade_mode is engine.TradeMode.OVERNIGHT else
+                "EV/slot/h ranks expected completed profit divided by occupied "
+                "slot time. ") +
+               "Scores are shrunk toward the market average; confidence is "
+               "model evidence, not an execution guarantee.")
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
@@ -460,18 +466,29 @@ def detail_view(row):
                delta="{:.1%} ROI".format(row.roi), delta_color="off",
                help="Tax on this sell price: {:,} gp{}".format(
                    row.tax, " (tax-exempt item)" if row.tax_exempt else ""))
-    right.metric("Round trip",
-                 engine.format_duration(row.expected_total_seconds),
-                 delta="{:.0%} chance both legs clear in {:.0f}h".format(
-                     row.p_fill, row.horizon_hours),
-                 delta_color="off",
-                 help="Buy leg {}, sell leg {}. This is the time the slot is "
-                      "occupied, and the denominator of the ranking metric."
-                      .format(engine.format_duration(row.expected_buy_seconds),
-                              engine.format_duration(row.expected_sell_seconds)))
     active = row.trade_mode is engine.TradeMode.ACTIVE
+    if active:
+        right.metric("Round trip",
+                     engine.format_duration(row.expected_total_seconds),
+                     delta="{:.0%} full quantity clears".format(row.p_fill),
+                     delta_color="off",
+                     help="Buy leg {}, sell leg {}; expected completed range "
+                          "{:,.0f}–{:,.0f}.".format(
+                              engine.format_duration(row.expected_buy_seconds),
+                              engine.format_duration(row.expected_sell_seconds),
+                              row.fill_low_qty, row.fill_high_qty))
+    else:
+        right.metric("Return workflow",
+                     "{:.0f}h away + {:.0f}h sell".format(
+                         row.horizon_hours, row.liquidation_hours),
+                     delta="{:.0%} full buy by return".format(row.p_fill),
+                     delta_color="off",
+                     help="Expected bought {:,.0f} ({:,.0f}–{:,.0f}); expected "
+                          "sold after return {:,.0f}.".format(
+                              row.expected_buy_qty, row.fill_low_qty,
+                              row.fill_high_qty, row.expected_sell_qty))
     far.metric("Expected / slot / hour" if active else
-               "Expected profit before return",
+               "Expected after liquidation",
                "{:,} gp".format(round(row.gp_per_slot_hour if active else
                                       row.ranking_value)),
                delta="{:,} before shrinkage".format(round(
@@ -482,9 +499,9 @@ def detail_view(row):
                    row.qty_per_window, row.capital_needed))
 
     if not active:
-        st.warning("{:.0%} chance you return holding bought inventory; the "
-                   "model subtracts {:,.0f} gp of stress downside from the "
-                   "overnight EV.".format(row.p_stranded,
+        st.warning("About {:.0%} of planned quantity may remain after the "
+                   "post-return sell window; the model subtracts {:,.0f} gp "
+                   "of stress downside from Overnight EV.".format(row.p_stranded,
                                            row.downside_risk_gp))
 
     if row.allocated_capital is not None:
@@ -560,6 +577,7 @@ def detail_view(row):
                "single near-zero-volume bucket.")
 
 
+@st.fragment(run_every="60s")
 def main():
     st.markdown(RUNESCAPE_CSS, unsafe_allow_html=True)
     if "capital" not in st.session_state:
@@ -594,6 +612,8 @@ def main():
             volume_lookup=volume_lookup())
 
     st.title("🪙 Grand Exchange Flipper")
+    st.caption("Live snapshot refreshed automatically every 60 seconds · {}"
+               .format(time.strftime("%H:%M:%S")))
     funnel = dict(result.funnel)
     funnel["deep-checked vs 14d history"] = result.deep_checked
     st.caption("  →  ".join("{:,} {}".format(v, k)
@@ -607,6 +627,9 @@ def main():
                    "/mapping — those items are being taxed 2% they may not "
                    "owe: {}".format(len(exempt.unmatched_names),
                                     ", ".join(exempt.unmatched_names)), icon="⚠️")
+    exemption_age = exemptions.freshness_warning()
+    if exemption_age:
+        st.warning(exemption_age, icon="⚠️")
     if result.shrinkage is not None and not result.shrinkage.informative:
         st.warning("Every difference between today's scores is inside "
                    "estimation noise. The ranking below is not meaningful — "
@@ -634,7 +657,7 @@ def main():
             list_column, detail_column = st.columns([0.9, 1.35], gap="large")
             with list_column:
                 st.subheader("Ranked opportunities")
-                ranked_table(result.rows, top_n)
+                ranked_table(result.rows, top_n, config)
                 selected_id = st.session_state.get(
                     "selected_item_id", result.rows[0].item_id)
                 choices = result.rows[:top_n]
