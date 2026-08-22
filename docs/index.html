@@ -100,12 +100,13 @@
 .plan-card:hover { border-color: var(--edge-light); border-left-color: var(--gold-bright); }
 .plan-card.price-changed { box-shadow:inset 0 0 0 1px var(--gold-bright); }
 .plan-card.locked {
-  border-color: #71612c;
-  border-left-color: var(--good);
-  background: linear-gradient(135deg, rgba(60, 92, 55, .16), var(--panel) 42%);
+  border-color: var(--gold-bright);
+  border-left-color: var(--gold-bright);
+  background: linear-gradient(135deg, rgba(197, 157, 55, .16), var(--panel) 42%);
+  box-shadow: 0 0 0 1px rgba(197, 157, 55, .24), 0 0 10px rgba(197, 157, 55, .12);
 }
-.plan-card.locked:hover { border-left-color: #9bea8a; }
-.plan-card.locked .plan-rank { color: var(--good); }
+.plan-card.locked:hover { border-color: #f4d67a; border-left-color: #f4d67a; }
+.plan-card.locked .plan-rank { color: var(--gold-bright); }
 .plan-card.locked .locked-sell strong { color: var(--gold-bright); font-size: 1rem; }
 .plan-rank {
   color: var(--text-dim); font-family: var(--mono);
