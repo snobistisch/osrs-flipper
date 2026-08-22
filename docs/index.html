@@ -99,6 +99,14 @@
 }
 .plan-card:hover { border-color: var(--edge-light); border-left-color: var(--gold-bright); }
 .plan-card.price-changed { box-shadow:inset 0 0 0 1px var(--gold-bright); }
+.plan-card.locked {
+  border-color: #71612c;
+  border-left-color: var(--good);
+  background: linear-gradient(135deg, rgba(60, 92, 55, .16), var(--panel) 42%);
+}
+.plan-card.locked:hover { border-left-color: #9bea8a; }
+.plan-card.locked .plan-rank { color: var(--good); }
+.plan-card.locked .locked-sell strong { color: var(--gold-bright); font-size: 1rem; }
 .plan-rank {
   color: var(--text-dim); font-family: var(--mono);
   font-size: 0.7rem; letter-spacing: 0.12em;
@@ -123,7 +131,9 @@
 .plan-warn { color: #ffb59a; font-size: 0.78rem; margin-top: 0.3rem; }
 .plan-actions { display:flex; gap:.35rem; margin-top:.35rem; }
 .plan-actions button { padding:.22rem .45rem; font:600 .7rem var(--mono); }
-.stale-actions .plan-actions button { opacity:.45; pointer-events:none; }
+.plan-actions .unlock-btn { border-color:var(--good); color:var(--good); }
+.lock-live { color:var(--text-dim); font-family:var(--mono); font-size:.7rem; margin-top:.3rem; }
+.stale-actions .plan-actions button:not(.unlock-btn) { opacity:.45; pointer-events:none; }
 #execution { margin:0 0 1rem; }
 #execution table button { padding:.2rem .4rem; font-size:.72rem; }
 .confidence { text-transform: uppercase; letter-spacing: 0.06em; }
@@ -1726,9 +1736,12 @@ function shrinkScores(rows) {
    An equal split strands capital: a 10 gp item with a 10,000 buy limit can
    absorb 100k and no more, so a third of a 3m bank sits idle while the 50k
    item that could have used it is capped. */
-function allocateCapital(rows, capital, slots) {
+function allocateCapital(rows, capital, slots, reserved = []) {
   rows.forEach((r) => { r.allocated = 0; r.allocatedQty = 0; r.allocatedExpected = 0; });
   const selected = [], categoryCount = {};
+  for (const lock of reserved) {
+    categoryCount[lock.category] = (categoryCount[lock.category] || 0) + 1;
+  }
   let seedBank = capital;
   for (const r of rows.slice(0, Math.max(40, slots * 6))) {
     if (selected.length >= slots) break;
@@ -1762,6 +1775,9 @@ function allocateCapital(rows, capital, slots) {
     if (!progressed) break;
   }
   const groupUsed = {};
+  for (const lock of reserved) if (lock.limitGroup) {
+    groupUsed[lock.limitGroup] = (groupUsed[lock.limitGroup] || 0) + lock.qty;
+  }
   for (const r of selected) {
     r.allocatedQty = r.buy > 0 ? Math.floor(r.allocated / r.buy) : 0;
     if (r.limitGroup && r.limit != null) {
@@ -3081,11 +3097,105 @@ const state = {
   items: null,
   exemptIds: null,
   lastDecisionKey: null,
+  sourceRows: [],   // unallocated rows, kept so locking can re-plan without a refetch
+  statusText: "",
+  planRows: [],
+  planEntries: [],
+  slotLocks: [],
 };
 
 const $ = (sel) => document.querySelector(sel);
 const PREF_KEY = "osrs-flipper.preferences.v2";
 const EXEC_KEY = "osrs-flipper.executions.v1";
+const LOCK_KEY = "osrs-flipper.slot-locks.v1";
+
+function lockProfileKey(config) {
+  const horizon = config.strategy === "overnight" ? config.horizonHours : 0;
+  return `${config.account}:${config.strategy}:${horizon}`;
+}
+
+function loadSlotLockStore() {
+  try {
+    const value = JSON.parse(localStorage.getItem(LOCK_KEY) || "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch { return {}; }
+}
+
+function validSlotLock(value, slots) {
+  if (!value || !Number.isInteger(value.slot) || value.slot < 0 || value.slot >= slots) return null;
+  const numeric = ["id", "qty", "buy", "sell", "commit", "expected", "lockedAt"];
+  if (numeric.some((key) => !Number.isFinite(Number(value[key])))) return null;
+  if (value.id <= 0 || value.qty <= 0 || value.buy <= 0 || value.sell <= 0) return null;
+  return {
+    slot: value.slot, id: Number(value.id), name: String(value.name || `Item ${value.id}`),
+    qty: Math.floor(Number(value.qty)), buy: Math.floor(Number(value.buy)),
+    sell: Math.floor(Number(value.sell)), commit: Math.max(0, Math.floor(Number(value.commit))),
+    expected: Number(value.expected), lockedAt: Number(value.lockedAt),
+    pFill: Number.isFinite(Number(value.pFill)) ? Number(value.pFill) : 0,
+    totalSeconds: Number.isFinite(Number(value.totalSeconds)) ? Number(value.totalSeconds) : 0,
+    fillLowQty: Number.isFinite(Number(value.fillLowQty)) ? Number(value.fillLowQty) : 0,
+    fillHighQty: Number.isFinite(Number(value.fillHighQty)) ? Number(value.fillHighQty) : 0,
+    confidence: ["high", "medium", "speculative"].includes(value.confidence)
+      ? value.confidence : "speculative",
+    warnings: Array.isArray(value.warnings) ? value.warnings.map(String).slice(0, 12) : [],
+    limit: value.limit == null ? null : Number(value.limit),
+    limitGroup: value.limitGroup == null ? null : String(value.limitGroup),
+    category: value.category == null ? "other" : String(value.category),
+    mode: value.mode === "overnight" ? "overnight" : "active",
+    horizonHours: Number.isFinite(Number(value.horizonHours)) ? Number(value.horizonHours) : WINDOW_HOURS,
+  };
+}
+
+function locksFor(config) {
+  const raw = loadSlotLockStore()[lockProfileKey(config)];
+  if (!Array.isArray(raw)) return [];
+  const slots = new Set(), items = new Set(), locks = [];
+  for (const value of raw) {
+    const lock = validSlotLock(value, config.slots);
+    if (!lock || slots.has(lock.slot) || items.has(lock.id)) continue;
+    slots.add(lock.slot); items.add(lock.id); locks.push(lock);
+  }
+  return locks.sort((a, b) => a.slot - b.slot);
+}
+
+function saveProfileLocks(config, locks) {
+  const store = loadSlotLockStore();
+  const key = lockProfileKey(config);
+  if (locks.length) store[key] = locks;
+  else delete store[key];
+  try { localStorage.setItem(LOCK_KEY, JSON.stringify(store)); } catch {}
+}
+
+function replanFromCurrentData() {
+  if (!state.config || !state.sourceRows.length) return;
+  show(state.sourceRows, state.config, state.statusText);
+}
+
+function lockSlot(slot, itemId) {
+  const entry = state.planEntries.find((value) =>
+    value.slot === slot && !value.locked && value.row.id === itemId);
+  if (!entry) return;
+  const row = entry.row;
+  const snapshot = {
+    slot, id: row.id, name: row.name, qty: row.allocatedQty, buy: row.buy,
+    sell: row.listAt, commit: row.allocated || 0,
+    expected: row.allocatedExpected || row.expected || 0, lockedAt: Date.now(),
+    pFill: row.pFill, totalSeconds: row.totalSeconds,
+    fillLowQty: row.fillLowQty, fillHighQty: row.fillHighQty,
+    confidence: confidenceLabel(row), warnings: row.warnings || [],
+    limit: row.limit, limitGroup: row.limitGroup, category: row.category,
+    mode: row.mode, horizonHours: row.horizonHours,
+  };
+  saveProfileLocks(state.config, [...locksFor(state.config), snapshot]);
+  replanFromCurrentData();
+}
+
+function unlockSlot(slot) {
+  if (!state.config) return;
+  saveProfileLocks(state.config, locksFor(state.config)
+    .filter((lock) => lock.slot !== slot));
+  replanFromCurrentData();
+}
 
 function loadExecutions() {
   try { return JSON.parse(localStorage.getItem(EXEC_KEY) || "[]"); }
@@ -3099,7 +3209,7 @@ function trackOffer(row) {
   const list = loadExecutions();
   if (list.some((x) => x.itemId === row.id && !["sold", "cancelled"].includes(x.status))) return;
   list.unshift({ key: `${Date.now()}-${row.id}`, itemId: row.id, name: row.name,
-    qty: row.allocatedQty || row.qty, buy: row.buy, sell: row.listAt,
+    qty: row.allocatedQty || row.qty, buy: row.buy, sell: row.listAt ?? row.sell,
     bought: 0, sold: 0, status: "planned", createdAt: Date.now(), updatedAt: Date.now(),
     limit: row.limit, limitGroup: row.limitGroup, mode: row.mode });
   saveExecutions(list);
@@ -3308,8 +3418,20 @@ function show(allRows, config, statusText) {
   const decisionKey = `${config.account}:${config.strategy}:${config.horizonHours}`;
   if (state.lastDecisionKey !== decisionKey) state.selected = null;
   state.lastDecisionKey = decisionKey;
-  allocateCapital(kept, config.capital, config.slots);
-  state.rows = kept;
+  const locks = locksFor(config);
+  const lockedIds = new Set(locks.map((lock) => lock.id));
+  const lockedCommit = locks.reduce((sum, lock) => sum + lock.commit, 0);
+  kept.forEach((row) => {
+    row.allocated = 0; row.allocatedQty = 0; row.allocatedExpected = 0;
+  });
+  const candidates = kept.filter((row) => !lockedIds.has(row.id));
+  allocateCapital(candidates, Math.max(0, config.capital - lockedCommit),
+    Math.max(0, config.slots - locks.length), locks);
+  state.rows = [...candidates, ...kept.filter((row) => lockedIds.has(row.id))];
+  state.planRows = candidates;
+  state.slotLocks = locks;
+  state.sourceRows = allRows;
+  state.statusText = statusText;
   state.config = config;      // the plan needs it again on a tab switch
   const hiddenText = Object.entries(hidden).filter(([, v]) => v > 0)
     .map(([k, v]) => `${num(v)} ${k}`).join(", ");
@@ -3333,7 +3455,8 @@ function show(allRows, config, statusText) {
     ? `Buy offers rest for ${config.horizonHours}h; expected inventory is collected on return and gets a separate ${CAL.overnight_liquidation_hours}h sell window.`
     : TAB_BLURB.flip;
   savePreferences();
-  $("#plan").classList.toggle("hidden", state.tab !== "flip" || !kept.length);
+  $("#plan").classList.toggle("hidden", state.tab !== "flip" ||
+    (!kept.length && !locks.length));
   if (state.tab !== "merch" && state.selected != null) {
     const row = state.rows.find((r) => r.id === state.selected);
     if (row) showDetail(row.id);
@@ -3414,12 +3537,12 @@ function renderTerminalStats(config) {
   const rois = state.rows.map((r) => r.roi).sort((a, b) => a - b);
   $("#stat-spread").textContent = rois.length
     ? (rois[Math.floor(rois.length / 2)] * 100).toFixed(1) + "%" : "—";
-  const planRows = state.rows.slice(0, config ? config.slots : 0)
-    .filter((r) => (r.allocatedQty || 0) > 0 && r.expected > 0);
-  const committed = planRows.reduce((sum, r) =>
-    sum + (r.allocated != null ? r.allocated : 0), 0);
+  const committed = state.planEntries.reduce((sum, entry) => sum + (entry.locked
+    ? entry.lock.commit : (entry.row.allocated || 0)), 0);
+  const locked = state.planEntries.filter((entry) => entry.locked).length;
   $("#plan-figure").innerHTML = config
-    ? `${config.slots} SLOTS · <b>${formatGp(committed)}</b> COMMITTED` : "";
+    ? `${config.slots} SLOTS${locked ? ` · <b>${locked}</b> LOCKED` : ""} · ` +
+      `<b>${formatGp(committed)}</b> COMMITTED` : "";
 }
 
 /* ---- the plan ----
@@ -3431,22 +3554,61 @@ function renderTerminalStats(config) {
 
 function renderPlan(config) {
   const cards = $("#plan-cards");
-  const rows = state.rows.slice(0, config.slots)
+  const rows = state.planRows.slice(0, Math.max(0, config.slots - state.slotLocks.length))
     .filter((r) => (r.allocatedQty || 0) > 0 && r.expected > 0);
-  if (!rows.length) {
+  const entries = Array(config.slots).fill(null);
+  for (const lock of state.slotLocks) entries[lock.slot] = { slot: lock.slot, locked: true, lock };
+  let cursor = 0;
+  for (let slot = 0; slot < entries.length && cursor < rows.length; slot++) {
+    if (entries[slot] == null) entries[slot] = { slot, locked: false, row: rows[cursor++] };
+  }
+  state.planEntries = entries.filter(Boolean);
+  if (!state.planEntries.length) {
     $("#plan").classList.add("hidden");
     return;
   }
   $("#plan").classList.remove("hidden");
 
-  cards.innerHTML = rows.map((r, index) => {
+  cards.innerHTML = state.planEntries.map((entry) => {
+    if (entry.locked) {
+      const lock = entry.lock;
+      const live = state.sourceRows.find((row) => row.id === lock.id);
+      const liveText = live
+        ? `LIVE SCANNER NOW: ${num(live.buy)} → ${num(live.listAt)}`
+        : "NOT IN THE CURRENT LIVE CANDIDATE SET";
+      const lockedTime = new Date(lock.lockedAt).toLocaleTimeString([], {
+        hour: "2-digit", minute: "2-digit",
+      });
+      return `
+        <div class="plan-card locked" data-id="${lock.id}" data-slot="${entry.slot}">
+          <div class="plan-rank">SLOT ${entry.slot + 1} · LOCKED ${escapeHtml(lockedTime)}</div>
+          <div class="plan-name">${escapeHtml(lock.name)}</div>
+          <div class="plan-line"><span>BUY</span>
+            <strong>${num(lock.qty)} @ ${num(lock.buy)}</strong></div>
+          <div class="plan-line locked-sell"><span>SELL OFFER</span>
+            <strong>${num(lock.sell)}</strong></div>
+          <div class="plan-line"><span>COMMIT</span>
+            <strong>${formatGp(lock.commit)}</strong></div>
+          <div class="plan-line"><span>LOCKED EV</span>
+            <strong>${formatGp(Math.round(lock.expected))} GP</strong></div>
+          <div class="plan-foot">${lock.mode === "overnight"
+            ? `${Math.round(lock.pFill * 100)}% FULL BUY · SELL AFTER RETURN`
+            : `${Math.round(lock.pFill * 100)}% FULL TRIP · ${formatDuration(lock.totalSeconds)} ETA`} ·
+            <span class="confidence confidence-${lock.confidence}">${lock.confidence}</span></div>
+          <div class="lock-live">${liveText}</div>
+          ${lock.warnings.length ? `<details class="plan-warn"><summary>${lock.warnings.length} saved risk flag${lock.warnings.length === 1 ? "" : "s"}</summary>${escapeHtml(lock.warnings.join(" · "))}</details>` : ""}
+          <div class="plan-actions"><button data-track-lock="${entry.slot}">Track offer</button>
+            <button class="unlock-btn" data-unlock="${entry.slot}">Unlock</button></div>
+        </div>`;
+    }
+    const r = entry.row;
     const commit = r.allocated || 0;
     const units = r.allocatedQty;
     const expected = r.allocatedExpected;
     const confidence = confidenceLabel(r);
     return `
-      <div class="plan-card${r.priceChanged ? " price-changed" : ""}" data-id="${r.id}">
-        <div class="plan-rank">SLOT ${index + 1}</div>
+      <div class="plan-card${r.priceChanged ? " price-changed" : ""}" data-id="${r.id}" data-slot="${entry.slot}">
+        <div class="plan-rank">SLOT ${entry.slot + 1}</div>
         <div class="plan-name">${escapeHtml(r.name)}</div>
         <div class="plan-line"><span>BUY</span>
           <strong>${num(units)} @ ${num(r.buy)}</strong></div>
@@ -3460,7 +3622,8 @@ function renderPlan(config) {
           : `${Math.round(r.pFill * 100)}% FULL TRIP · ${formatDuration(r.totalSeconds)} ETA · ${num(Math.round(r.fillLowQty))}–${num(Math.round(r.fillHighQty))} COMPLETED`} ·
           <span class="confidence confidence-${confidence}">${confidence}</span></div>
         ${r.warnings.length ? `<details class="plan-warn"><summary>${r.warnings.length} risk flag${r.warnings.length === 1 ? "" : "s"}</summary>${escapeHtml(r.warnings.join(" · "))}</details>` : ""}
-        <div class="plan-actions"><button data-track="${r.id}">Track offer</button></div>
+        <div class="plan-actions"><button data-lock="${r.id}" data-slot="${entry.slot}">Lock trade</button>
+          <button data-track="${r.id}">Track offer</button></div>
       </div>`;
   }).join("");
 
@@ -3470,17 +3633,23 @@ function renderPlan(config) {
   // An item cannot absorb more than its buy limit allows, so the plan often
   // commits less than the budget. Saying so beats leaving people to add three
   // numbers up and wonder where the rest went.
-  const committed = rows.reduce((sum, r) => sum + (r.allocated != null
-    ? r.allocated
-    : 0), 0);
+  const committed = state.planEntries.reduce((sum, entry) => sum + (entry.locked
+    ? entry.lock.commit : (entry.row.allocated || 0)), 0);
+  const locked = state.slotLocks.length;
+  if (locked) {
+    parts.push(`${locked} locked trade${locked === 1 ? " keeps" : "s keep"} its saved buy, quantity and sell offer across price refreshes. Locked commitments reserve bank; live scanner prices are shown only as context until you unlock.`);
+  }
+  if (committed > config.capital) {
+    parts.push(`Locked commitments exceed the current ${formatGp(config.capital)} bank. No new trade is funded until you raise the bank or unlock a slot.`);
+  }
   if (committed < config.capital * 0.95) {
     parts.push(`${formatGp(committed)} of ${formatGp(config.capital)} is committed. ` +
       `The remainder is liquid because the quantity-aware candidates, shared limits, ` +
       `reachable volume or category concentration do not justify deploying it.`);
   }
-  if (slots > rows.length) {
-    parts.push(`${slots - rows.length} slot${
-      slots - rows.length === 1 ? " is" : "s are"} better left open: the remaining candidates have no positive risk-adjusted EV or cannot buy one executable unit.`);
+  if (slots > state.planEntries.length) {
+    parts.push(`${slots - state.planEntries.length} slot${
+      slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: the remaining candidates have no positive risk-adjusted EV or cannot buy one executable unit.`);
   }
   parts.push("Quantities already respect your bank, whole items, buy limits and " +
     "the volume expected to be reachable. Click a card for chart and rationale.");
@@ -3652,7 +3821,7 @@ function selectTab(tab) {
   $("#merch-note").classList.toggle("hidden", flip);
   $("#portfolio").classList.toggle("hidden", tab !== "merch");
   // The plan is the flip ranking's answer, so it belongs to that tab only.
-  $("#plan").classList.toggle("hidden", !flip || !state.rows.length);
+  $("#plan").classList.toggle("hidden", !flip || !state.planEntries.length);
 
   // Flip and Crash are two readings of the same rows, so the detail panel —
   // chart, factor breakdown, warnings — belongs to both. Only Merch has no
@@ -4421,6 +4590,23 @@ $("#flips tbody").addEventListener("keydown", (event) => {
 });
 
 $("#plan-cards").addEventListener("click", (event) => {
+  const unlock = event.target.closest("button[data-unlock]");
+  if (unlock) {
+    unlockSlot(Number(unlock.dataset.unlock));
+    event.stopPropagation(); return;
+  }
+  const lock = event.target.closest("button[data-lock]");
+  if (lock) {
+    lockSlot(Number(lock.dataset.slot), Number(lock.dataset.lock));
+    event.stopPropagation(); return;
+  }
+  const trackLock = event.target.closest("button[data-track-lock]");
+  if (trackLock) {
+    const saved = state.slotLocks.find((value) =>
+      value.slot === Number(trackLock.dataset.trackLock));
+    if (saved) trackOffer(saved);
+    event.stopPropagation(); return;
+  }
   const track = event.target.closest("button[data-track]");
   if (track) {
     const row = state.rows.find((r) => r.id === Number(track.dataset.track));
@@ -4428,7 +4614,9 @@ $("#plan-cards").addEventListener("click", (event) => {
     event.stopPropagation(); return;
   }
   const card = event.target.closest(".plan-card");
-  if (card) showDetail(Number(card.dataset.id));
+  if (card && state.rows.some((row) => row.id === Number(card.dataset.id))) {
+    showDetail(Number(card.dataset.id));
+  }
 });
 
 $("#execution-body").addEventListener("click", (event) => {

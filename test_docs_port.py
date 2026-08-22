@@ -133,9 +133,19 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("partial_buy", self.source)
         self.assertIn("60_000", self.source)
 
+    def test_slot_locks_survive_refresh_and_reserve_capital(self):
+        self.assertIn('const LOCK_KEY = "osrs-flipper.slot-locks.v1"', self.source)
+        self.assertIn("function lockSlot(", self.source)
+        self.assertIn("function unlockSlot(", self.source)
+        self.assertIn("lockedCommit", self.source)
+        self.assertIn("config.capital - lockedCommit", self.source)
+        self.assertIn("LIVE SCANNER NOW", self.source)
+        self.assertIn("SELL OFFER", self.source)
+
     def test_plan_uses_the_derived_slot_count_not_a_three_card_constant(self):
         self.assertNotIn("const PLAN_SIZE = 3", self.source)
-        self.assertIn("state.rows.slice(0, config.slots)", self.source)
+        self.assertIn("Array(config.slots).fill(null)", self.source)
+        self.assertIn("config.slots - state.slotLocks.length", self.source)
 
     def test_history_window_matches(self):
         for js_name, expected in (

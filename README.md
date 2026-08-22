@@ -229,6 +229,13 @@ cancel/reprice decision; partial inventory is collected and managed explicitly.
 It never places or automates an in-game offer. Cancelled offers remain useful
 censored observations instead of disappearing from the record.
 
+Any suggested slot can also be **locked** before the next refresh. The browser
+then preserves that trade's item, quantity, buy price and exact sell offer in
+local storage, while showing the newest scanner prices beside the saved target.
+Locked commitments and connected buy limits remain reserved when the other
+slots are re-planned; unlocking immediately returns both the slot and bank to
+the live allocator. Locks are isolated by account and Active/Overnight profile.
+
 The confidence badge means confidence in the model evidence, not certainty of
 execution. A price reconstructed from hourly averages can never be High;
 stale quotes and detected regime shifts are Speculative. Journal capture and
