@@ -86,6 +86,14 @@ COLUMNS_V2 = (
     ("cancel_count", "INTEGER DEFAULT 0"),
     ("cancelled_at", "INTEGER"),
     ("cancel_reason", "TEXT"),
+    # Horizon-aware predictions. Public Wiki data cannot tell whether a
+    # private offer filled, so these are calibrated only from user-recorded
+    # executions rather than inferred from market prints.
+    ("trade_mode", "TEXT"),
+    ("prediction_horizon_hours", "REAL"),
+    ("predicted_ranking_value", "REAL"),
+    ("predicted_stranded_probability", "REAL"),
+    ("predicted_downside_risk_gp", "REAL"),
 )
 
 
@@ -168,6 +176,12 @@ class Journal:
                 "predicted_buy_seconds": getattr(row, "expected_buy_seconds", None),
                 "predicted_sell_seconds": getattr(row, "expected_sell_seconds", None),
                 "predicted_p_fill": getattr(row, "p_fill", None),
+                "trade_mode": getattr(getattr(row, "trade_mode", None),
+                                      "value", None),
+                "prediction_horizon_hours": getattr(row, "horizon_hours", None),
+                "predicted_ranking_value": getattr(row, "ranking_value", None),
+                "predicted_stranded_probability": getattr(row, "p_stranded", None),
+                "predicted_downside_risk_gp": getattr(row, "downside_risk_gp", None),
                 "tax_exempt": int(bool(getattr(row, "tax_exempt", False))),
                 "factors_json": json.dumps(getattr(row, "factors", {}) or {}),
             })

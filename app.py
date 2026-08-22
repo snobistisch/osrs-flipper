@@ -116,7 +116,9 @@ def landing():
     with mid:
         st.title("🪙 Grand Exchange Flipper")
         st.markdown(
-            "Live F2P flip finder on OSRS Wiki real-time prices. Margins are "
+            "Live members-first decision terminal for OSRS Wiki real-time "
+            "prices. Members get an actionable eight-slot plan by default. "
+            "Margins are "
             "shown after GE tax, capped by buy limits and traded volume, and "
             "priced conservatively so a single outlier trade can't fool you.")
         with st.form("budget"):
@@ -139,13 +141,29 @@ def landing():
 
 def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfig, int]":
     with st.sidebar:
-        slots = st.selectbox("GE offer slots", [engine.F2P_SLOTS, engine.MEMBER_SLOTS],
-                             format_func=lambda s: "{} — {}".format(
-                                 s, "free-to-play" if s == engine.F2P_SLOTS
-                                 else "members"),
-                             help="Slots are the real bottleneck. Capital is "
-                                  "split across them in proportion to score, "
-                                  "not equally.")
+        st.header("Trading setup")
+        account = st.radio(
+            "Account", [engine.AccountType.MEMBERS,
+                        engine.AccountType.FREE_TO_PLAY], horizontal=True,
+            format_func=lambda value: ("Members · 8 slots" if value is
+                                       engine.AccountType.MEMBERS
+                                       else "Free-to-play · 3 slots"),
+            help="Account type determines both GE slots and item access; "
+                 "they cannot contradict each other.")
+        mode = st.radio(
+            "Strategy", [engine.TradeMode.ACTIVE, engine.TradeMode.OVERNIGHT],
+            horizontal=True,
+            format_func=lambda value: ("Active" if value is
+                                       engine.TradeMode.ACTIVE else "Overnight"),
+            help="Active maximizes expected GP per occupied slot-hour. "
+                 "Overnight maximizes risk-adjusted profit before you return.")
+        overnight_hours = engine.DEFAULT_OVERNIGHT_HOURS
+        if mode is engine.TradeMode.OVERNIGHT:
+            overnight_hours = st.select_slider(
+                "Back in", options=list(engine.OVERNIGHT_HORIZON_PRESETS),
+                value=engine.DEFAULT_OVERNIGHT_HOURS,
+                format_func=lambda value: "{:.0f} hours".format(value))
+        slots = account.slots
         st.metric("Budget", engine.format_gp(capital) + " gp",
                   delta="{} gp per flip if split evenly".format(
                       engine.format_gp(engine.capital_per_slot(capital, slots))),
@@ -154,9 +172,7 @@ def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfi
             del st.session_state["capital"]
             st.rerun()
 
-        include_members = st.checkbox("Include members items", value=False)
-
-        st.header("Display filters")
+        st.header("Optional filters")
         st.caption("These hide rows. Everything tradable is scored and shrunk "
                    "first, so narrowing the view never reorders what is left.")
         min_depth = st.slider("Min undercut room (gp)", 0, 50, 0,
@@ -201,7 +217,8 @@ def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfi
             return None
 
     return filters.FilterConfig(
-        capital=capital, slots=slots, include_members=include_members,
+        capital=capital, account=account, trade_mode=mode,
+        overnight_hours=overnight_hours,
         nature_rune_cost=nature_cost,
         max_quote_age=max_age or None, min_thin_volume_1h=min_vol,
         min_roi=min_roi / 100, min_undercut_depth=min_depth,
@@ -213,51 +230,87 @@ def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfi
 def ranked_table(rows, top_n):
     df = pd.DataFrame([{
         "Item": r.name, "Buy": r.buy, "List at": r.sell_listed_at,
-        "Margin": r.margin, "ROI %": r.roi * 100, "Room": r.undercut_depth,
-        "Qty": r.qty_per_window, "Tied up": r.capital_needed,
+        "Qty": r.allocated_quantity or r.qty_per_window,
+        "Expected profit": round(r.allocated_expected_gp if
+                                  r.allocated_expected_gp is not None
+                                  else r.expected_gp),
+        "ROI %": r.roi * 100,
         "Round trip": engine.format_duration(r.expected_total_seconds),
         "P(fill) %": r.p_fill * 100,
-        # Blank once the floor is too far below the price to be protection —
-        # "+3060%" on a 5 gp rune is true and tells you nothing.
-        "Alch floor %": (r.alch_distance * 100
-                         if r.alch_distance is not None
-                         and r.alch_distance < engine.DEFAULT_CALIBRATION.alch_relevant_distance
-                         else None),
-        "Fill %": r.fill_share * 100 if r.deep_checked else None,
-        "Reverts": r.mean_reverting if r.deep_checked else None,
-        "Measured": round(r.raw_gp_per_slot_hour),
-        "EV/slot/h": round(r.gp_per_slot_hour),
+        "Confidence": confidence_label(r),
+        "Decision value": round(r.ranking_value),
     } for r in rows[:top_n]])
     gp = st.column_config.NumberColumn(format="localized")
     st.dataframe(df, hide_index=True, width="stretch", column_config={
-        "Buy": gp, "Margin": gp, "Qty": gp, "Tied up": gp, "EV/slot/h": gp,
+        "Buy": gp, "Qty": gp, "Expected profit": gp, "Decision value": gp,
         "List at": st.column_config.NumberColumn(
             format="localized",
             help="Where to place the sell offer. The GE tax rounds down, so "
                  "every price inside a 50 gp band nets the seller the same — "
                  "the lowest one buys queue priority for free."),
-        "Room": st.column_config.NumberColumn(
-            help="Gp of price improvement you can afford per side. 0 means you "
-                 "cannot outbid the queue, which the fill time now prices."),
         "Round trip": st.column_config.TextColumn(
             help="Expected time for both legs at your queue position. This is "
                  "the denominator of EV/slot/h."),
         "P(fill) %": st.column_config.NumberColumn(
             format="%.0f%%", help="Chance both legs clear inside 4 hours."),
-        "Alch floor %": st.column_config.NumberColumn(
-            format="%.0f%%", help="How far the buy price sits above the high "
-            "alchemy value. Negative means alching pays more than the market — "
-            "a guaranteed exit. Small positive means limited downside."),
-        "Fill %": st.column_config.NumberColumn(
-            format="%.0f%%", help="Share of the last 14 days' volume that "
-            "traded at your prices — the last print is not the market."),
-        "Reverts": st.column_config.CheckboxColumn(
-            help="Whether the fitted OU process mean-reverts significantly. "
-                 "Where it does not, 'above its median' carries no prediction."),
-        "Measured": st.column_config.NumberColumn(
-            format="localized", help="Score before shrinkage."),
         "ROI %": st.column_config.NumberColumn(format="%.1f%%"),
     })
+
+
+def confidence_label(row) -> str:
+    """Systematic player-facing label from posterior evidence and history."""
+    history_support = row.deep_checked and row.fill_share is not None
+    shrink_retained = (row.ranking_value / row.raw_ranking_value
+                       if row.raw_ranking_value > 0 else 0.0)
+    if (row.edge_probability >= 0.80 and history_support and row.p_fill >= 0.65
+            and row.thin_volume_1h >= 200 and shrink_retained >= 0.85):
+        return "High"
+    if row.edge_probability >= 0.55 and row.p_fill >= 0.40:
+        return "Medium"
+    return "Speculative"
+
+
+def slot_plan(rows, config):
+    planned = [row for row in rows[:config.slots]
+               if (row.allocated_quantity or 0) > 0 and row.expected_gp > 0]
+    st.subheader("Best GE setup right now")
+    objective = ("expected GP per occupied slot-hour" if config.trade_mode is
+                 engine.TradeMode.ACTIVE else
+                 "risk-adjusted profit over {:.0f} unattended hours".format(
+                     config.horizon_hours))
+    st.caption("{} account · {} slots · ranked on {}.".format(
+        "Members" if config.account is engine.AccountType.MEMBERS else "F2P",
+        config.slots, objective))
+    if not planned:
+        st.info("No defensible positive-EV setup is available right now. Keep "
+                "the slots open, loosen optional filters, switch strategy, or "
+                "refresh when the market changes.")
+        return
+    for start in range(0, len(planned), 4):
+        columns = st.columns(4)
+        for offset, row in enumerate(planned[start:start + 4]):
+            slot = start + offset + 1
+            with columns[offset]:
+                st.markdown("**SLOT {} · {}**".format(slot, row.name))
+                st.code("BUY  {:,} × {:,}\nSELL {:,}\nBANK  {}".format(
+                    row.buy, row.allocated_quantity, row.sell_listed_at,
+                    engine.format_gp(row.allocated_capital or 0)))
+                expected = (row.allocated_expected_gp if
+                            row.allocated_expected_gp is not None else
+                            row.expected_gp)
+                st.caption("EV {:,.0f} gp · fill {:.0%} · {} · {} confidence"
+                           .format(expected, row.p_fill,
+                                   engine.format_duration(
+                                       row.expected_total_seconds),
+                                   confidence_label(row)))
+                if st.button("Inspect", key="slot-{}-{}".format(slot,
+                                                                  row.item_id)):
+                    st.session_state.selected_item_id = row.item_id
+    unused = config.slots - len(planned)
+    if unused:
+        st.warning("{} slot{} better left open: the remaining candidates do "
+                   "not have positive risk-adjusted EV or cannot buy one "
+                   "executable unit.".format(unused, "" if unused == 1 else "s"))
     st.caption("EV/slot/h ranks the table: expected profit divided by the time "
                "the slot is actually occupied, then shrunk toward the market "
                "average by an amount set by how much volume the estimate rests "
@@ -409,25 +462,37 @@ def detail_view(row):
                    row.tax, " (tax-exempt item)" if row.tax_exempt else ""))
     right.metric("Round trip",
                  engine.format_duration(row.expected_total_seconds),
-                 delta="{:.0%} chance both legs clear in 4h".format(row.p_fill),
+                 delta="{:.0%} chance both legs clear in {:.0f}h".format(
+                     row.p_fill, row.horizon_hours),
                  delta_color="off",
                  help="Buy leg {}, sell leg {}. This is the time the slot is "
                       "occupied, and the denominator of the ranking metric."
                       .format(engine.format_duration(row.expected_buy_seconds),
                               engine.format_duration(row.expected_sell_seconds)))
-    far.metric("Expected / slot / hour",
-               "{:,} gp".format(round(row.gp_per_slot_hour)),
-               delta="{:,} before shrinkage".format(
-                   round(row.raw_gp_per_slot_hour)),
+    active = row.trade_mode is engine.TradeMode.ACTIVE
+    far.metric("Expected / slot / hour" if active else
+               "Expected profit before return",
+               "{:,} gp".format(round(row.gp_per_slot_hour if active else
+                                      row.ranking_value)),
+               delta="{:,} before shrinkage".format(round(
+                   row.raw_gp_per_slot_hour if active else
+                   row.raw_ranking_value)),
                delta_color="off",
                help="{:,} units, {:,} gp tied up.".format(
                    row.qty_per_window, row.capital_needed))
 
+    if not active:
+        st.warning("{:.0%} chance you return holding bought inventory; the "
+                   "model subtracts {:,.0f} gp of stress downside from the "
+                   "overnight EV.".format(row.p_stranded,
+                                           row.downside_risk_gp))
+
     if row.allocated_capital is not None:
-        st.info("Score-weighted allocation: commit {} gp of the bank to this "
-                "flip rather than an equal {} gp share.".format(
+        st.info("Executable portfolio allocation: commit {} gp ({} units) "
+                "to this slot; buy limits, fillable quantity and whole-item "
+                "rounding are already applied.".format(
                     engine.format_gp(row.allocated_capital),
-                    engine.format_gp(row.capital_needed)), icon="💰")
+                    row.allocated_quantity or 0), icon="💰")
 
     with st.expander("Where the score went"):
         st.caption("Each discount is stored separately so a shortfall can be "
@@ -561,17 +626,29 @@ def main():
 
     with flip_tab:
         if not result.rows:
-            st.info("Nothing to show. Loosen the display filters in the "
-                    "sidebar, or the market is genuinely offering nothing "
-                    "right now.")
+            st.info("No flips meet the current execution and display criteria. "
+                    "Loosen optional filters, switch Active ↔ Overnight, or "
+                    "refresh when the market changes.")
         else:
-            ranked_table(result.rows, top_n)
-            st.subheader("Detail")
-            row = st.selectbox(
-                "Item", result.rows[:top_n],
-                format_func=lambda r: "{} — {:,} gp margin, {:,} gp/slot/h"
-                .format(r.name, r.margin, round(r.gp_per_slot_hour)))
-            detail_view(row)
+            slot_plan(result.rows, config)
+            list_column, detail_column = st.columns([0.9, 1.35], gap="large")
+            with list_column:
+                st.subheader("Ranked opportunities")
+                ranked_table(result.rows, top_n)
+                selected_id = st.session_state.get(
+                    "selected_item_id", result.rows[0].item_id)
+                choices = result.rows[:top_n]
+                index = next((i for i, candidate in enumerate(choices)
+                              if candidate.item_id == selected_id), 0)
+                row = st.selectbox(
+                    "Inspect item", choices, index=index,
+                    format_func=lambda candidate: "{} · EV {:,.0f} · fill {:.0%}"
+                    .format(candidate.name, candidate.ranking_value,
+                            candidate.p_fill))
+                st.session_state.selected_item_id = row.item_id
+            with detail_column:
+                st.subheader("Selected item · chart and execution")
+                detail_view(row)
 
     with merch_tab:
         st.caption("A year of daily prices per item, for positions held over "

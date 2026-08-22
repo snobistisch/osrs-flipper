@@ -449,6 +449,81 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(engine.capital_per_slot(999, 3), 333)
         self.assertEqual(engine.capital_per_slot(1, 8), 1)
 
+    def test_executable_portfolio_funds_whole_items_and_leaves_bad_slots_open(self):
+        amounts = engine.allocate_portfolio(
+            [100.0, 50.0, -1.0], 1_000, [100, 250, 10],
+            [500, 1_000, 100], 3)
+        self.assertEqual(amounts[0] % 100, 0)
+        self.assertEqual(amounts[1] % 250, 0)
+        self.assertEqual(amounts[2], 0)
+        self.assertLessEqual(sum(amounts), 1_000)
+
+
+class ProfileTests(unittest.TestCase):
+    def test_first_time_profile_is_members_with_eight_slots(self):
+        profile = engine.TradingProfile()
+        self.assertEqual(profile.account, engine.AccountType.MEMBERS)
+        self.assertEqual(profile.slots, 8)
+        self.assertTrue(profile.include_members)
+
+    def test_f2p_profile_is_coherent(self):
+        profile = engine.TradingProfile(account=engine.AccountType.FREE_TO_PLAY)
+        self.assertEqual(profile.slots, 3)
+        self.assertFalse(profile.include_members)
+
+    def test_overnight_horizon_is_validated(self):
+        with self.assertRaises(ValueError):
+            engine.TradingProfile(mode=engine.TradeMode.OVERNIGHT,
+                                  overnight_hours=30)
+
+
+class ModeTests(unittest.TestCase):
+    def score(self, **overrides):
+        values = dict(
+            buy=1_000, sell=1_100, margin=78, qty=10, depth=20,
+            buy_volume_1h=1_000, sell_volume_1h=1_000, quote_age=0,
+            ofi=0.0, drift=0.0, now=1_700_000_000,
+            highalch=None, nature_rune_cost=100)
+        values.update(overrides)
+        return engine.score_flip(**values)
+
+    def test_round_trip_probability_respects_sequential_legs(self):
+        joint = engine.round_trip_probability(HOUR, HOUR, 2 * HOUR)
+        independent = engine.fill_probability(HOUR, 2 * HOUR) ** 2
+        self.assertLess(joint, independent)
+
+    def test_active_and_overnight_rank_genuinely_different_objectives(self):
+        fast_small = self.score(qty=2, margin=100, buy_volume_1h=20_000,
+                                sell_volume_1h=20_000,
+                                mode=engine.TradeMode.ACTIVE)
+        slow_large = self.score(qty=30, margin=200, buy_volume_1h=40,
+                                sell_volume_1h=40,
+                                mode=engine.TradeMode.ACTIVE)
+        self.assertGreater(fast_small.ranking_value,
+                           slow_large.ranking_value)
+
+        fast_night = self.score(qty=2, margin=100, buy_volume_1h=20_000,
+                                sell_volume_1h=20_000,
+                                mode=engine.TradeMode.OVERNIGHT,
+                                horizon_hours=8)
+        slow_night = self.score(qty=30, margin=200, buy_volume_1h=40,
+                                sell_volume_1h=40,
+                                mode=engine.TradeMode.OVERNIGHT,
+                                horizon_hours=8)
+        self.assertGreater(slow_night.ranking_value,
+                           fast_night.ranking_value)
+
+    def test_overnight_penalises_stranded_volatile_inventory(self):
+        safe = self.score(mode=engine.TradeMode.OVERNIGHT, horizon_hours=8,
+                          sigma_daily=0.02, drift=0.0, ofi=0.0)
+        dangerous = self.score(mode=engine.TradeMode.OVERNIGHT,
+                               horizon_hours=8, sigma_daily=0.35,
+                               drift=-0.08, ofi=-0.8, margin=300,
+                               qty=100, buy_volume_1h=100,
+                               sell_volume_1h=100)
+        self.assertGreater(dangerous.downside_risk_gp, safe.downside_risk_gp)
+        self.assertLess(dangerous.ranking_value, dangerous.raw_profit)
+
 
 class SlotHourTests(unittest.TestCase):
     def test_profit_over_occupied_time(self):

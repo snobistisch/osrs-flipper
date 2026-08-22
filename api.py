@@ -10,6 +10,7 @@ Acceptable-use constraints (https://prices.runescape.wiki):
 from __future__ import annotations
 
 import json
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -89,6 +90,7 @@ class WikiClient:
         self.cache_dir = Path(cache_dir)
         self.base_url = base_url
         self._memory: Dict[str, Tuple[float, object]] = {}
+        self.stale_keys = set()
 
     # -- transport -----------------------------------------------------------
 
@@ -97,11 +99,31 @@ class WikiClient:
         if params:
             url += "?" + urllib.parse.urlencode(params)
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                body = response.read()
-        except (urllib.error.URLError, OSError) as exc:
-            raise ApiError("GET {} failed: {}".format(url, exc)) from exc
+        body = None
+        last_error = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    body = response.read()
+                break
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if exc.code not in (429, 500, 502, 503, 504):
+                    break
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                try:
+                    delay = min(5.0, float(retry_after))
+                except (TypeError, ValueError):
+                    delay = 0.35 * (2 ** attempt) + random.random() * 0.10
+                if attempt < 2:
+                    time.sleep(delay)
+            except (urllib.error.URLError, OSError) as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.35 * (2 ** attempt) + random.random() * 0.10)
+        if body is None:
+            raise ApiError("GET {} failed after 3 attempts: {}".format(
+                url, last_error)) from last_error
         try:
             return json.loads(body)
         except json.JSONDecodeError as exc:
@@ -112,7 +134,17 @@ class WikiClient:
         hit = self._memory.get(key)
         if hit is not None and now - hit[0] < ttl:
             return hit[1]
-        value = fetch()
+        try:
+            value = fetch()
+        except ApiError:
+            # A briefly stale complete snapshot is safer than a half-rendered
+            # terminal.  Callers can surface stale_keys while the next refresh
+            # retries; a cold start still fails loudly.
+            if hit is not None:
+                self.stale_keys.add(key)
+                return hit[1]
+            raise
+        self.stale_keys.discard(key)
         self._memory[key] = (now, value)
         return value
 
@@ -186,8 +218,13 @@ class WikiClient:
                 raw = None
         if raw is None:
             raw = self._get("/mapping")
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(raw))
+            try:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_suffix(".tmp")
+                temporary.write_text(json.dumps(raw))
+                temporary.replace(path)
+            except OSError:
+                pass
         if not isinstance(raw, list):
             raise ApiError("/mapping: expected a list")
         items = {}

@@ -86,7 +86,7 @@
 #plan { margin: 0 0 1.4rem; }
 #plan-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(205px, 1fr));
   gap: 0.6rem;
 }
 .plan-card {
@@ -120,6 +120,19 @@
   letter-spacing: 0.02em;
 }
 .plan-warn { color: #ffb59a; font-size: 0.78rem; margin-top: 0.3rem; }
+.confidence { text-transform: uppercase; letter-spacing: 0.06em; }
+.confidence-high { color: var(--good); }
+.confidence-medium { color: var(--gold); }
+.confidence-speculative { color: var(--down); }
+#mode-summary {
+  display:flex; align-items:center; justify-content:space-between; gap:1rem;
+  margin:0 0 .8rem; padding:.55rem .75rem; background:var(--panel-dark);
+  border:1px solid var(--rule); font-family:var(--mono); font-size:.82rem;
+}
+#mode-summary strong { color:var(--gold-bright); }
+#workbench { display:grid; grid-template-columns:minmax(480px,.9fr) minmax(500px,1.1fr); gap:.8rem; align-items:start; }
+#workbench #flip-wrap { max-height:740px; overflow:auto; }
+#workbench #detail { position:sticky; top:.6rem; margin:0; }
 .hold-btn {
   background: var(--panel-dark);
   color: var(--text-dim);
@@ -172,6 +185,9 @@ input[type="text"], select {
   font: inherit;
   padding: 0.5rem 0.7rem;
   width: 100%;
+}
+button:focus-visible, input:focus-visible, select:focus-visible, tr:focus-visible {
+  outline: 3px solid var(--gold-bright); outline-offset: 2px;
 }
 input[type="range"] { width: 100%; accent-color: var(--gold); }
 input[type="checkbox"] { accent-color: var(--gold); width: 1rem; height: 1rem; }
@@ -485,12 +501,26 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
 }
 .err { color: var(--down); }
 #tab-blurb { font-size: 0.85rem; }
+#filter-details { margin-bottom:1rem; }
+#filter-details > summary {
+  cursor:pointer; color:var(--gold); font:600 .9rem Cinzel,serif;
+  padding:.35rem 0; margin-bottom:.45rem;
+}
 @media (max-width: 820px) {
   #app { grid-template-columns: 1fr; }
   #side { border-right: none; border-bottom: 3px solid var(--edge); }
   #termbar { padding: 0.4rem 0.6rem; }
   #termstat { font-size: 0.7rem; gap: 0.6rem; }
   .metrics { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  #workbench { grid-template-columns:1fr; }
+  #workbench #flip-wrap { max-height:none; }
+  #workbench #detail { position:static; }
+  #plan-cards { grid-template-columns:1fr; }
+  #flips th:nth-child(3), #flips td:nth-child(3),
+  #flips th:nth-child(6), #flips td:nth-child(6),
+  #flips th:nth-child(7), #flips td:nth-child(7),
+  #flips th:nth-child(9), #flips td:nth-child(9) { display:none; }
+  #main { padding:.75rem; }
   #keys { display: none; }   /* no keyboard to hint at */
 }
 </style>
@@ -507,10 +537,9 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     tax-exempt list and the calibration constants here match the Python side,
     so those two cannot drift silently.
   -->
-  <p>Live flip finder for Old School RuneScape, built on the OSRS Wiki real-time
-     prices API. It ranks by <strong>expected gp per offer slot per hour</strong>,
-     not by the margin on the screen — because a quoted margin is only profit if
-     both legs of the flip actually fill.</p>
+  <p>A members-first Grand Exchange decision terminal. Enter your bank, choose
+     <strong>Active</strong> or <strong>Overnight</strong>, and get an executable
+     eight-slot setup from live OSRS Wiki market data.</p>
   <details class="panel" id="strategy">
     <summary>How the ranking thinks — five reasons a quoted margin isn't profit</summary>
     <h3>1. A slot is time, not a container</h3>
@@ -600,7 +629,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     <div class="row"><button id="start">Start flipping</button></div>
   </div>
   <footer>
-    Free-to-play items by default; members items are one checkbox away.
+    Members and eight GE slots by default; free-to-play remains one coherent profile.
     Not affiliated with Jagex or the OSRS Wiki.
   </footer>
 </section>
@@ -615,14 +644,30 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
       <button id="change-budget">Change budget</button>
     </div>
     <div class="field">
-      <label for="f-slots">GE offer slots</label>
-      <select id="f-slots">
-        <option value="3" selected>3 — free-to-play</option>
-        <option value="8">8 — members</option>
+      <label for="f-account">Account</label>
+      <select id="f-account">
+        <option value="members" selected>Members — 8 slots + all items</option>
+        <option value="free-to-play">Free-to-play — 3 slots</option>
       </select>
-      <div class="small dim">Slots are the real bottleneck. Your budget is
-        split across them, because you flip several items at once.</div>
+      <div class="small dim">Account type determines both slot count and item
+        access. Contradictory states are impossible.</div>
     </div>
+    <div class="field">
+      <label for="f-strategy">Flip strategy</label>
+      <select id="f-strategy">
+        <option value="active" selected>Active — while I'm playing</option>
+        <option value="overnight">Overnight — while I'm offline</option>
+      </select>
+    </div>
+    <div class="field hidden" id="overnight-field">
+      <label for="f-horizon">Back in</label>
+      <select id="f-horizon">
+        <option value="6">6 hours</option><option value="8" selected>8 hours</option>
+        <option value="10">10 hours</option><option value="12">12 hours</option>
+      </select>
+    </div>
+    <details id="filter-details" open>
+      <summary>Optional display filters</summary>
     <div class="field-head">
       <h2 style="margin:0">Display filters</h2>
       <span class="hint-wrap">
@@ -716,12 +761,10 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
           stay scored either way; this only hides them.</span>
       </span>
     </div>
-    <div class="field checkline">
-      <input type="checkbox" id="f-members">
-      <label for="f-members" style="margin:0">Include members items</label>
-    </div>
+    </details>
     <div class="field">
       <button id="refresh">Refresh prices</button>
+      <button id="reset-preferences" style="margin-top:.45rem">Reset preferences</button>
       <div class="small dim" style="margin-top:0.5rem">Refetches at most once per
         30 s, per the wiki's usage policy.</div>
     </div>
@@ -748,9 +791,11 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
 
     <div id="status" class="small dim"></div>
 
+    <div id="mode-summary"><strong>ACTIVE FLIPPING</strong><span>Members · 8 slots · maximize realistic slot turnover</span></div>
+
     <section id="plan" class="hidden">
       <div class="panel-bar">
-        <h2>What to do now</h2>
+        <h2>Best GE setup right now</h2>
         <div class="figure" id="plan-figure"></div>
       </div>
       <div id="plan-cards"></div>
@@ -758,35 +803,25 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     </section>
 
     <div class="table-wrap" id="flip-wrap">
-      <table id="flips">
+      <table id="flips" aria-label="Ranked Grand Exchange opportunities">
         <thead><tr>
           <th data-sort="name">Item</th>
           <th data-sort="buy">Buy</th>
           <th data-sort="listAt" title="Where to place the sell offer. The GE tax rounds down, so every price inside a 50 gp band nets the seller the same — the lowest one buys queue priority for free.">Sell at</th>
-          <th data-sort="margin">Margin</th>
+          <th data-sort="allocatedQty">Qty</th>
+          <th data-sort="expected">Expected</th>
           <th data-sort="roi">ROI</th>
-          <th data-sort="depth" title="Gp of price improvement you can afford per side. 0 means you cannot outbid the queue, which the fill time prices.">Room</th>
-          <th data-sort="qty">Qty</th>
-          <th data-sort="capitalNeeded">Tied up</th>
           <th data-sort="totalSeconds" title="Expected time for both legs at your queue position. This is the denominator of EV/slot/h.">Round trip</th>
-          <th data-sort="pFill" title="Chance both legs clear inside four hours">P(fill)</th>
-          <th data-sort="alchDistance" title="How far the buy price sits above the high alchemy value. Negative means alching pays more than the market — a guaranteed exit.">Alch</th>
-          <th data-sort="fillShare" title="Share of the last 14 days' volume that traded at your prices">Fill</th>
-          <th data-sort="volumeRatio" title="Units traded this hour against the 14-day average hourly rate. 15x means something is happening; 0.2x means the item has gone quiet.">Vol</th>
-          <th data-sort="tags" title="What kind of item this is, and whether its price is standing away from its own 14-day median">Type</th>
-          <th data-sort="rawPerSlotHour" title="The score before shrinkage">Measured</th>
-          <th data-sort="perSlotHour" title="Expected gp per offer slot per hour, after every discount and after shrinkage">EV/slot/h</th>
+          <th data-sort="pFill">Round-trip chance</th>
+          <th data-sort="confidence">Confidence</th>
+          <th data-sort="rankingValue" id="ranking-heading">EV/slot/h</th>
         </tr></thead>
         <tbody></tbody>
       </table>
     </div>
-    <p class="small dim" id="flip-note"><strong>EV/slot/h</strong> is the ranking metric:
-      expected profit divided by the time the slot is actually occupied, then
-      shrunk toward the market average by an amount set by how much volume the
-      estimate rests on. A wide <strong>Measured</strong>-to-EV gap means the
-      measured number was mostly the thinness of the data behind it.
-      <strong>Round trip</strong> is why a small quick flip can beat a large
-      slow one. Click a row for price history and where its profit went.</p>
+    <p class="small dim" id="flip-note">The primary table contains only the
+      numbers needed to act. Click a row for the live chart, execution context,
+      rationale and advanced model diagnostics.</p>
 
     <div class="table-wrap hidden" id="merch-wrap">
       <table id="merch">
@@ -838,7 +873,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
           <div class="sub" id="d-trip-sub"></div>
         </div>
         <div class="metric">
-          <div class="label">Expected / slot / hour</div>
+          <div class="label" id="d-profit-label">Expected / slot / hour</div>
           <div class="value" id="d-profit"></div>
           <div class="sub" id="d-qty"></div>
         </div>
@@ -906,6 +941,11 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
 const TAX_RATE = 0.02;
 const TAX_CAP = 5_000_000;
 const WINDOW_HOURS = 4;                    // the buy-limit window
+const F2P_SLOTS = 3;
+const MEMBER_SLOTS = 8;
+const DEFAULT_ACCOUNT = "members";
+const DEFAULT_STRATEGY = "active";
+const DEFAULT_OVERNIGHT_HOURS = 8;
 const MAX_CASH_STACK = 2_147_483_647;
 
 /* Prices are whole gp, so this is the smallest move the market can make and
@@ -1016,7 +1056,8 @@ const CAL = {
   horizon_hours: WINDOW_HOURS,
 };
 
-const legHorizonHours = () => CAL.horizon_hours / LEGS_PER_ROUND_TRIP;
+const legHorizonHours = (horizonHours = CAL.horizon_hours) =>
+  horizonHours / LEGS_PER_ROUND_TRIP;
 
 /* ---- tax ---- */
 
@@ -1186,6 +1227,25 @@ function expectedFillSeconds(qty, rate) {
 function fillProbability(expectedSeconds, horizonSeconds) {
   if (!isFinite(expectedSeconds) || expectedSeconds <= 0 || horizonSeconds <= 0) return 0;
   return 1 - Math.exp(-horizonSeconds / expectedSeconds);
+}
+
+function roundTripProbability(buySeconds, sellSeconds, horizonSeconds) {
+  if (!(horizonSeconds > 0) || !(buySeconds > 0) || !(sellSeconds > 0) ||
+      !isFinite(buySeconds) || !isFinite(sellSeconds)) return 0;
+  const rb = 1 / buySeconds, rs = 1 / sellSeconds;
+  if (Math.abs(rb - rs) <= 1e-9 * Math.max(rb, rs)) {
+    const x = rb * horizonSeconds;
+    return Math.max(0, Math.min(1, 1 - Math.exp(-x) * (1 + x)));
+  }
+  const survival = (rs * Math.exp(-rb * horizonSeconds) -
+    rb * Math.exp(-rs * horizonSeconds)) / (rs - rb);
+  return Math.max(0, Math.min(1, 1 - survival));
+}
+
+function strandedInventoryProbability(buySeconds, sellSeconds, horizonSeconds) {
+  return Math.max(0, Math.min(1,
+    fillProbability(buySeconds, horizonSeconds) -
+    roundTripProbability(buySeconds, sellSeconds, horizonSeconds)));
 }
 
 /* Units the market can hand you on ONE leg inside the horizon. This replaces
@@ -1435,12 +1495,15 @@ function scoreFlip(o) {
   const sellSeconds = expectedFillSeconds(o.qty, sellRate);
   const totalSeconds = buySeconds + sellSeconds;
 
-  const horizonSeconds = CAL.horizon_hours * SECONDS_PER_HOUR;
+  const mode = o.mode || DEFAULT_STRATEGY;
+  const horizonHours = o.horizonHours || (mode === "overnight"
+    ? DEFAULT_OVERNIGHT_HOURS : CAL.horizon_hours);
+  const horizonSeconds = horizonHours * SECONDS_PER_HOUR;
   const pBuy = fillProbability(buySeconds, horizonSeconds);
-  // The sell leg only gets what is left of the horizon after the buy leg.
-  const remaining = Math.max(0, horizonSeconds - Math.min(buySeconds, horizonSeconds));
-  const pSell = fillProbability(sellSeconds, remaining);
-  const pBoth = pBuy * pSell;
+  const pBoth = roundTripProbability(buySeconds, sellSeconds, horizonSeconds);
+  const pStranded = strandedInventoryProbability(
+    buySeconds, sellSeconds, horizonSeconds);
+  const pSell = pBuy > 0 ? pBoth / pBuy : 0;
 
   let sigma = o.sigmaDaily != null ? o.sigmaDaily : (o.ou ? o.ou.sigma : null);
   if (sigma == null || sigma <= 0) sigma = CAL.default_sigma_daily;
@@ -1455,20 +1518,39 @@ function scoreFlip(o) {
   const update = updateRiskFactor(o.now, totalSeconds);
 
   const rawProfit = o.margin * o.qty;
-  const expected = rawProfit * pBoth * adverse * hold * stale * reversion * alch * update;
+  let downsideRisk = 0;
+  let expected;
+  if (mode === "overnight") {
+    let stressMove = 1.65 * sigma * Math.sqrt(horizonHours / HOURS_PER_DAY);
+    stressMove += Math.max(0, -o.drift) * Math.sqrt(horizonHours);
+    stressMove += Math.max(0, -o.ofi) * 0.025;
+    stressMove = Math.max(0, Math.min(0.50, stressMove));
+    const floorLoss = floor == null ? null : Math.max(0, (o.buy - floor) / o.buy);
+    if (floorLoss != null && floorLoss < CAL.alch_relevant_distance) {
+      stressMove = Math.min(stressMove, floorLoss);
+    }
+    downsideRisk = o.qty * o.buy * pStranded * stressMove;
+    expected = rawProfit * pBoth * adverse * stale * reversion * alch * update -
+      downsideRisk;
+  } else {
+    expected = rawProfit * pBoth * adverse * hold * stale * reversion * alch * update;
+  }
   const hours = totalSeconds / SECONDS_PER_HOUR;
   const perSlotHour = hours > 0 && isFinite(hours) ? expected / hours : 0;
+  const rankingValue = mode === "overnight" ? expected : perSlotHour;
 
   return {
     qty: o.qty, margin: o.margin, rawProfit, capitalNeeded: o.qty * o.buy,
     share, buySeconds, sellSeconds, totalSeconds, pFillBuy: pBuy,
-    pFillSell: pSell, pFill: pBoth,
+    pFillSell: pSell, pFill: pBoth, pStranded,
+    expectedRoundTripQty: o.qty * pBoth,
     factors: {
       "both legs fill": pBoth, "adverse selection": adverse,
-      "holding risk": hold, "quote staleness": stale,
+      ...(mode === "active" ? { "holding risk": hold } : {}),
+      "quote staleness": stale,
       "mean reversion": reversion, "alch floor": alch, "update risk": update,
     },
-    expected, perSlotHour,
+    expected, perSlotHour, rankingValue, downsideRisk, mode, horizonHours,
     alchFloorGp: floor, alchDistance: distance,
     alchArbitrageGp: distance != null && distance <= 0 && floor != null
       ? floor - o.buy : null,
@@ -1513,9 +1595,9 @@ function empiricalBayes(estimates, noiseVariances) {
 /* Volume is the sample size behind each estimate: an item quoted off 40,000
    traded units is measured, one quoted off twelve is a rumour. */
 function shrinkScores(rows) {
-  const scored = rows.filter((r) => r.rawPerSlotHour > 0);
+  const scored = rows.filter((r) => r.rawRankingValue > 0);
   if (!scored.length) return { applied: false, tau2: 0, centreGp: 0 };
-  const logs = scored.map((r) => Math.log(r.rawPerSlotHour));
+  const logs = scored.map((r) => Math.log(r.rawRankingValue));
   const variances = scored.map((r) => {
     const count = Math.max(1, r.volume);
     const sampling = CAL.score_noise_scale / Math.sqrt(count);
@@ -1523,15 +1605,22 @@ function shrinkScores(rows) {
   });
   const fit = empiricalBayes(logs, variances);
   scored.forEach((row, i) => {
-    row.perSlotHour = Math.exp(fit.values[i]);
-    const kept = row.perSlotHour / row.rawPerSlotHour;
+    row.warnings = row.warnings.filter((note) => !note.startsWith("score cut "));
+    row.rankingValue = Math.exp(fit.values[i]);
+    row.shrinkWeight = fit.weights[i];
+    if (row.mode === "active") row.perSlotHour = row.rankingValue;
+    const kept = row.rankingValue / row.rawRankingValue;
     if (kept < 0.85) {
       row.warnings = [...row.warnings,
         `score cut ${Math.round((1 - kept) * 100)}% by shrinkage — it rests on ` +
         `${num(row.volume)} units/h of volume, too little to take at face value`];
     }
   });
-  for (const row of rows) if (row.rawPerSlotHour <= 0) row.perSlotHour = row.rawPerSlotHour;
+  for (const row of rows) if (row.rawRankingValue <= 0) {
+    row.rankingValue = row.rawRankingValue;
+    row.shrinkWeight = 0;
+    if (row.mode === "active") row.perSlotHour = row.rawPerSlotHour;
+  }
   return { applied: true, tau2: fit.tau2, centreGp: Math.exp(fit.centre) };
 }
 
@@ -1540,24 +1629,45 @@ function shrinkScores(rows) {
    absorb 100k and no more, so a third of a 3m bank sits idle while the 50k
    item that could have used it is capped. */
 function allocateCapital(rows, capital, slots) {
-  const ranked = rows.slice(0, Math.max(1, slots));
-  const total = ranked.reduce((s, r) => s + Math.max(0, r.perSlotHour), 0);
-  if (total <= 0) { ranked.forEach((r) => { r.allocated = 0; }); return; }
-  ranked.forEach((r) => {
-    r.allocated = r.perSlotHour > 0 ? Math.floor(capital * (r.perSlotHour / total)) : 0;
-  });
-  for (let pass = 0; pass < 3; pass++) {
-    let spare = 0;
-    for (const r of ranked) {
-      if (r.allocated > r.capitalNeeded) { spare += r.allocated - r.capitalNeeded; r.allocated = r.capitalNeeded; }
-    }
-    if (spare <= 0) break;
-    const hungry = ranked.filter((r) => r.perSlotHour > 0 && r.capitalNeeded > r.allocated);
-    if (!hungry.length) break;
-    const weight = hungry.reduce((s, r) => s + r.perSlotHour, 0);
-    if (weight <= 0) break;
-    for (const r of hungry) r.allocated += Math.floor(spare * (r.perSlotHour / weight));
+  const ranked = rows.slice(0, Math.max(0, slots));
+  ranked.forEach((r) => { r.allocated = 0; r.allocatedQty = 0; r.allocatedExpected = 0; });
+  let remaining = capital;
+  const seeded = [];
+  for (const r of ranked) {
+    if (!(r.rankingValue > 0) || !(r.expected > 0) || remaining < r.buy) continue;
+    r.allocated = r.buy;
+    remaining -= r.buy;
+    seeded.push(r);
   }
+  for (let pass = 0; pass < ranked.length + 3; pass++) {
+    const hungry = seeded.filter((r) => r.allocated + r.buy <= r.capitalNeeded);
+    if (!hungry.length || remaining < Math.min(...hungry.map((r) => r.buy))) break;
+    const weight = hungry.reduce((sum, r) => sum + r.rankingValue, 0);
+    let progressed = false;
+    for (const r of hungry) {
+      let grant = Math.min(r.capitalNeeded - r.allocated,
+        Math.floor(remaining * r.rankingValue / weight));
+      grant -= grant % r.buy;
+      if (grant <= 0 && remaining >= r.buy) grant = r.buy;
+      grant = Math.min(grant, remaining);
+      grant -= grant % r.buy;
+      if (grant > 0) { r.allocated += grant; remaining -= grant; progressed = true; }
+    }
+    if (!progressed) break;
+  }
+  for (const r of ranked) {
+    r.allocatedQty = r.buy > 0 ? Math.floor(r.allocated / r.buy) : 0;
+    r.allocatedExpected = r.qty > 0 ? r.expected * r.allocatedQty / r.qty : 0;
+  }
+}
+
+function confidenceLabel(row) {
+  const retained = row.rawRankingValue > 0
+    ? row.rankingValue / row.rawRankingValue : 0;
+  if ((row.shrinkWeight || 0) >= 0.60 && row.deep && row.pFill >= 0.65 &&
+      row.volume >= 200 && retained >= 0.85) return "high";
+  if ((row.shrinkWeight || 0) >= 0.25 && row.pFill >= 0.40) return "medium";
+  return "speculative";
 }
 
 /* ---- formatting ---- */
@@ -2174,17 +2284,46 @@ const MAPPING_KEY = "osrs-flipper.mapping.v3";
 const memo = new Map();
 
 async function getJson(path) {
-  const res = await fetch(BASE + path, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`${path} returned HTTP ${res.status}`);
-  return res.json();
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const res = await fetch(BASE + path, {
+        headers: { Accept: "application/json" }, signal: controller.signal,
+      });
+      if (!res.ok) {
+        const retryable = res.status === 429 || res.status >= 500;
+        if (!retryable) throw new Error(`${path} returned HTTP ${res.status}`);
+        throw new Error(`${path} temporarily returned HTTP ${res.status}`);
+      }
+      const value = await res.json();
+      clearTimeout(timeout);
+      return value;
+    } catch (error) {
+      lastError = error;
+      clearTimeout(timeout);
+      if (attempt < 2) await new Promise((resolve) =>
+        setTimeout(resolve, 350 * 2 ** attempt + Math.random() * 100));
+    }
+  }
+  throw lastError || new Error(`${path} failed`);
 }
 
 async function cached(key, ttl, fetcher) {
   const hit = memo.get(key);
   if (hit && Date.now() - hit.at < ttl) return hit.value;
-  const value = await fetcher();
-  memo.set(key, { at: Date.now(), value });
-  return value;
+  try {
+    const value = await fetcher();
+    memo.set(key, { at: Date.now(), value });
+    return value;
+  } catch (error) {
+    if (hit) {
+      state.feedStale = true;
+      return hit.value;
+    }
+    throw error;
+  }
 }
 
 const fetchLatest = () => cached("latest", LATEST_TTL, async () => {
@@ -2448,7 +2587,10 @@ function flipWarnings(row, breakdown, affordable, exempt) {
     notes.push(`expected round trip ${formatDuration(breakdown.totalSeconds)} — the slot is the cost, not the gp`);
   }
   if (breakdown.pFill < 0.25) {
-    notes.push(`only ${pctOf(breakdown.pFill)} chance both legs clear inside 4h`);
+    notes.push(`only ${pctOf(breakdown.pFill)} chance both legs clear inside ${breakdown.horizonHours}h`);
+  }
+  if (breakdown.mode === "overnight" && breakdown.pStranded >= 0.20) {
+    notes.push(`${pctOf(breakdown.pStranded)} chance you return holding bought inventory; stress downside ${formatGp(Math.round(breakdown.downsideRisk))} gp`);
   }
   if (row.drift <= -0.02) {
     notes.push(`price falling ${(Math.abs(row.drift) * 100).toFixed(1)}% — your buy fills, your sell may not`);
@@ -2524,7 +2666,8 @@ function screen(items, quotes, act5m, act1h, config, now) {
     const crowd = touchCompetitors(thinVolume, item.limit);
     const share = aggressiveness(priceEdge(depth, sell - buy), crowd);
     const qty = Math.max(1, flippableQty(
-      item.limit, fillableQuantity(thinVolume, share, legHorizonHours()), affordable));
+      item.limit, fillableQuantity(thinVolume, share,
+        legHorizonHours(config.horizonHours)), affordable));
 
     const drift = priceDrift(bucketMid(a5m), bucketMid(a1h));
     const ofi = orderFlowImbalance(highVol1h, lowVol1h);
@@ -2532,6 +2675,7 @@ function screen(items, quotes, act5m, act1h, config, now) {
       buy, sell, margin, qty, depth, buyVolume1h: lowVol1h,
       sellVolume1h: highVol1h, quoteAge: age, ofi, drift, now, competitors: crowd,
       highalch: item.highalch, natureCost: config.natureCost,
+      mode: config.strategy, horizonHours: config.horizonHours,
     });
 
     funnel["scored"]++;
@@ -2549,8 +2693,14 @@ function screen(items, quotes, act5m, act1h, config, now) {
       capitalNeeded: breakdown.capitalNeeded, gross: breakdown.rawProfit,
       buySeconds: breakdown.buySeconds, sellSeconds: breakdown.sellSeconds,
       totalSeconds: breakdown.totalSeconds, pFill: breakdown.pFill,
+      pStranded: breakdown.pStranded,
+      expectedRoundTripQty: breakdown.expectedRoundTripQty,
       factors: breakdown.factors, expected: breakdown.expected,
       rawPerSlotHour: breakdown.perSlotHour, perSlotHour: breakdown.perSlotHour,
+      rawRankingValue: breakdown.rankingValue,
+      rankingValue: breakdown.rankingValue,
+      downsideRisk: breakdown.downsideRisk,
+      mode: breakdown.mode, horizonHours: breakdown.horizonHours,
       alchFloorGp: breakdown.alchFloorGp, alchDistance: breakdown.alchDistance,
       alchArbitrageGp: breakdown.alchArbitrageGp,
       deep: false, warnings: [],
@@ -2561,7 +2711,7 @@ function screen(items, quotes, act5m, act1h, config, now) {
     rows.push(row);
   }
   const shrinkage = shrinkScores(rows);
-  rows.sort((a, b) => b.perSlotHour - a.perSlotHour);
+  rows.sort((a, b) => b.rankingValue - a.rankingValue);
   return { rows, funnel, shrinkage };
 }
 
@@ -2597,7 +2747,8 @@ async function refineTopRows(rows, config, now) {
       const share = aggressiveness(priceEdge(row.depth, row.sell - row.buy), crowd);
       const qty = Math.max(1, flippableQty(
         row.limit,
-        fillableQuantity(Math.min(reachableBuy, reachableSell), share, legHorizonHours()),
+        fillableQuantity(Math.min(reachableBuy, reachableSell), share,
+          legHorizonHours(config.horizonHours)),
         Math.floor(row.capitalNeeded / row.buy)));
 
       const breakdown = scoreFlip({
@@ -2608,6 +2759,7 @@ async function refineTopRows(rows, config, now) {
         regimeScore: view.regimeScore,
         highalch: row.alchFloorGp != null ? row.alchFloorGp + config.natureCost : null,
         natureCost: config.natureCost,
+        mode: config.strategy, horizonHours: config.horizonHours,
       });
 
       row.deep = true;
@@ -2618,10 +2770,17 @@ async function refineTopRows(rows, config, now) {
       row.sellSeconds = breakdown.sellSeconds;
       row.totalSeconds = breakdown.totalSeconds;
       row.pFill = breakdown.pFill;
+      row.pStranded = breakdown.pStranded;
+      row.expectedRoundTripQty = breakdown.expectedRoundTripQty;
       row.factors = breakdown.factors;
       row.expected = breakdown.expected;
       row.rawPerSlotHour = breakdown.perSlotHour;
       row.perSlotHour = breakdown.perSlotHour;
+      row.rawRankingValue = breakdown.rankingValue;
+      row.rankingValue = breakdown.rankingValue;
+      row.downsideRisk = breakdown.downsideRisk;
+      row.mode = breakdown.mode;
+      row.horizonHours = breakdown.horizonHours;
       row.alchArbitrageGp = breakdown.alchArbitrageGp;
       row.fillShare = view.fillShare;
       row.trend = view.trend;
@@ -2649,7 +2808,7 @@ async function refineTopRows(rows, config, now) {
   });
   await Promise.all(workers);
   const shrinkage = shrinkScores(rows);
-  rows.sort((a, b) => b.perSlotHour - a.perSlotHour);
+  rows.sort((a, b) => b.rankingValue - a.rankingValue);
   return { refined: targets.filter((r) => r.deep).length, shrinkage };
 }
 
@@ -2684,7 +2843,7 @@ const state = {
   capital: null,
   rows: [],          // what is shown, after the display filters
   natureCost: NATURE_RUNE_FALLBACK,
-  sortKey: "perSlotHour",
+  sortKey: "rankingValue",
   sortDesc: true,
   selected: null,
   timestep: "1h",
@@ -2697,12 +2856,56 @@ const state = {
   merchDesc: true,
   lastLoad: null,  // when the last successful fetch landed, for the live light
   loadFailed: false,
+  feedStale: false,
   quotes: null,    // kept so the portfolio can be valued without a refetch
   items: null,
   exemptIds: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
+const PREF_KEY = "osrs-flipper.preferences.v2";
+
+function accountSlots(account) {
+  return account === "free-to-play" ? F2P_SLOTS : MEMBER_SLOTS;
+}
+
+function loadPreferences() {
+  try {
+    const value = JSON.parse(localStorage.getItem(PREF_KEY) || "{}");
+    return value && typeof value === "object" ? value : {};
+  } catch { return {}; }
+}
+
+function savePreferences() {
+  const value = {
+    capital: state.capital, account: $("#f-account").value,
+    strategy: $("#f-strategy").value, horizon: Number($("#f-horizon").value),
+    age: Number($("#f-age").value), volume: Number($("#f-vol").value),
+    roi: Number($("#f-roi").value), depth: Number($("#f-depth").value),
+    minPrice: $("#f-price-min").value, maxPrice: $("#f-price-max").value,
+    taxFree: $("#f-taxfree").checked, noBots: $("#f-nobots").checked,
+    timestep: state.timestep,
+  };
+  try { localStorage.setItem(PREF_KEY, JSON.stringify(value)); } catch {}
+}
+
+function restorePreferences() {
+  const p = loadPreferences();
+  $("#f-account").value = p.account === "free-to-play" ? p.account : DEFAULT_ACCOUNT;
+  $("#f-strategy").value = p.strategy === "overnight" ? p.strategy : DEFAULT_STRATEGY;
+  $("#f-horizon").value = [6, 8, 10, 12].includes(Number(p.horizon))
+    ? String(p.horizon) : String(DEFAULT_OVERNIGHT_HOURS);
+  for (const [selector, key] of [["#f-age", "age"], ["#f-vol", "volume"],
+    ["#f-roi", "roi"], ["#f-depth", "depth"]]) {
+    if (p[key] != null) $(selector).value = String(p[key]);
+  }
+  $("#f-price-min").value = p.minPrice || "";
+  $("#f-price-max").value = p.maxPrice || "";
+  $("#f-taxfree").checked = Boolean(p.taxFree);
+  $("#f-nobots").checked = Boolean(p.noBots);
+  if (["5m", "1h", "6h", "24h"].includes(p.timestep)) state.timestep = p.timestep;
+  return p;
+}
 
 function parsePriceInput(sel) {
   const raw = $(sel).value.trim();
@@ -2712,10 +2915,16 @@ function parsePriceInput(sel) {
 
 function readConfig() {
   const age = Number($("#f-age").value);
+  const account = $("#f-account").value;
+  const strategy = $("#f-strategy").value;
   return {
     capital: state.capital,
-    slots: Number($("#f-slots").value),
-    includeMembers: $("#f-members").checked,
+    account,
+    slots: accountSlots(account),
+    includeMembers: account === "members",
+    strategy,
+    horizonHours: strategy === "overnight"
+      ? Number($("#f-horizon").value) : WINDOW_HOURS,
     natureCost: state.natureCost,
     // Display filters. All default to off: these are preferences, not
     // correctness gates, and they are applied after scoring and shrinkage.
@@ -2739,9 +2948,11 @@ function syncFilterLabels() {
   $("#f-roi-v").textContent = roi === 0 ? "off" : (roi / 10).toFixed(1) + " %";
   const depth = Number($("#f-depth").value);
   $("#f-depth-v").textContent = depth === 0 ? "off" : depth + " gp";
-  const slots = Number($("#f-slots").value);
+  const slots = accountSlots($("#f-account").value);
   $("#per-slot").textContent = state.capital == null ? "—"
     : formatGp(capitalPerSlot(state.capital, slots)) + " gp per flip if split evenly";
+  const overnight = $("#f-strategy").value === "overnight";
+  $("#overnight-field").classList.toggle("hidden", !overnight);
 }
 
 async function loadAndRender() {
@@ -2749,6 +2960,7 @@ async function loadAndRender() {
   const status = $("#status");
   status.className = "small dim";
   status.textContent = "Loading live prices…";
+  state.feedStale = false;
   try {
     const [items, quotes, act5m, act1h] = await Promise.all([
       fetchMapping(), fetchLatest(), fetchInterval("5m"), fetchInterval("1h"),
@@ -2817,12 +3029,18 @@ function show(allRows, config, statusText) {
   renderPlan(config);
   renderTape();
   renderTerminalStats(config);
+  const overnight = config.strategy === "overnight";
+  $("#mode-summary").innerHTML = overnight
+    ? `<strong>OVERNIGHT · ${config.horizonHours}H</strong><span>${config.account === "members" ? "Members · 8 slots" : "F2P · 3 slots"} · maximize risk-adjusted profit before return</span>`
+    : `<strong>ACTIVE FLIPPING</strong><span>${config.account === "members" ? "Members · 8 slots" : "F2P · 3 slots"} · maximize realistic slot turnover</span>`;
+  $("#ranking-heading").textContent = overnight ? "Horizon EV" : "EV/slot/h";
+  savePreferences();
   $("#plan").classList.toggle("hidden", state.tab !== "flip" || !kept.length);
   if (state.tab !== "merch" && state.selected != null) {
     const row = state.rows.find((r) => r.id === state.selected);
     if (row) showDetail(row.id);
     else $("#detail").classList.add("hidden");
-  }
+  } else if (state.tab === "flip" && kept.length) showDetail(kept[0].id);
 }
 
 function sortedRows() {
@@ -2838,7 +3056,7 @@ function sortedRows() {
   });
 }
 
-const TABLE_COLUMNS = 16;
+const TABLE_COLUMNS = 10;
 
 /* ==================== terminal chrome ====================
 
@@ -2858,7 +3076,7 @@ function tickClock() {
   const dot = $("#livedot"), text = $("#livetext");
   if (state.lastLoad == null) return;
   const age = Date.now() - state.lastLoad;
-  const stale = age > STALE_AFTER_MS;
+  const stale = state.feedStale || age > STALE_AFTER_MS;
   dot.className = "dot" + (state.loadFailed ? " down" : stale ? " stale" : "");
   text.textContent = state.loadFailed ? "NO FEED"
     : stale ? `STALE ${Math.round(age / 1000)}s` : "LIVE";
@@ -2897,7 +3115,9 @@ function renderTerminalStats(config) {
   const rois = state.rows.map((r) => r.roi).sort((a, b) => a - b);
   $("#stat-spread").textContent = rois.length
     ? (rois[Math.floor(rois.length / 2)] * 100).toFixed(1) + "%" : "—";
-  const committed = state.rows.slice(0, PLAN_SIZE).reduce((sum, r) =>
+  const planRows = state.rows.slice(0, config ? config.slots : 0)
+    .filter((r) => (r.allocatedQty || 0) > 0 && r.expected > 0);
+  const committed = planRows.reduce((sum, r) =>
     sum + (r.allocated != null ? r.allocated : 0), 0);
   $("#plan-figure").innerHTML = config
     ? `${config.slots} SLOTS · <b>${formatGp(committed)}</b> COMMITTED` : "";
@@ -2910,11 +3130,10 @@ function renderTerminalStats(config) {
    allocateCapital has already worked out and which the table buries in two
    columns twelve apart. */
 
-const PLAN_SIZE = 3;
-
 function renderPlan(config) {
   const cards = $("#plan-cards");
-  const rows = state.rows.slice(0, PLAN_SIZE);
+  const rows = state.rows.slice(0, config.slots)
+    .filter((r) => (r.allocatedQty || 0) > 0 && r.expected > 0);
   if (!rows.length) {
     $("#plan").classList.add("hidden");
     return;
@@ -2926,7 +3145,9 @@ function renderPlan(config) {
     // is the equal split the affordability check already used.
     const commit = r.allocated != null ? r.allocated
       : Math.min(r.capitalNeeded, capitalPerSlot(config.capital, config.slots));
-    const units = Math.max(1, Math.min(r.qty, Math.floor(commit / r.buy)));
+    const units = r.allocatedQty;
+    const expected = r.allocatedExpected;
+    const confidence = confidenceLabel(r);
     return `
       <div class="plan-card" data-id="${r.id}">
         <div class="plan-rank">SLOT ${index + 1}</div>
@@ -2937,9 +3158,10 @@ function renderPlan(config) {
           <strong>${num(r.listAt)}</strong></div>
         <div class="plan-line"><span>COMMIT</span>
           <strong>${formatGp(commit)}</strong></div>
-        <div class="plan-foot">${num(Math.round(r.perSlotHour))} GP/SLOT/H ·
-          ${formatDuration(r.totalSeconds)} ROUND TRIP ·
-          ${(r.roi * 100).toFixed(1)}% ROI</div>
+        <div class="plan-line"><span>EXPECTED</span><strong>${formatGp(Math.round(expected))} GP</strong></div>
+        <div class="plan-foot">${Math.round(r.pFill * 100)}% ROUND-TRIP ·
+          ${formatDuration(r.totalSeconds)} ETA ·
+          <span class="confidence confidence-${confidence}">${confidence}</span></div>
         ${r.warnings.length
           ? `<div class="plan-warn">${escapeHtml(r.warnings[0])}</div>` : ""}
       </div>`;
@@ -2960,12 +3182,11 @@ function renderPlan(config) {
       (slots > rows.length ? "." : ", and there is nothing better to put it in."));
   }
   if (slots > rows.length) {
-    parts.push(`Your other ${slots - rows.length} slot${
-      slots - rows.length === 1 ? "" : "s"} go to the next rows in the table.`);
+    parts.push(`${slots - rows.length} slot${
+      slots - rows.length === 1 ? " is" : "s are"} better left open: the remaining candidates have no positive risk-adjusted EV or cannot buy one executable unit.`);
   }
-  parts.push("Quantities are what the buy limit, the traded volume and your " +
-    "budget all allow; the gp figure is the score-weighted split, not an " +
-    "equal one. Click a card for the full breakdown.");
+  parts.push("Quantities already respect your bank, whole items, buy limits and " +
+    "the volume expected to be reachable. Click a card for chart and rationale.");
   $("#plan-note").textContent = parts.join(" ");
 }
 
@@ -2988,28 +3209,18 @@ function renderTable() {
     return;
   }
   body.innerHTML = rows.map((r) => `
-    <tr data-id="${r.id}"${state.selected === r.id ? ' class="selected"' : ""}>
+    <tr data-id="${r.id}" tabindex="0"${state.selected === r.id ? ' class="selected"' : ""}>
       <td>${iconHtml(r.icon)}${escapeHtml(r.name)}${r.warnings.length
         ? ` <span class="flag" title="${escapeHtml(r.warnings.join(" · "))}">!</span>` : ""}</td>
       <td>${num(r.buy)}</td>
       <td${r.listAt < r.sell ? ` class="pos" title="List here, not ${num(r.sell)} — identical net revenue after tax, better queue position"` : ""}>${num(r.listAt)}</td>
-      <td class="pos">${num(r.margin)}</td>
+      <td>${num((r.allocatedQty || 0) > 0 ? r.allocatedQty : r.qty)}</td>
+      <td class="pos">${formatGp(Math.round(r.allocatedExpected || r.expected))}</td>
       <td>${(r.roi * 100).toFixed(1)}%</td>
-      <td class="${r.depth === 0 ? "bad" : ""}">${num(r.depth)}</td>
-      <td>${num(r.qty)}</td>
-      <td>${formatGp(r.capitalNeeded)}</td>
       <td class="${r.totalSeconds > 8 * SECONDS_PER_HOUR ? "bad" : ""}">${formatDuration(r.totalSeconds)}</td>
       <td class="${r.pFill < 0.25 ? "bad" : ""}">${Math.round(r.pFill * 100)}%</td>
-      <td class="${r.alchDistance != null && r.alchDistance <= 0 ? "pos" : ""}">${
-        r.alchDistance == null || r.alchDistance >= CAL.alch_relevant_distance ? "—"
-        : (r.alchDistance >= 0 ? "+" : "−") + Math.round(Math.abs(r.alchDistance) * 100) + "%"}</td>
-      <td class="${r.deep && r.fillShare <= 0.25 ? "bad" : ""}">${
-        r.deep ? Math.round(r.fillShare * 100) + "%" : "—"}</td>
-      <td class="${r.volumeRatio != null && r.volumeRatio >= CAL.dip_volume_spike ? "pos" : ""}">${
-        r.volumeRatio == null ? "—" : r.volumeRatio.toFixed(1) + "×"}</td>
-      <td>${tagHtml(r.tags)}</td>
-      <td class="dim">${num(Math.round(r.rawPerSlotHour))}</td>
-      <td class="pos"><strong>${num(Math.round(r.perSlotHour))}</strong></td>
+      <td><span class="confidence confidence-${confidenceLabel(r)}">${confidenceLabel(r)}</span></td>
+      <td class="pos"><strong>${formatGp(Math.round(r.rankingValue))}</strong></td>
     </tr>`).join("");
 
   if (state.selected != null && !rows.some((r) => r.id === state.selected)) {
@@ -3358,7 +3569,9 @@ function showDetail(id) {
   $("#detail").classList.remove("hidden");
   $("#d-name").textContent = row.name;
   $("#d-figure").innerHTML =
-    `${(row.roi * 100).toFixed(1)}% ROI · <b>${num(Math.round(row.perSlotHour))}</b> GP/SLOT/H`;
+    row.mode === "overnight"
+      ? `${row.horizonHours}H HORIZON · <b>${formatGp(Math.round(row.rankingValue))}</b> EXPECTED GP`
+      : `${(row.roi * 100).toFixed(1)}% ROI · <b>${num(Math.round(row.rankingValue))}</b> GP/SLOT/H`;
   $("#d-prices").textContent = `${num(row.buy)} → ${num(row.sell)}`;
   $("#d-raw").textContent =
     `raw quote ${num(row.latestLow)} → ${num(row.latestHigh)} gp · list the sell at ${num(row.listAt)}`;
@@ -3368,18 +3581,23 @@ function showDetail(id) {
   $("#d-trip").textContent = formatDuration(row.totalSeconds);
   $("#d-trip-sub").textContent =
     `buy leg ${formatDuration(row.buySeconds)}, sell leg ${formatDuration(row.sellSeconds)} · ${
-      Math.round(row.pFill * 100)}% both clear in 4h`;
-  $("#d-profit").textContent = num(Math.round(row.perSlotHour)) + " gp";
+      Math.round(row.pFill * 100)}% both clear in ${row.horizonHours}h`;
+  $("#d-profit").textContent = formatGp(Math.round(row.rankingValue)) + " gp";
+  $("#d-profit-label").textContent = row.mode === "overnight"
+    ? "Expected profit before return" : "Expected / slot / hour";
   $("#d-qty").textContent =
-    `${num(Math.round(row.rawPerSlotHour))} before shrinkage · ${num(row.qty)} units · ${formatGp(row.capitalNeeded)} gp tied up`;
+    `${formatGp(Math.round(row.rawRankingValue))} before shrinkage · ${num(row.allocatedQty || 0)} units · ${formatGp(row.allocated || 0)} gp committed`;
 
   // Where the quoted profit went, factor by factor. Each is stored separately
   // rather than only as a product, which is what makes a shortfall
   // attributable to the factor that caused it.
   const pct = (f) => `${Math.round(f * 100)}%`;
   const lines = [
+    `<strong>Why this ranks here:</strong> ${row.margin > 0 ? "positive executable spread after tax" : "no executable spread"}; ${row.pFill >= .65 ? "strong" : row.pFill >= .4 ? "usable" : "weak"} round-trip probability; ${row.volume >= 1000 ? "dense" : "thin"} two-sided volume; ${row.drift < -.02 ? "falling price raises adverse-selection risk" : "recent drift is manageable"}; ${confidenceLabel(row)} evidence confidence.`,
     `Quoted best case: <strong>${num(row.gross)} gp</strong> if both legs fill at these prices.`,
-    `A slot is time, not a container: this flip is expected to occupy one for <strong>${formatDuration(row.totalSeconds)}</strong>, which is what ${num(Math.round(row.perSlotHour))} gp per slot-hour is measured against.`,
+    row.mode === "overnight"
+      ? `Overnight objective: <strong>${formatGp(Math.round(row.rankingValue))} gp</strong> expected by your ${row.horizonHours}h return, after subtracting ${formatGp(Math.round(row.downsideRisk))} gp of stranded-inventory stress risk (${Math.round(row.pStranded * 100)}% chance).`
+      : `A slot is time: expected occupancy is <strong>${formatDuration(row.totalSeconds)}</strong>, producing ${num(Math.round(row.rankingValue))} gp per slot-hour.`,
   ];
   for (const [name, value] of Object.entries(row.factors)) {
     if (Math.abs(value - 1) < 0.005) continue;      // nothing to explain
@@ -3387,7 +3605,7 @@ function showDetail(id) {
       value >= 1 ? "adds" : "keeps"} ${pct(value)}.`);
   }
   if (row.allocated != null) {
-    lines.push(`Score-weighted allocation: commit <strong>${formatGp(row.allocated)} gp</strong> of the bank here, rather than an equal share.`);
+    lines.push(`Executable allocation: buy <strong>${num(row.allocatedQty)} × ${num(row.buy)} gp</strong>, committing ${formatGp(row.allocated)} gp after whole-item, buy-limit and reachable-volume caps.`);
   }
   if (row.deep) {
     lines.push(
@@ -3402,8 +3620,8 @@ function showDetail(id) {
   } else {
     lines.push("Not deep-checked against 14-day history (outside the shortlist).");
   }
-  if (row.rawPerSlotHour > 0 && row.perSlotHour / row.rawPerSlotHour < 0.995) {
-    lines.push(`Shrinkage took it from ${num(Math.round(row.rawPerSlotHour))} to <strong>${num(Math.round(row.perSlotHour))} gp/slot-hour</strong>: ranking hundreds of noisy estimates surfaces the biggest errors, so each score is pulled toward the market average by an amount set by the ${num(row.volume)} units/h of volume behind it.`);
+  if (row.rawRankingValue > 0 && row.rankingValue / row.rawRankingValue < 0.995) {
+    lines.push(`Shrinkage took its decision value from ${formatGp(Math.round(row.rawRankingValue))} to <strong>${formatGp(Math.round(row.rankingValue))}</strong>: ranking hundreds of noisy estimates surfaces the biggest errors, so thin observations are pulled harder toward the market average.`);
   }
   $("#d-notes").innerHTML = lines.map((l) => `<li>${l}</li>`).join("");
   loadChart();
@@ -3427,8 +3645,9 @@ async function loadChart() {
     const refLine = row && row.deep && row.medianMid != null
       ? { value: row.medianMid, label: "14d median" } : null;
     renderSessionStats(points);
-    chart.innerHTML = renderChart(points, refLine);
-    wireChartHover(points, refLine ? refLine.value : null);
+    chart.innerHTML = renderChart(points, refLine, row);
+    wireChartHover(points, refLine ? refLine.value : null,
+                   row ? [row.buy, row.listAt] : []);
   } catch (err) {
     chart.innerHTML = `<p class="small err">Could not load history: ${
       escapeHtml(err.message)}</p>`;
@@ -3490,10 +3709,10 @@ function sessionStats(points) {
   };
 }
 
-function chartScales(points, refValue) {
+function chartScales(points, refValue, extraPrices = []) {
   const times = points.map((d) => d.timestamp);
   const t0 = Math.min(...times), t1 = Math.max(...times);
-  const prices = refValue != null ? [refValue] : [];
+  const prices = [...extraPrices, ...(refValue != null ? [refValue] : [])];
   for (const d of points) {
     if (d.avgHighPrice != null) prices.push(d.avgHighPrice);
     if (d.avgLowPrice != null) prices.push(d.avgLowPrice);
@@ -3567,8 +3786,9 @@ function renderLines(points, s) {
   return line("avgHighPrice", "var(--buy)") + line("avgLowPrice", "var(--sell)");
 }
 
-function renderChart(points, refLine) {
-  const s = chartScales(points, refLine ? refLine.value : null);
+function renderChart(points, refLine, tradeRow = null) {
+  const s = chartScales(points, refLine ? refLine.value : null,
+    tradeRow ? [tradeRow.buy, tradeRow.listAt] : []);
   const { w, h, volH, padL, padR, padT, padB } = CHART;
   const axisX = w - padR;
 
@@ -3582,6 +3802,17 @@ function renderChart(points, refLine) {
       <text x="${padL + 4}" y="${(s.y(refLine.value) - 6).toFixed(1)}"
         fill="#ffb83f" font-size="11">${refLine.label} · ${num(refLine.value)} gp</text>`;
   }
+
+  const tradeMarks = !tradeRow ? "" : [
+    [tradeRow.buy, "BUY", "var(--sell)"],
+    [tradeRow.listAt, "SELL", "var(--buy)"],
+  ].map(([value, label, colour]) => {
+    const y = s.y(value).toFixed(1);
+    return `<line x1="${padL}" y1="${y}" x2="${axisX}" y2="${y}"
+        stroke="${colour}" stroke-width="1.5" stroke-dasharray="3 4" opacity="0.9"/>
+      <text x="${padL + 4}" y="${(s.y(value) + (label === "BUY" ? 12 : -5)).toFixed(1)}"
+        fill="${colour}" font-size="11">${label} ${num(value)}</text>`;
+  }).join("");
 
   const ticks = 5;
   const gridLines = Array.from({ length: ticks + 1 }, (_, i) => {
@@ -3649,6 +3880,7 @@ function renderChart(points, refLine) {
          aria-label="Price history with the last print tagged on the right axis">
       ${gridLines}
       ${refMark}
+      ${tradeMarks}
       ${series}
       ${smaLine}
       ${lastTag}
@@ -3687,12 +3919,12 @@ function timeLabel(unixSeconds) {
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
-function wireChartHover(points, refValue) {
+function wireChartHover(points, refValue, extraPrices = []) {
   const svg = $("#price-svg");
   if (!svg) return;
   const tip = $("#tip");
   const box = $("#chart-box");
-  const s = chartScales(points, refValue);
+  const s = chartScales(points, refValue, extraPrices);
   const crosshair = svg.querySelector("#crosshair");
   const crosshairY = svg.querySelector("#crosshair-y");
   const cursorPrice = svg.querySelector("#cursor-price");
@@ -3792,6 +4024,7 @@ function startApp(capital) {
   $("#budget-label").textContent = formatGp(capital) + " gp";
   $("#budget-label").title = num(capital) + " gp";
   syncFilterLabels();
+  savePreferences();
   loadAndRender();
 }
 
@@ -3837,7 +4070,6 @@ let filterTimer = null;
     filterTimer = setTimeout(loadAndRender, 200);
   });
 });
-$("#f-members").addEventListener("change", loadAndRender);
 $("#f-taxfree").addEventListener("change", loadAndRender);
 $("#f-nobots").addEventListener("change", loadAndRender);
 ["#f-price-min", "#f-price-max"].forEach((sel) => {
@@ -3846,11 +4078,28 @@ $("#f-nobots").addEventListener("change", loadAndRender);
     filterTimer = setTimeout(loadAndRender, 400);
   });
 });
-$("#f-slots").addEventListener("change", () => {
+$("#f-account").addEventListener("change", () => {
   syncFilterLabels();
   loadAndRender();
 });
+$("#f-strategy").addEventListener("change", () => {
+  syncFilterLabels();
+  loadAndRender();
+});
+$("#f-horizon").addEventListener("change", loadAndRender);
 $("#refresh").addEventListener("click", loadAndRender);
+$("#reset-preferences").addEventListener("click", () => {
+  try { localStorage.removeItem(PREF_KEY); } catch {}
+  $("#f-account").value = DEFAULT_ACCOUNT;
+  $("#f-strategy").value = DEFAULT_STRATEGY;
+  $("#f-horizon").value = String(DEFAULT_OVERNIGHT_HOURS);
+  for (const selector of ["#f-age", "#f-vol", "#f-roi", "#f-depth"]) $(selector).value = "0";
+  $("#f-price-min").value = ""; $("#f-price-max").value = "";
+  $("#f-taxfree").checked = false; $("#f-nobots").checked = false;
+  state.timestep = "1h";
+  syncFilterLabels();
+  loadAndRender();
+});
 
 document.querySelectorAll("#flips thead th").forEach((th) => {
   th.addEventListener("click", () => {
@@ -3864,6 +4113,12 @@ document.querySelectorAll("#flips thead th").forEach((th) => {
 $("#flips tbody").addEventListener("click", (event) => {
   const tr = event.target.closest("tr[data-id]");
   if (tr) showDetail(Number(tr.dataset.id));
+});
+$("#flips tbody").addEventListener("keydown", (event) => {
+  const tr = event.target.closest("tr[data-id]");
+  if (tr && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault(); showDetail(Number(tr.dataset.id));
+  }
 });
 
 $("#plan-cards").addEventListener("click", (event) => {
@@ -3955,7 +4210,21 @@ tickClock();
 
 syncFilterLabels();
 $("#tab-blurb").textContent = TAB_BLURB.flip;
-$("#budget").focus();
+const workbench = document.createElement("div");
+workbench.id = "workbench";
+$("#flip-wrap").parentNode.insertBefore(workbench, $("#flip-wrap"));
+workbench.appendChild($("#flip-wrap"));
+workbench.appendChild($("#detail"));
+const restored = restorePreferences();
+if (window.matchMedia("(max-width: 820px)").matches) {
+  $("#filter-details").removeAttribute("open");
+}
+syncFilterLabels();
+if (restored.capital > 0 && restored.capital <= MAX_CASH_STACK) {
+  startApp(Math.round(restored.capital));
+} else {
+  $("#budget").focus();
+}
 </script>
 </body>
 </html>

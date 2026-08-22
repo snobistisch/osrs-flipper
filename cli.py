@@ -1,6 +1,7 @@
 """Ranked flips as a plain terminal table.
 
-Usage: python3 cli.py [--capital N] [--slots N] [--members] [--top N]
+Usage: python3 cli.py [--capital N] [--account members|free-to-play]
+                      [--strategy active|overnight] [--overnight-hours N]
                       [--max-age S] [--min-vol N] [--min-roi F] [--min-depth N]
 
 The filter flags now narrow what is *displayed*. They no longer decide what
@@ -23,13 +24,23 @@ import merch
 
 def parse_args(argv):
     p = argparse.ArgumentParser(
-        description="Rank GE flips by expected gp per offer slot per hour")
+        description="Build an executable GE plan for active or overnight trading")
     p.add_argument("--capital", type=engine.parse_gp, default=1_000_000,
                    help="gp available across all slots, e.g. 250k or 1.5m")
-    p.add_argument("--slots", type=int, default=engine.F2P_SLOTS,
-                   help="concurrent GE offers: 3 free-to-play, 8 members")
-    p.add_argument("--members", action="store_true",
-                   help="include members-only items")
+    p.add_argument("--account", choices=[value.value for value in
+                                         engine.AccountType],
+                   default=engine.DEFAULT_ACCOUNT.value,
+                   help="coherent account profile; members is the default "
+                        "and implies 8 slots plus members items")
+    p.add_argument("--strategy", choices=[value.value for value in
+                                          engine.TradeMode],
+                   default=engine.DEFAULT_TRADE_MODE.value,
+                   help="active ranks slot turnover; overnight ranks "
+                        "risk-adjusted profit before return")
+    p.add_argument("--overnight-hours", type=float,
+                   default=engine.DEFAULT_OVERNIGHT_HOURS,
+                   help="unattended horizon (default: 8; useful presets "
+                        "are 6, 8, 10 and 12)")
     p.add_argument("--top", type=int, default=20, help="rows to show")
     p.add_argument("--deep", type=int, default=15,
                    help="deep-check this many top candidates against 14 days "
@@ -37,7 +48,7 @@ def parse_args(argv):
                         "many are actually fetched, so the deep stage can "
                         "reorder rather than just confirm.")
     p.add_argument("--mode", choices=("flip", "crash"), default="flip",
-                   help="flip ranks by gp per slot per hour; crash lists the "
+                   help="flip ranks by the selected strategy objective; crash lists the "
                         "deep-checked candidates standing furthest from their "
                         "own 14-day median, ranked by how tradable the "
                         "recovery is. Both read the same fetch. For the "
@@ -73,7 +84,9 @@ def parse_args(argv):
 
 def config_from(opts, nature_cost: int) -> filters.FilterConfig:
     return filters.FilterConfig(
-        capital=opts.capital, slots=opts.slots, include_members=opts.members,
+        capital=opts.capital, account=engine.AccountType(opts.account),
+        trade_mode=engine.TradeMode(opts.strategy),
+        overnight_hours=opts.overnight_hours,
         nature_rune_cost=nature_cost,
         max_quote_age=opts.max_age, min_thin_volume_1h=opts.min_vol,
         min_roi=opts.min_roi, min_undercut_depth=opts.min_depth,
@@ -114,7 +127,7 @@ def print_crash_table(result, opts):
 def print_table(result, opts, config, exempt, nature_cost, archive_note):
     print("Budget {} gp across {} slots | {} tax-exempt items loaded | "
           "nature rune {} gp | {}".format(
-              engine.format_gp(opts.capital), opts.slots, len(exempt),
+              engine.format_gp(opts.capital), config.slots, len(exempt),
               nature_cost, archive_note))
     if exempt.unmatched_names:
         print("  tax_exempt.json has {} names no item matched: {}".format(
@@ -142,37 +155,44 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
               "genuinely offering nothing right now.")
         return
 
-    header = ("{:<24} {:>8} {:>8} {:>7} {:>6} {:>5} {:>7} {:>8} {:>10} {:>7} "
-              "{:>11} {:>11}")
-    print(header.format("ITEM", "BUY", "SELL", "MARGIN", "ROI", "ROOM",
-                        "QTY", "TIED UP", "ROUND TRIP", "P(FILL)", "MEASURED",
-                        "EV/SLOT/H"))
+    metric = "EV/SLOT/H" if config.trade_mode is engine.TradeMode.ACTIVE else "HORIZON EV"
+    header = ("{:<24} {:>8} {:>8} {:>7} {:>6} {:>7} {:>8} {:>10} {:>7} {:>11}")
+    print(header.format("ITEM", "BUY", "SELL", "MARGIN", "ROI", "QTY",
+                        "COMMIT", "ROUND TRIP", "P(FILL)", metric))
     for row in result.rows[:opts.top]:
-        print("{:<24.24} {:>8,} {:>8,} {:>7,} {:>5.1f}% {:>5,} {:>7,} {:>8} "
-              "{:>10} {:>6.0f}% {:>11,.0f} {:>11,.0f}".format(
+        value = (row.gp_per_slot_hour if config.trade_mode is
+                 engine.TradeMode.ACTIVE else row.ranking_value)
+        print("{:<24.24} {:>8,} {:>8,} {:>7,} {:>5.1f}% {:>7,} {:>8} "
+              "{:>10} {:>6.0f}% {:>11,.0f}".format(
                   row.name, row.buy, row.sell, row.margin,
-                  row.roi * 100, row.undercut_depth, row.qty_per_window,
-                  engine.format_gp(row.capital_needed),
+                  row.roi * 100, row.allocated_quantity or 0,
+                  engine.format_gp(row.allocated_capital or 0),
                   engine.format_duration(row.expected_total_seconds),
-                  row.p_fill * 100, row.raw_gp_per_slot_hour,
-                  row.gp_per_slot_hour))
-        if row.allocated_capital is not None:
-            print("{:<24} · commit {} gp of the bank here (score-weighted, "
-                  "not an equal split)".format(
-                      "", engine.format_gp(row.allocated_capital)))
+                  row.p_fill * 100, value))
+        if config.trade_mode is engine.TradeMode.OVERNIGHT:
+            print("{:<24} · {:.0%} stranded-inventory risk; {:,.0f} gp stress "
+                  "downside".format("", row.p_stranded,
+                                      row.downside_risk_gp))
         for note in row.warnings:
             print("{:<24} · {}".format("", note))
     print()
-    print("ROUND TRIP = expected time for both legs, from the traded volume "
-          "you can reach at your queue position. It is the denominator of "
-          "EV/SLOT/H — a slot freed in 20 minutes is worth more than one held "
-          "for four hours at twice the margin.")
-    print("MEASURED = the score before shrinkage; EV/SLOT/H is after. Ranking "
-          "hundreds of noisy estimates surfaces the biggest errors rather than "
-          "the biggest values, so each score is pulled toward the market "
-          "average by an amount set by how much volume it rests on. A wide gap "
-          "between the two columns means the measured number was mostly the "
-          "thinness of the data.")
+    if config.trade_mode is engine.TradeMode.ACTIVE:
+        print("ROUND TRIP = expected time for both legs, from the traded volume "
+              "you can reach at your queue position. It is the denominator of "
+              "EV/SLOT/H — a slot freed in 20 minutes is worth more than one "
+              "held for four hours at twice the margin.")
+        ranking_explanation = "EV/SLOT/H"
+    else:
+        print("ROUND TRIP is diagnostic in Overnight mode. HORIZON EV ranks the "
+              "profit expected before your selected return time, after the "
+              "probability and stress cost of stranded inventory.")
+        ranking_explanation = "HORIZON EV"
+    print("MEASURED = the score before shrinkage; {} is after. Ranking hundreds "
+          "of noisy estimates surfaces the biggest errors rather than the "
+          "biggest values, so each score is pulled toward the market average "
+          "by an amount set by how much volume it rests on. A wide gap means "
+          "the measured number was mostly the thinness of the data.".format(
+              ranking_explanation))
 
 
 def main(argv=None):

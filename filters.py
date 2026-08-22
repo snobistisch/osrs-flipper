@@ -43,8 +43,9 @@ from api import Activity, Item, Quote
 class FilterConfig:
     # -- structural ---------------------------------------------------------
     capital: int = 1_000_000       # gp available to invest, across all slots
-    slots: int = engine.F2P_SLOTS  # concurrent offers you can run
-    include_members: bool = False
+    account: engine.AccountType = engine.DEFAULT_ACCOUNT
+    trade_mode: engine.TradeMode = engine.DEFAULT_TRADE_MODE
+    overnight_hours: float = engine.DEFAULT_OVERNIGHT_HOURS
     nature_rune_cost: int = exemptions.NATURE_RUNE_FALLBACK
     calibration: engine.Calibration = engine.DEFAULT_CALIBRATION
 
@@ -66,6 +67,29 @@ class FilterConfig:
     # preference, so it hides rows like every other one here — the items are
     # still scored, and turning this on never reorders what is left.
     hide_botted: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "account", engine.AccountType(self.account))
+        object.__setattr__(self, "trade_mode",
+                           engine.TradeMode(self.trade_mode))
+        if not 1.0 <= float(self.overnight_hours) <= 24.0:
+            raise ValueError("overnight horizon must be between 1 and 24 hours")
+        if not 0 < int(self.capital) <= engine.MAX_CASH_STACK:
+            raise ValueError("capital must fit in the OSRS cash stack")
+
+    @property
+    def slots(self) -> int:
+        return self.account.slots
+
+    @property
+    def include_members(self) -> bool:
+        return self.account.allows_members_items
+
+    @property
+    def horizon_hours(self) -> float:
+        return (float(self.overnight_hours)
+                if self.trade_mode is engine.TradeMode.OVERNIGHT
+                else float(self.calibration.horizon_hours))
 
 
 @dataclass(frozen=True)
@@ -97,11 +121,18 @@ class FlipRow:
     expected_sell_seconds: float
     expected_total_seconds: float
     p_fill: float
+    p_stranded: float
+    expected_round_trip_qty: float
 
     expected_gp: float       # gross profit after every discount
     raw_gp_per_slot_hour: float   # before shrinkage
     gp_per_slot_hour: float       # after shrinkage — the ranking metric
     edge_probability: float       # P(this score is not noise)
+    raw_ranking_value: float      # active: gp/slot/h; overnight: horizon EV
+    ranking_value: float          # same metric after shrinkage
+    downside_risk_gp: float
+    trade_mode: engine.TradeMode
+    horizon_hours: float
 
     factors: Dict[str, float] = field(default_factory=dict)
     warnings: Tuple[str, ...] = field(default=())
@@ -132,6 +163,8 @@ class FlipRow:
 
     # Capital allocation, filled by allocate()
     allocated_capital: Optional[int] = None
+    allocated_quantity: Optional[int] = None
+    allocated_expected_gp: Optional[float] = None
 
 
 # Structural rejections, in the order the gates run. Every item in /latest
@@ -201,7 +234,7 @@ def screen(
             rows.append(result)
 
     rows, shrinkage = _apply_shrinkage(rows, config)
-    rows.sort(key=lambda r: r.gp_per_slot_hour, reverse=True)
+    rows.sort(key=lambda r: r.ranking_value, reverse=True)
     return ScreenResult(rows=rows, funnel=funnel, shrinkage=shrinkage)
 
 
@@ -288,7 +321,7 @@ def _evaluate(
     qty = engine.flippable_qty(
         item.limit,
         engine.fillable_quantity(thin_volume, share,
-                                 engine.leg_horizon_hours(config.calibration)),
+                                 config.horizon_hours / engine.LEGS_PER_ROUND_TRIP),
         affordable)
     if qty <= 0:
         # The market cannot hand over a single unit inside the horizon at this
@@ -304,7 +337,8 @@ def _evaluate(
         buy_volume_1h=low_vol_1h, sell_volume_1h=high_vol_1h,
         quote_age=age, ofi=ofi, drift=drift, now=now,
         highalch=item.highalch, nature_rune_cost=config.nature_rune_cost,
-        competitors=crowd, calibration=config.calibration)
+        competitors=crowd, mode=config.trade_mode,
+        horizon_hours=config.horizon_hours, calibration=config.calibration)
 
     floor = engine.alch_floor(item.highalch, config.nature_rune_cost)
     return FlipRow(
@@ -323,10 +357,16 @@ def _evaluate(
         expected_sell_seconds=breakdown.sell_seconds,
         expected_total_seconds=breakdown.total_seconds,
         p_fill=breakdown.p_fill_both,
+        p_stranded=breakdown.p_stranded,
+        expected_round_trip_qty=breakdown.expected_round_trip_qty,
         expected_gp=breakdown.expected_profit,
         raw_gp_per_slot_hour=breakdown.gp_per_slot_hour,
         gp_per_slot_hour=breakdown.gp_per_slot_hour,
         edge_probability=1.0,
+        raw_ranking_value=breakdown.ranking_value,
+        ranking_value=breakdown.ranking_value,
+        downside_risk_gp=breakdown.downside_risk_gp,
+        trade_mode=breakdown.mode, horizon_hours=breakdown.horizon_hours,
         factors=breakdown.factors(),
         alch_floor=floor,
         alch_distance=engine.alch_distance(buy, floor),
@@ -352,7 +392,7 @@ def _apply_shrinkage(
     """
     if not rows:
         return rows, None
-    raw = [row.raw_gp_per_slot_hour for row in rows]
+    raw = [row.raw_ranking_value for row in rows]
     # Volume is the sample size behind each estimate: an item quoted off 40,000
     # traded units is measured, one quoted off twelve is a rumour.
     counts = [max(1.0, float(row.thin_volume_1h)) for row in rows]
@@ -360,9 +400,12 @@ def _apply_shrinkage(
     out = []
     for row, value, probability in zip(rows, shrunk.values,
                                        shrunk.edge_probability):
-        warnings = row.warnings
-        if row.raw_gp_per_slot_hour > 0:
-            kept = value / row.raw_gp_per_slot_hour
+        # Screening and deep refinement each shrink the cross-section. Replace
+        # the earlier explanation instead of stacking two stale percentages.
+        warnings = tuple(note for note in row.warnings
+                         if not note.startswith("score cut "))
+        if row.raw_ranking_value > 0:
+            kept = value / row.raw_ranking_value
             # A display threshold, not a model parameter: below this the number
             # the user is reading is materially not what was measured.
             if kept < 0.85:
@@ -370,7 +413,10 @@ def _apply_shrinkage(
                     "score cut {:.0%} by shrinkage — it rests on {:,} units/h "
                     "of volume, too little to take at face value".format(
                         1 - kept, row.thin_volume_1h),)
-        out.append(replace(row, gp_per_slot_hour=value,
+        gp_per_hour = (value if config.trade_mode is engine.TradeMode.ACTIVE
+                       else row.gp_per_slot_hour)
+        out.append(replace(row, ranking_value=value,
+                           gp_per_slot_hour=gp_per_hour,
                            edge_probability=probability, warnings=warnings))
     return out, shrunk
 
@@ -417,7 +463,7 @@ def refine_with_history(
         rows[index] = _rescore_with_history(row, view, config, now)
 
     rows, shrinkage = _apply_shrinkage(rows, config)
-    rows.sort(key=lambda r: r.gp_per_slot_hour, reverse=True)
+    rows.sort(key=lambda r: r.ranking_value, reverse=True)
     return ScreenResult(rows=rows, funnel=result.funnel,
                         shrinkage=shrinkage, deep_checked=refined_count)
 
@@ -442,7 +488,7 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
     qty = engine.flippable_qty(
         row.limit,
         engine.fillable_quantity(min(reachable_buy, reachable_sell), share,
-                                 engine.leg_horizon_hours(config.calibration)),
+                                 config.horizon_hours / engine.LEGS_PER_ROUND_TRIP),
         row.capital_needed // row.buy if row.buy > 0 else None)
     qty = max(1, qty)
 
@@ -456,6 +502,7 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         highalch=None if row.alch_floor is None
         else row.alch_floor + config.nature_rune_cost,
         nature_rune_cost=config.nature_rune_cost,
+        mode=config.trade_mode, horizon_hours=config.horizon_hours,
         calibration=config.calibration)
 
     return replace(
@@ -466,9 +513,15 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         expected_sell_seconds=breakdown.sell_seconds,
         expected_total_seconds=breakdown.total_seconds,
         p_fill=breakdown.p_fill_both,
+        p_stranded=breakdown.p_stranded,
+        expected_round_trip_qty=breakdown.expected_round_trip_qty,
         expected_gp=breakdown.expected_profit,
         raw_gp_per_slot_hour=breakdown.gp_per_slot_hour,
         gp_per_slot_hour=breakdown.gp_per_slot_hour,
+        raw_ranking_value=breakdown.ranking_value,
+        ranking_value=breakdown.ranking_value,
+        downside_risk_gp=breakdown.downside_risk_gp,
+        trade_mode=breakdown.mode, horizon_hours=breakdown.horizon_hours,
         factors=breakdown.factors(),
         alch_arbitrage_gp=breakdown.alch_arbitrage_gp,
         deep_checked=True, fill_share=view.fill_share, trend=view.trend,
@@ -526,17 +579,24 @@ def apply_preferences(result: ScreenResult,
 
 
 def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
-    """Split the bank across the top flips in proportion to their scores."""
+    """Construct an executable plan, leaving non-positive slots open."""
     rows = list(result.rows)
     if not rows:
         return result
     count = min(len(rows), config.slots)
-    needs = [row.capital_needed for row in rows[:count]]
-    amounts = engine.allocate_capital(
-        [row.gp_per_slot_hour for row in rows[:count]],
-        config.capital, config.slots, needs)
+    candidates = rows[:count]
+    amounts = engine.allocate_portfolio(
+        [row.ranking_value if row.expected_gp > 0 else 0.0
+         for row in candidates],
+        config.capital, [row.buy for row in candidates],
+        [row.capital_needed for row in candidates], config.slots)
     for index, amount in enumerate(amounts):
-        rows[index] = replace(rows[index], allocated_capital=amount)
+        row = rows[index]
+        quantity = amount // row.buy if amount > 0 and row.buy > 0 else 0
+        scale = quantity / row.qty_per_window if row.qty_per_window > 0 else 0.0
+        rows[index] = replace(
+            row, allocated_capital=amount, allocated_quantity=quantity,
+            allocated_expected_gp=row.expected_gp * scale)
     return ScreenResult(rows=rows, funnel=result.funnel,
                         shrinkage=result.shrinkage,
                         deep_checked=result.deep_checked, hidden=result.hidden)
@@ -631,8 +691,15 @@ def _warnings(depth: int, drift: float, ofi: float, affordable: int, qty: int,
         notes.append("expected round trip {} — the slot is the cost, not the gp"
                      .format(engine.format_duration(breakdown.total_seconds)))
     if breakdown.p_fill_both < 0.25:
-        notes.append("only {:.0%} chance both legs clear inside 4h"
-                     .format(breakdown.p_fill_both))
+        notes.append("only {:.0%} chance both legs clear inside {:.0f}h"
+                     .format(breakdown.p_fill_both,
+                             breakdown.horizon_hours))
+    if (breakdown.mode is engine.TradeMode.OVERNIGHT
+            and breakdown.p_stranded >= 0.20):
+        notes.append("{:.0%} chance you return holding bought inventory; "
+                     "stress downside is {:,.0f} gp"
+                     .format(breakdown.p_stranded,
+                             breakdown.downside_risk_gp))
     if drift <= -0.02:
         notes.append("price falling {:.1%} — your buy fills, your sell may not"
                      .format(abs(drift)))

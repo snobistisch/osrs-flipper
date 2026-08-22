@@ -35,6 +35,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import stats
@@ -58,6 +59,67 @@ WINDOW_HOURS = 4                  # the buy-limit window
 # before gp is. Free-to-play gets three; members get eight.
 F2P_SLOTS = 3
 MEMBER_SLOTS = 8
+
+
+class AccountType(str, Enum):
+    """A coherent GE account profile.
+
+    Slot count and members-item access are game rules, not independent user
+    preferences.  Keeping them behind one value makes contradictory states
+    unrepresentable in the normal application flow.
+    """
+
+    MEMBERS = "members"
+    FREE_TO_PLAY = "free-to-play"
+
+    @property
+    def slots(self) -> int:
+        return MEMBER_SLOTS if self is AccountType.MEMBERS else F2P_SLOTS
+
+    @property
+    def allows_members_items(self) -> bool:
+        return self is AccountType.MEMBERS
+
+
+class TradeMode(str, Enum):
+    """The decision horizon changes the utility function, not just the copy."""
+
+    ACTIVE = "active"
+    OVERNIGHT = "overnight"
+
+
+DEFAULT_ACCOUNT = AccountType.MEMBERS
+DEFAULT_TRADE_MODE = TradeMode.ACTIVE
+DEFAULT_OVERNIGHT_HOURS = 8.0
+OVERNIGHT_HORIZON_PRESETS = (6.0, 8.0, 10.0, 12.0)
+
+
+@dataclass(frozen=True)
+class TradingProfile:
+    """Player/account state shared by the CLI, Streamlit and browser ports."""
+
+    account: AccountType = DEFAULT_ACCOUNT
+    mode: TradeMode = DEFAULT_TRADE_MODE
+    overnight_hours: float = DEFAULT_OVERNIGHT_HOURS
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "account", AccountType(self.account))
+        object.__setattr__(self, "mode", TradeMode(self.mode))
+        if not 1.0 <= float(self.overnight_hours) <= 24.0:
+            raise ValueError("overnight horizon must be between 1 and 24 hours")
+
+    @property
+    def slots(self) -> int:
+        return self.account.slots
+
+    @property
+    def include_members(self) -> bool:
+        return self.account.allows_members_items
+
+    @property
+    def horizon_hours(self) -> float:
+        return (float(self.overnight_hours)
+                if self.mode is TradeMode.OVERNIGHT else float(WINDOW_HOURS))
 
 MAX_CASH_STACK = 2_147_483_647    # the game's coin cap
 
@@ -654,6 +716,38 @@ def fill_probability(expected_seconds: float, horizon_seconds: float) -> float:
     return 1.0 - math.exp(-horizon_seconds / expected_seconds)
 
 
+def round_trip_probability(buy_seconds: float, sell_seconds: float,
+                           horizon_seconds: float) -> float:
+    """Probability that two sequential exponential legs finish by ``horizon``.
+
+    Multiplying two independent ``P(leg < horizon)`` values overstates the
+    result because the sell cannot start until the buy completes.  This is the
+    CDF of the sum of two exponentials (an Erlang when their rates match).
+    """
+    if (horizon_seconds <= 0 or buy_seconds <= 0 or sell_seconds <= 0
+            or not math.isfinite(buy_seconds)
+            or not math.isfinite(sell_seconds)):
+        return 0.0
+    buy_rate = 1.0 / buy_seconds
+    sell_rate = 1.0 / sell_seconds
+    if math.isclose(buy_rate, sell_rate, rel_tol=1e-9, abs_tol=1e-12):
+        x = buy_rate * horizon_seconds
+        return max(0.0, min(1.0, 1.0 - math.exp(-x) * (1.0 + x)))
+    survival = ((sell_rate * math.exp(-buy_rate * horizon_seconds)
+                 - buy_rate * math.exp(-sell_rate * horizon_seconds))
+                / (sell_rate - buy_rate))
+    return max(0.0, min(1.0, 1.0 - survival))
+
+
+def stranded_inventory_probability(buy_seconds: float, sell_seconds: float,
+                                    horizon_seconds: float) -> float:
+    """Chance the buy completes but the round trip does not before return."""
+    bought = fill_probability(buy_seconds, horizon_seconds)
+    completed = round_trip_probability(buy_seconds, sell_seconds,
+                                       horizon_seconds)
+    return max(0.0, min(1.0, bought - completed))
+
+
 def fillable_quantity(volume_per_hour: float, share: float,
                       horizon_hours: float) -> int:
     """Units the market can hand you on ONE leg inside the horizon.
@@ -992,6 +1086,8 @@ class ScoreBreakdown:
     p_fill_buy: float
     p_fill_sell: float
     p_fill_both: float
+    p_stranded: float
+    expected_round_trip_qty: float
 
     adverse_selection: float
     holding_risk: float
@@ -1002,20 +1098,26 @@ class ScoreBreakdown:
 
     expected_profit: float
     gp_per_slot_hour: float
+    ranking_value: float
+    downside_risk_gp: float
+    mode: TradeMode
+    horizon_hours: float
 
     alch_arbitrage_gp: Optional[int] = None   # per item, if below the floor
 
     def factors(self) -> Dict[str, float]:
         """Flat name -> value map, for journal recording and error attribution."""
-        return {
+        values = {
             "p_fill_both": self.p_fill_both,
             "adverse_selection": self.adverse_selection,
-            "holding_risk": self.holding_risk,
             "staleness": self.staleness,
             "mean_reversion": self.mean_reversion,
             "alch": self.alch,
             "update_risk": self.update_risk,
         }
+        if self.mode is TradeMode.ACTIVE:
+            values["holding_risk"] = self.holding_risk
+        return values
 
 
 def score_flip(
@@ -1037,6 +1139,8 @@ def score_flip(
     highalch: Optional[int] = None,
     nature_rune_cost: int = 100,
     competitors: Optional[float] = None,
+    mode: TradeMode = DEFAULT_TRADE_MODE,
+    horizon_hours: Optional[float] = None,
     calibration: Calibration = DEFAULT_CALIBRATION,
 ) -> ScoreBreakdown:
     """Expected gp per slot-hour for one flip, with its decomposition.
@@ -1060,14 +1164,21 @@ def score_flip(
     sell_seconds = expected_fill_seconds(qty, sell_rate, calibration)
     total_seconds = buy_seconds + sell_seconds
 
-    horizon_seconds = calibration.horizon_hours * SECONDS_PER_HOUR
+    mode = TradeMode(mode)
+    effective_horizon = (float(horizon_hours) if horizon_hours is not None
+                         else (DEFAULT_OVERNIGHT_HOURS
+                               if mode is TradeMode.OVERNIGHT
+                               else calibration.horizon_hours))
+    if effective_horizon <= 0:
+        raise ValueError("horizon_hours must be positive")
+    horizon_seconds = effective_horizon * SECONDS_PER_HOUR
     p_buy = fill_probability(buy_seconds, horizon_seconds)
-    # The sell leg only gets whatever is left of the horizon after the buy leg,
-    # approximated at its mean. Both legs racing the same clock is the point:
-    # an item that fills its buy in three hours has almost no time to sell.
-    remaining = max(0.0, horizon_seconds - min(buy_seconds, horizon_seconds))
-    p_sell = fill_probability(sell_seconds, remaining)
-    p_both = p_buy * p_sell
+    p_both = round_trip_probability(buy_seconds, sell_seconds, horizon_seconds)
+    p_stranded = stranded_inventory_probability(
+        buy_seconds, sell_seconds, horizon_seconds)
+    # Conditional display value: the probability that the sell finishes in
+    # time after a buy has occurred.  The joint value above drives the model.
+    p_sell = p_both / p_buy if p_buy > 0 else 0.0
 
     sigma = sigma_daily if sigma_daily is not None else (
         ou_fit.sigma if ou_fit is not None else calibration.default_sigma_daily)
@@ -1085,11 +1196,32 @@ def score_flip(
     update = update_risk_factor(now, total_seconds, calibration)
 
     raw_profit = margin * qty
-    expected = (raw_profit * p_both * adverse * hold * stale * reversion
-                * alch * update)
+    if mode is TradeMode.ACTIVE:
+        expected = (raw_profit * p_both * adverse * hold * stale * reversion
+                    * alch * update)
+        downside_risk = 0.0
+    else:
+        # An unattended buy that fills without its sell is inventory, not a
+        # successful flip.  Price risk grows with sqrt(time); falling drift and
+        # seller-heavy flow widen the stress move.  The alch floor caps that
+        # move where it is genuinely close enough to matter.
+        horizon_days = effective_horizon / HOURS_PER_DAY
+        stress_move = 1.65 * sigma * math.sqrt(horizon_days)
+        stress_move += max(0.0, -drift) * math.sqrt(effective_horizon)
+        stress_move += max(0.0, -ofi) * 0.025
+        stress_move = max(0.0, min(0.50, stress_move))
+        floor_loss = None if floor is None else max(0.0, (buy - floor) / buy)
+        if (floor_loss is not None
+                and floor_loss < calibration.alch_relevant_distance):
+            stress_move = min(stress_move, floor_loss)
+        downside_risk = qty * buy * p_stranded * stress_move
+        completed_value = (raw_profit * p_both * adverse * stale * reversion
+                           * alch * update)
+        expected = completed_value - downside_risk
 
     hours = total_seconds / SECONDS_PER_HOUR
     per_slot_hour = expected / hours if hours > 0 and hours != float("inf") else 0.0
+    ranking_value = (per_slot_hour if mode is TradeMode.ACTIVE else expected)
 
     arbitrage = None
     if distance is not None and distance <= 0 and floor is not None:
@@ -1101,9 +1233,13 @@ def score_flip(
         buy_rate=buy_rate, sell_rate=sell_rate,
         buy_seconds=buy_seconds, sell_seconds=sell_seconds,
         total_seconds=total_seconds, p_fill_buy=p_buy, p_fill_sell=p_sell,
-        p_fill_both=p_both, adverse_selection=adverse, holding_risk=hold,
+        p_fill_both=p_both, p_stranded=p_stranded,
+        expected_round_trip_qty=qty * p_both,
+        adverse_selection=adverse, holding_risk=hold,
         staleness=stale, mean_reversion=reversion, alch=alch, update_risk=update,
         expected_profit=expected, gp_per_slot_hour=per_slot_hour,
+        ranking_value=ranking_value, downside_risk_gp=downside_risk,
+        mode=mode, horizon_hours=effective_horizon,
         alch_arbitrage_gp=arbitrage)
 
 
@@ -1231,6 +1367,62 @@ def allocate_capital(scores: Sequence[float], capital: int, slots: int,
             break
         for i in hungry:
             allocation[i] += int(spare * (ranked[i] / weight))
+    return allocation
+
+
+def allocate_portfolio(scores: Sequence[float], capital: int,
+                       unit_costs: Sequence[int], needs: Sequence[int],
+                       slots: int) -> List[int]:
+    """Build an executable, integer-unit portfolio for at most ``slots`` rows.
+
+    Each funded slot first receives one affordable unit.  Remaining capital is
+    distributed by decision value, clipped at the quantity/buy-limit cap and
+    rounded down to whole items.  This prevents a score-weighted split from
+    producing a visually occupied slot whose allocation cannot buy one item.
+    Non-positive candidates are deliberately left open.
+    """
+    count = min(len(scores), len(unit_costs), len(needs), max(0, slots))
+    allocation = [0] * count
+    eligible = [i for i in range(count)
+                if scores[i] > 0 and unit_costs[i] > 0
+                and needs[i] >= unit_costs[i]]
+    # Candidate order is ranking order.  If the bank cannot seed every slot,
+    # fund the best rows first instead of creating impossible fractional buys.
+    seeded = []
+    remaining = max(0, int(capital))
+    for i in eligible:
+        cost = int(unit_costs[i])
+        if remaining < cost:
+            continue
+        allocation[i] = cost
+        remaining -= cost
+        seeded.append(i)
+    if not seeded or remaining <= 0:
+        return allocation
+
+    # Water-fill by score. Rounding may leave a sub-unit residue; leaving a few
+    # gp liquid is more honest than reporting a quantity the GE cannot accept.
+    for _ in range(count + 3):
+        hungry = [i for i in seeded if allocation[i] + unit_costs[i] <= needs[i]]
+        if not hungry or remaining < min(unit_costs[i] for i in hungry):
+            break
+        weight = sum(scores[i] for i in hungry)
+        progressed = False
+        for i in hungry:
+            target = int(remaining * scores[i] / weight)
+            room = needs[i] - allocation[i]
+            grant = min(room, target)
+            grant -= grant % unit_costs[i]
+            if grant <= 0 and remaining >= unit_costs[i]:
+                grant = unit_costs[i]
+            grant = min(grant, remaining)
+            grant -= grant % unit_costs[i]
+            if grant > 0:
+                allocation[i] += grant
+                remaining -= grant
+                progressed = True
+        if not progressed:
+            break
     return allocation
 
 

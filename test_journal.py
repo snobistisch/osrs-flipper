@@ -1,6 +1,8 @@
 """Unit tests for journal.py — run with: python3 -m unittest test_journal -v"""
 import unittest
+from types import SimpleNamespace
 
+import engine
 import journal
 
 
@@ -56,6 +58,21 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(s["flips_with_prediction"], 2)
         self.assertEqual(s["predicted_profit"], 27_500 + 1_000)
         self.assertEqual(s["realised_on_predicted"], 27_500 + 200)
+
+    def test_row_snapshot_keeps_overnight_risk_prediction(self):
+        prediction = SimpleNamespace(
+            item_id=4151, margin=25_000, buy=2_400_000, sell=2_475_000,
+            expected_gp=18_000, gp_per_slot_hour=2_250,
+            expected_buy_seconds=1_200, expected_sell_seconds=3_600,
+            p_fill=0.71, trade_mode=engine.TradeMode.OVERNIGHT,
+            horizon_hours=8, ranking_value=18_000, p_stranded=0.29,
+            downside_risk_gp=7_500, tax_exempt=False, factors={"edge": 0.9})
+        self.j.open_flip("Abyssal whip", 1, 2_400_000, row=prediction)
+        row = self.j.rows()[0]
+        self.assertEqual(row["trade_mode"], "overnight")
+        self.assertEqual(row["prediction_horizon_hours"], 8)
+        self.assertAlmostEqual(row["predicted_stranded_probability"], 0.29)
+        self.assertEqual(row["predicted_downside_risk_gp"], 7_500)
 
 
 if __name__ == "__main__":

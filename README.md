@@ -1,14 +1,37 @@
 # OSRS Grand Exchange Flipper
 
-Find Grand Exchange flips you can actually execute. Live prices from the
-[OSRS Wiki real-time price API](https://prices.runescape.wiki), ranked by
-**expected gp per offer slot per hour** — not by the margin on the screen.
+Deploy your Grand Exchange slots from one decision screen. Live prices from
+the [OSRS Wiki real-time price API](https://prices.runescape.wiki) become an
+executable slot plan: item, buy, quantity, sell, committed bank, expected
+profit, fill chance, ETA, risk and confidence.
 
 **[▶ Open the flipper](https://snobistisch.github.io/osrs-flipper/)** — runs in
 your browser, nothing to install. Same model as the Python tools; see
 [Two implementations](#two-implementations) for how they are kept in step.
 
 ## The strategy
+
+The first-time profile is **Members**: members items are available and the
+planner derives **8 GE slots**. Selecting **Free-to-play** coherently changes
+both rules to F2P-only items and 3 slots. Slot count and item access are not
+separate settings, so `members + 3 slots` cannot exist in the normal UI, CLI or
+Python configuration.
+
+There are two first-class flip strategies:
+
+- **Active** — while you are playing. Ranks expected GP per occupied slot-hour,
+  rewarding fast round trips and capital recycling.
+- **Overnight** — while you are offline, with 6/8/10/12-hour horizons (8h by
+  default). Ranks expected profit before return rather than repeated cycles.
+  The sequential buy/sell completion probability is modelled directly, and
+  expected value subtracts stress loss for the dangerous state where the buy
+  fills but the sell is still open when you return. Volatility, falling drift,
+  seller-heavy flow, the alch floor, regime/mean-reversion context, update risk,
+  quote age and historical reach all affect that result.
+
+The portfolio layer funds at most one candidate per slot, rounds to whole
+items, respects bank, buy limits and reachable quantity, and leaves a slot open
+when the candidate has no positive risk-adjusted expected value.
 
 A quoted margin is not profit. It is profit *if* both legs of the flip fill,
 and nothing guarantees that. Everything here exists to turn a quoted margin
@@ -161,10 +184,11 @@ and it is worst exactly where the data is thinnest.
 
 So every score is shrunk toward the market-wide average by an amount set by how
 much volume it rests on, using a hierarchical (empirical-Bayes) posterior. The
-output shows both numbers: **MEASURED** is the score before shrinkage,
-**EV/SLOT/H** is after. A wide gap means the measured number was mostly the
-thinness of the data behind it. When no difference between the day's scores
-survives the noise at all, the tool says so instead of ranking anyway.
+output shows both numbers: **MEASURED** is the score before shrinkage;
+**EV/SLOT/H** (Active) or **HORIZON EV** (Overnight) is after. A wide gap means
+the measured number was mostly the thinness of the data behind it. When no
+difference between the day's scores survives the noise at all, the tool says so
+instead of ranking anyway.
 
 ### 7. Things the game gives you for free
 
@@ -259,10 +283,9 @@ narrowing the view never reorders what is left.
 
 Nothing to install: the [hosted
 version](https://snobistisch.github.io/osrs-flipper/) is one self-contained
-HTML file and runs the same ranking. Enter a budget and it goes, and the first
-thing it shows is one card per offer slot: what to buy, how many, what to list
-it at, and how much of the bank to commit. The table underneath is the working
-out.
+HTML file and runs the same ranking. Enter a budget, choose Active or Overnight,
+and the first thing it shows is the best defensible use of up to eight member
+slots. Preferences are stored locally and can be reset in one click.
 
 It is laid out as a trading terminal wearing RuneScape's clothes: the palette,
 the bevels and the gold Cinzel headings stay, while the data is set the way a
@@ -283,7 +306,7 @@ is a spread and not the high-low range of traded prices. Read as OHLC it would
 mislead, so the chart says which it is.
 
 Three tabs:
-**Flip** ranks by gp per slot per hour, **Merch** pulls a year of daily prices
+**Flip** contains the separate Active and Overnight strategies, **Merch** pulls a year of daily prices
 for a watchlist and is the only view that fetches per item (once, on demand,
 cached six hours in IndexedDB), **Crash** reads the deep-checked candidates for
 price dislocation.
@@ -303,11 +326,12 @@ Dashboard:
 Terminal, same numbers:
 
 ```bash
-python3 cli.py --capital 1m --slots 3
+python3 cli.py --capital 1m --account members --strategy active
+python3 cli.py --capital 20m --account members --strategy overnight --overnight-hours 8
 ```
 
-`--members` for members items, `--slots 8` if you have them, `--top 40` for a
-longer list. The display filters (`--min-roi`, `--min-vol`, `--max-age`,
+Members is the default. Use `--account free-to-play` for the coherent 3-slot,
+F2P-only profile and `--top 40` for a longer list. The display filters (`--min-roi`, `--min-vol`, `--max-age`,
 `--min-depth`) all default to off, as does `--no-bots`, which hides
 bot-supplied free-to-play staples — under 100 gp, buy limit over 10,000. They
 rank well and clear fast; the supply curve is a script that answers a price
@@ -354,6 +378,12 @@ Record the offers that **never filled**, not only the ones that worked. Keeping
 only completed flips is the textbook way to conclude that every flip works, and
 the fill-time model needs the censored observations.
 
+Rows opened from a recommendation also preserve its strategy, horizon,
+round-trip probability, stranded-inventory probability, downside stress,
+ranking value, individual factors and timestamps. That makes future Active and
+Overnight calibration possible without pretending public market prints reveal
+private player fills.
+
 `calibration` is the diagnostic the old journal could not produce:
 
 - **Capture by predicted rank.** If capture falls as you go up the ranking, the
@@ -369,7 +399,7 @@ the fill-time model needs the censored observations.
 that makes it usable — prints *nothing at all* when there is nothing to say.
 
 ```bash
-python3 agent.py flips --json --capital 1.5m --slots 3
+python3 agent.py flips --json --capital 1.5m --account members --strategy active
 python3 agent.py merch                 # the watchlist over a year
 python3 agent.py watch                 # new signals only; usually silent
 python3 agent.py portfolio list
@@ -456,7 +486,7 @@ data could say which factor was wrong.
 | `engine.py` | Flip math and scoring. Pure stdlib, no I/O |
 | `stats.py` | OU fits, empirical-Bayes shrinkage. Pure stdlib |
 | `merch.py` | Long-horizon signals: trend, crash, supply crunch. Pure stdlib |
-| `filters.py` | The pipeline: score, shrink, deep-check, filter, allocate |
+| `filters.py` | Account/mode-aware pipeline: score, shrink, deep-check, filter, executable portfolio |
 | `exemptions.py`, `tax_exempt.json` | Which items pay no GE tax |
 | `api.py` | Wiki API client: bulk endpoints, 30s poll floor, disk-cached history |
 | `archive.py`, `collect.py` | The private tick archive and its poller |
@@ -467,7 +497,7 @@ data could say which factor was wrong.
 | `docs/index.html` | Browser app — self-contained, no build step, no deps |
 
 ```bash
-python3 -m unittest test_engine test_stats test_merch test_filters test_journal test_agent test_docs_port
+python3 -m unittest -v
 ```
 
 `engine.py` and `stats.py` deliberately import nothing outside the standard
@@ -481,7 +511,8 @@ duplication is the price of a zero-install version, and it is a real
 maintenance hazard: the port went stale once already, and the only thing
 guarding it was a README line saying "change it in both".
 
-`test_docs_port.py` now guards the parts that rot silently — the tax-exempt
+`test_docs_port.py` now guards the parts that rot silently — account defaults,
+slot derivation, Active/Overnight functions and plan count, the tax-exempt
 list, every calibration constant, the history window, the raid-unique and
 watchlist id lists, the merch windows, the measured noise curve, and the
 absence of functions the rebuild deleted. It also asserts that the port never
@@ -489,9 +520,10 @@ sets a `User-Agent` header: browsers forbid scripts from setting one, and the
 custom header trips a CORS preflight the wiki answers with 400, so "add a
 descriptive User-Agent like the Python client does" takes the whole page down.
 
-A Python test cannot execute the JavaScript, so formula changes still have to
-be made by hand in both files; what it catches is the class of drift that
-produces plausible numbers that are quietly wrong.
+A syntax check (`node --check` on the embedded script) accompanies the parity
+tests. Formula changes still have to be made in both implementations, but the
+suite now locks the mode-specific functions and members-first state as well as
+the shared constants.
 
 Checked against live data, the two agree to within a fraction of a percent on
 the pre-shrinkage score, the remaining gap being that they poll `/latest`
@@ -506,6 +538,11 @@ you fork or deploy this, change `USER_AGENT` in `api.py` so the wiki team can
 reach *you*. `/timeseries` is per-item and is only ever called for a shortlist,
 cached 30 minutes; the bulk routes are polled no faster than their own cache
 TTLs, which is what `collect.py` respects too.
+
+Both clients retry transient rate-limit/server/transport failures with bounded
+exponential backoff. The Python client and the current browser session may use
+a complete stale snapshot during a short outage and mark the feed stale; a cold
+start still fails clearly instead of rendering a partial market as current.
 
 v1 and v2 of the API return byte-identical payloads on every route used here,
 so the client stays on v1 with the base URL configurable.

@@ -263,7 +263,10 @@ def load_watchlist(client: api.WikiClient, item_ids: Sequence[int],
     return merch.apply_market_context(views), names, problems
 
 
-def rank(client: api.WikiClient, capital: int, slots: int, members: bool,
+def rank(client: api.WikiClient, capital: int,
+         account: engine.AccountType = engine.DEFAULT_ACCOUNT,
+         mode: engine.TradeMode = engine.DEFAULT_TRADE_MODE,
+         overnight_hours: float = engine.DEFAULT_OVERNIGHT_HOURS,
          deep: int = 15) -> filters.ScreenResult:
     """The flip ranking, identical to what cli.py and the browser produce."""
     items = client.mapping()
@@ -273,7 +276,8 @@ def rank(client: api.WikiClient, capital: int, slots: int, members: bool,
     exempt = exemptions.resolve(items)
     nature_cost = exemptions.nature_rune_cost(quotes)
     config = filters.FilterConfig(
-        capital=capital, slots=slots, include_members=members,
+        capital=capital, account=account, trade_mode=mode,
+        overnight_hours=overnight_hours,
         nature_rune_cost=nature_cost)
 
     store = _open_archive()
@@ -331,11 +335,19 @@ def flip_to_dict(row: filters.FlipRow) -> dict:
         "item_id": row.item_id, "name": row.name,
         "buy": row.buy, "sell": row.sell, "list_at": row.sell_listed_at,
         "margin": row.margin, "roi": round(row.roi, 4),
-        "quantity": row.qty_per_window, "capital_needed": row.capital_needed,
+        "quantity": row.allocated_quantity or 0,
+        "max_quantity": row.qty_per_window,
+        "capital_needed": row.allocated_capital or 0,
+        "expected_profit": round(row.allocated_expected_gp or 0),
+        "strategy": row.trade_mode.value,
+        "horizon_hours": row.horizon_hours,
+        "ranking_value": round(row.ranking_value),
         "gp_per_slot_hour": round(row.gp_per_slot_hour),
         "gp_per_slot_hour_before_shrinkage": round(row.raw_gp_per_slot_hour),
         "round_trip_seconds": round(row.expected_total_seconds),
         "p_fill": round(row.p_fill, 3),
+        "p_stranded": round(row.p_stranded, 3),
+        "downside_risk_gp": round(row.downside_risk_gp),
         "edge_probability": round(row.edge_probability, 3),
         "buy_limit": row.limit, "volume_1h": row.thin_volume_1h,
         "tax_exempt": row.tax_exempt,
@@ -392,8 +404,10 @@ def view_to_dict(item_id: int, name: str, view: merch.DailyView) -> dict:
 def cmd_flips(opts) -> int:
     client = api.WikiClient()
     try:
-        result = rank(client, opts.capital, opts.slots, opts.members,
-                      deep=opts.deep)
+        account = engine.AccountType(opts.account)
+        mode = engine.TradeMode(opts.strategy)
+        result = rank(client, opts.capital, account, mode,
+                      opts.overnight_hours, deep=opts.deep)
     except api.ApiError as exc:
         print("API error: {}".format(exc), file=sys.stderr)
         return 1
@@ -402,8 +416,9 @@ def cmd_flips(opts) -> int:
     if opts.json:
         print(json.dumps({
             "generated_at": int(time.time()),
-            "capital": opts.capital, "slots": opts.slots,
-            "members": opts.members,
+            "capital": opts.capital, "slots": account.slots,
+            "account": account.value, "strategy": mode.value,
+            "overnight_hours": opts.overnight_hours,
             "scored": result.funnel.get("scored", 0),
             "deep_checked": result.deep_checked,
             "flips": [flip_to_dict(row) for row in rows],
@@ -413,11 +428,12 @@ def cmd_flips(opts) -> int:
     if not rows:
         print("Nothing worth flipping at this capital right now.")
         return 0
+    unit = "gp/slot/h" if mode is engine.TradeMode.ACTIVE else "gp horizon EV"
     for index, row in enumerate(rows, 1):
-        print("{:>2}. {:<26} buy {:>10} sell {:>10} x{:<6} {:>10} gp/slot/h".format(
+        print("{:>2}. {:<26} buy {:>10} sell {:>10} x{:<6} {:>10} {}".format(
             index, row.name[:26], engine.format_gp(row.buy),
-            engine.format_gp(row.sell), row.qty_per_window,
-            engine.format_gp(int(row.gp_per_slot_hour))))
+            engine.format_gp(row.sell), row.allocated_quantity or 0,
+            engine.format_gp(int(row.ranking_value)), unit))
     return 0
 
 
@@ -717,9 +733,14 @@ def build_parser() -> argparse.ArgumentParser:
                            help="rank flips right now")
     flips.add_argument("--capital", type=engine.parse_gp, default=1_000_000,
                        help="gp across all slots, e.g. 250k or 1.5m")
-    flips.add_argument("--slots", type=int, default=engine.F2P_SLOTS,
-                       help="concurrent offers: 3 free-to-play, 8 members")
-    flips.add_argument("--members", action="store_true")
+    flips.add_argument("--account", choices=[value.value for value in
+                                             engine.AccountType],
+                       default=engine.DEFAULT_ACCOUNT.value)
+    flips.add_argument("--strategy", choices=[value.value for value in
+                                              engine.TradeMode],
+                       default=engine.DEFAULT_TRADE_MODE.value)
+    flips.add_argument("--overnight-hours", type=float,
+                       default=engine.DEFAULT_OVERNIGHT_HOURS)
     flips.add_argument("--top", type=int, default=10)
     flips.add_argument("--deep", type=int, default=15,
                        help="candidates to deep-check against 14d history")

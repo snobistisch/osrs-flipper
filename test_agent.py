@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import agent
+import engine
 import merch
 
 
@@ -164,6 +165,12 @@ class ParserTests(unittest.TestCase):
     def test_capital_accepts_how_players_write_it(self):
         opts = agent.build_parser().parse_args(["flips", "--capital", "1.5m"])
         self.assertEqual(opts.capital, 1_500_000)
+
+    def test_flips_default_to_members_active_profile(self):
+        opts = agent.build_parser().parse_args(["flips"])
+        self.assertEqual(opts.account, engine.AccountType.MEMBERS.value)
+        self.assertEqual(opts.strategy, engine.TradeMode.ACTIVE.value)
+        self.assertEqual(opts.overnight_hours, 8)
 
 
 class ItemResolutionTests(unittest.TestCase):

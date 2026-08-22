@@ -17,15 +17,16 @@ from that directory.
 
 | Ask | Command |
 |-----|---------|
-| What should I flip now? | `python3 agent.py flips --json --capital <gp> --slots <3 or 8>` |
+| What should I actively flip now? | `python3 agent.py flips --json --capital <gp> --account members --strategy active` |
+| What should I leave overnight? | `python3 agent.py flips --json --capital <gp> --account members --strategy overnight --overnight-hours 8` |
 | What should I buy and hold? | `python3 agent.py merch --json` |
 | Anything new since last time? | `python3 agent.py watch` |
 | What am I holding? | `python3 agent.py portfolio --json` |
 | Is the tool healthy? | `python3 agent.py status` |
 
-`--capital` accepts how players write it: `250k`, `1.5m`, `2b`. Slots are 3 for
-free-to-play and 8 for members. Members items are excluded unless `--members`
-is passed.
+`--capital` accepts how players write it: `250k`, `1.5m`, `2b`. Members is the
+default and coherently means 8 slots plus members items. `--account
+free-to-play` coherently means 3 slots and F2P items only.
 
 ## Reading the output
 
@@ -33,6 +34,11 @@ is passed.
 Exchange offer slot per hour, not per flip. A 200k margin that takes six hours
 loses to a 20k margin that clears in twenty minutes, and that is the whole
 point of the metric.
+
+That statement applies to `strategy: active`. For `strategy: overnight`, read
+`ranking_value` as risk-adjusted expected profit over `horizon_hours`. Always
+report `p_fill`, `p_stranded` and `downside_risk_gp` with an overnight pick;
+fast recycling after completion is not available while the player is offline.
 
 **`gp_per_slot_hour_before_shrinkage` is the raw estimate.** When the two are
 far apart, the raw number was mostly the thinness of the data. Say so rather

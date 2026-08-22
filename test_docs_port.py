@@ -108,6 +108,26 @@ class PortSyncTests(unittest.TestCase):
                 float(match.group(1).replace("_", "")), float(expected), places=9,
                 msg="{} differs between the port and engine.py".format(js_name))
 
+    def test_account_profiles_are_members_first_and_coherent(self):
+        self.assertIn('const DEFAULT_ACCOUNT = "members"', self.source)
+        self.assertIn("const MEMBER_SLOTS = 8", self.source)
+        self.assertIn("const F2P_SLOTS = 3", self.source)
+        self.assertIn('accountSlots(account)', self.source)
+        self.assertNotIn('id="f-members"', self.source)
+        self.assertNotIn('id="f-slots"', self.source)
+
+    def test_active_and_overnight_math_is_ported(self):
+        for function in ("roundTripProbability", "strandedInventoryProbability",
+                         "confidenceLabel"):
+            self.assertIn("function {}(".format(function), self.source)
+        self.assertIn('mode === "overnight" ? expected : perSlotHour',
+                      self.source)
+        self.assertIn("downsideRisk", self.source)
+
+    def test_plan_uses_the_derived_slot_count_not_a_three_card_constant(self):
+        self.assertNotIn("const PLAN_SIZE = 3", self.source)
+        self.assertIn("state.rows.slice(0, config.slots)", self.source)
+
     def test_history_window_matches(self):
         for js_name, expected in (
                 ("HISTORY_WINDOW_BUCKETS", engine.HISTORY_WINDOW_BUCKETS),

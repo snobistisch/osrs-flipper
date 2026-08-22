@@ -478,9 +478,12 @@ class HideBottedFilterTests(unittest.TestCase):
             capital_needed=1500, gross_profit=500, undercut_depth=1, drift=0.0,
             ofi=0.0, quote_age=10, tax_exempt=True, sell_listed_at=20,
             expected_buy_seconds=60, expected_sell_seconds=60,
-            expected_total_seconds=120, p_fill=0.9, expected_gp=400,
+            expected_total_seconds=120, p_fill=0.9, p_stranded=0.05,
+            expected_round_trip_qty=90, expected_gp=400,
             raw_gp_per_slot_hour=1000, gp_per_slot_hour=900,
-            edge_probability=0.8)
+            edge_probability=0.8, raw_ranking_value=1000,
+            ranking_value=900, downside_risk_gp=0,
+            trade_mode=engine.TradeMode.ACTIVE, horizon_hours=4)
         defaults.update(overrides)
         return filters.FlipRow(**defaults)
 

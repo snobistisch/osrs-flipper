@@ -59,15 +59,16 @@ class StructuralGateTests(unittest.TestCase):
         self.assertEqual(result.rows, [])
         self.assertEqual(result.funnel["no mapping entry"], 1)
 
-    def test_members_item_excluded_by_default(self):
+    def test_members_item_included_by_default(self):
         result = screen({1: item(members=True)}, {1: quote()},
                         {1: act_5m()}, {1: act_1h()})
-        self.assertEqual(result.funnel["members-only"], 1)
-
-    def test_members_item_included_on_request(self):
-        result = screen({1: item(members=True)}, {1: quote()},
-                        {1: act_5m()}, {1: act_1h()}, include_members=True)
         self.assertEqual(result.funnel["scored"], 1)
+
+    def test_members_item_excluded_by_f2p_profile(self):
+        result = screen({1: item(members=True)}, {1: quote()},
+                        {1: act_5m()}, {1: act_1h()},
+                        account=engine.AccountType.FREE_TO_PLAY)
+        self.assertEqual(result.funnel["members-only"], 1)
 
     def test_null_price_side(self):
         result = screen({1: item()}, {1: Quote(high=None, high_time=None,
@@ -88,7 +89,8 @@ class StructuralGateTests(unittest.TestCase):
 
     def test_cannot_afford_a_single_unit(self):
         result = screen({1: item()}, {1: quote()}, {1: act_5m()},
-                        {1: act_1h()}, capital=100, slots=3)
+                        {1: act_1h()}, capital=100,
+                        account=engine.AccountType.FREE_TO_PLAY)
         self.assertEqual(result.funnel["cannot afford one"], 1)
 
     def test_funnel_always_sums_to_the_quote_count(self):
@@ -101,6 +103,19 @@ class StructuralGateTests(unittest.TestCase):
         total = sum(v for k, v in result.funnel.items() if k != "in /latest")
         self.assertEqual(total, len(quotes))
         self.assertEqual(result.funnel["in /latest"], len(quotes))
+
+
+class AccountConfigurationTests(unittest.TestCase):
+    def test_default_is_members_with_eight_slots(self):
+        config = filters.FilterConfig()
+        self.assertEqual(config.account, engine.AccountType.MEMBERS)
+        self.assertEqual(config.slots, engine.MEMBER_SLOTS)
+        self.assertTrue(config.include_members)
+
+    def test_f2p_derives_both_restrictions(self):
+        config = filters.FilterConfig(account=engine.AccountType.FREE_TO_PLAY)
+        self.assertEqual(config.slots, engine.F2P_SLOTS)
+        self.assertFalse(config.include_members)
 
 
 class NoLongerAGateTests(unittest.TestCase):
@@ -448,7 +463,8 @@ class AllocationStageTests(unittest.TestCase):
         acts1 = {i: act_1h(avg_low=100, avg_high=q.high,
                            high_volume=6_000, low_volume=6_000)
                  for i, q in quotes.items()}
-        cfg = filters.FilterConfig(capital=3_000_000, slots=3)
+        cfg = filters.FilterConfig(
+            capital=3_000_000, account=engine.AccountType.FREE_TO_PLAY)
         result = filters.screen(items, quotes, acts5, acts1, cfg, NOW,
                                 NO_EXEMPTIONS)
         result = filters.allocate(result, cfg)
@@ -520,7 +536,9 @@ class FullPipelineTests(unittest.TestCase):
                  for i in range(1, 11)}
         acts1 = {i: act_1h(avg_low=100 * i, avg_high=int(100 * i * 1.06))
                  for i in range(1, 11)}
-        cfg = filters.FilterConfig(capital=20_000_000, slots=3, min_price=200)
+        cfg = filters.FilterConfig(
+            capital=20_000_000,
+            account=engine.AccountType.FREE_TO_PLAY, min_price=200)
         result = filters.rank_flips(items, quotes, acts5, acts1, cfg, NOW,
                                     fetch_history=lambda _: None, top_k=3,
                                     exempt=NO_EXEMPTIONS)
