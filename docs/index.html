@@ -132,11 +132,31 @@
 .plan-warn { color: #ffb59a; font-size: 0.78rem; margin-top: 0.3rem; }
 .plan-actions { display:flex; gap:.35rem; margin-top:.35rem; }
 .plan-actions button { padding:.22rem .45rem; font:600 .7rem var(--mono); }
+.plan-actions .save-flip-btn {
+  flex:1; border-color:var(--gold); color:var(--gold-bright);
+  box-shadow:inset 0 0 0 1px #806526;
+}
 .plan-actions .unlock-btn { border-color:var(--good); color:var(--good); }
 .lock-live { color:var(--text-dim); font-family:var(--mono); font-size:.7rem; margin-top:.3rem; }
 .stale-actions .plan-actions button:not(.unlock-btn) { opacity:.45; pointer-events:none; }
-#execution { margin:0 0 1rem; }
-#execution table button { padding:.2rem .4rem; font-size:.72rem; }
+#auto-setup {
+  margin:.2rem 0 .8rem; padding:.65rem .7rem; border:1px solid var(--gold);
+  background:rgba(197,157,55,.09); font: .76rem/1.45 var(--mono);
+}
+#auto-setup strong { color:var(--gold-bright); display:block; margin-bottom:.15rem; }
+#execution { margin:0 0 1rem; border-color:var(--gold); }
+.active-flip-cards {
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(235px,1fr)); gap:.55rem;
+}
+.active-flip-card {
+  border:2px solid var(--gold-bright); border-left-width:5px; border-radius:3px;
+  padding:.55rem .65rem; background:linear-gradient(135deg,rgba(197,157,55,.18),var(--panel) 45%);
+  box-shadow:0 0 0 1px rgba(197,157,55,.24),0 0 10px rgba(197,157,55,.12);
+}
+.active-flip-card h3 { font-size:1rem; margin-bottom:.35rem; color:var(--gold-bright); }
+.active-flip-card .flip-status { margin:.35rem 0; color:var(--good); font:600 .75rem var(--mono); }
+.active-flip-card .flip-status.waiting { color:var(--text-dim); }
+.active-flip-card .plan-actions button { padding:.24rem .45rem; font-size:.7rem; }
 .confidence { text-transform: uppercase; letter-spacing: 0.06em; }
 .confidence-high { color: var(--good); }
 .confidence-medium { color: var(--gold); }
@@ -150,6 +170,8 @@
 #workbench { display:grid; grid-template-columns:minmax(480px,.9fr) minmax(500px,1.1fr); gap:.8rem; align-items:start; }
 #workbench #flip-wrap { max-height:740px; overflow:auto; }
 #workbench #detail { position:sticky; top:.6rem; margin:0; }
+#advanced-market { margin:1rem 0; }
+#advanced-market > summary { color:var(--gold); font:600 .82rem var(--mono); cursor:pointer; }
 .hold-btn {
   background: var(--panel-dark);
   color: var(--text-dim);
@@ -690,7 +712,11 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
         <option value="10">10 hours</option><option value="12">12 hours</option>
       </select>
     </div>
-    <details id="filter-details" open>
+    <div id="auto-setup" aria-live="polite">
+      <strong>AUTO FILTERS</strong>
+      <span id="auto-setup-text">Set from your bank and strategy.</span>
+    </div>
+    <details id="filter-details" class="hidden">
       <summary>Optional display filters</summary>
     <div class="field-head">
       <h2 style="margin:0">Display filters</h2>
@@ -788,7 +814,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     </details>
     <div class="field">
       <button id="refresh">Refresh prices</button>
-      <button id="reset-preferences" style="margin-top:.45rem">Reset preferences</button>
+      <button id="reset-preferences" style="margin-top:.45rem">Reset setup</button>
       <div class="small dim" style="margin-top:0.5rem">Refetches at most once per
         30 s, per the wiki's usage policy.</div>
     </div>
@@ -799,7 +825,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
       <h1>🪙 Grand Exchange Flipper</h1>
       <div id="termstat">
         <span><span id="livedot" class="dot"></span><span id="livetext">CONNECTING</span></span>
-        <span>SCORED <b id="stat-scored">—</b></span>
+        <span>QUALITY <b id="stat-scored">—</b></span>
         <span>SPREAD <b id="stat-spread">—</b></span>
         <span id="clock">--:--:--</span>
       </div>
@@ -815,25 +841,23 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
 
     <div id="status" class="small dim"></div>
 
-    <div id="mode-summary"><strong>ACTIVE FLIPPING</strong><span>Members · 8 slots · maximize realistic slot turnover</span></div>
+    <div id="mode-summary"><strong>ACTIVE FLIPPING</strong><span>Members · 8 slots · automatic risk and liquidity filters</span></div>
+
+    <section id="execution" class="panel hidden">
+      <div class="panel-bar"><h2>My saved flips</h2>
+        <div class="figure" id="execution-figure"></div></div>
+      <p class="small dim">Saved in this browser. Your buy, target sell and the
+        newest live prices stay visible after every refresh.</p>
+      <div id="execution-body" class="active-flip-cards"></div>
+    </section>
 
     <section id="plan" class="hidden">
       <div class="panel-bar">
-        <h2>Best GE setup right now</h2>
+        <h2>Best flips right now</h2>
         <div class="figure" id="plan-figure"></div>
       </div>
       <div id="plan-cards"></div>
       <p class="small dim" id="plan-note"></p>
-    </section>
-
-    <section id="execution" class="panel hidden">
-      <div class="panel-bar"><h2>Manual offer tracker</h2>
-        <div class="figure" id="execution-figure"></div></div>
-      <p class="small dim">Manual only: record partial fills, timeouts and
-        reprices. Nothing places or automates an in-game offer.</p>
-      <div class="table-wrap"><table><thead><tr><th>Item</th><th>State</th>
-        <th>Filled</th><th>Next action</th><th></th></tr></thead>
-        <tbody id="execution-body"></tbody></table></div>
     </section>
 
     <div class="table-wrap" id="flip-wrap">
@@ -947,7 +971,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     <div id="keys">
       <span><kbd>F1</kbd>Flip</span><span><kbd>F2</kbd>Merch</span>
       <span><kbd>F3</kbd>Crash</span><span><kbd>R</kbd>Refresh</span>
-      <span><kbd>/</kbd>Filters</span><span><kbd>Esc</kbd>Close detail</span>
+      <span><kbd>Esc</kbd>Close detail</span>
     </div>
 
     <footer>
@@ -1737,7 +1761,7 @@ function shrinkScores(rows) {
    An equal split strands capital: a 10 gp item with a 10,000 buy limit can
    absorb 100k and no more, so a third of a 3m bank sits idle while the 50k
    item that could have used it is capped. */
-function allocateCapital(rows, capital, slots, reserved = []) {
+function allocateCapital(rows, capital, slots, reserved = [], maxPerPosition = Infinity) {
   rows.forEach((r) => { r.allocated = 0; r.allocatedQty = 0; r.allocatedExpected = 0; });
   const selected = [], categoryCount = {};
   for (const lock of reserved) {
@@ -1746,7 +1770,9 @@ function allocateCapital(rows, capital, slots, reserved = []) {
   let seedBank = capital;
   for (const r of rows.slice(0, Math.max(40, slots * 6))) {
     if (selected.length >= slots) break;
-    if (!(r.rankingValue > 0) || !(r.expected > 0) || r.buy > seedBank) continue;
+    const ceiling = Math.min(r.capitalNeeded, maxPerPosition);
+    if (!(r.rankingValue > 0) || !(r.expected > 0) ||
+        r.buy > seedBank || r.buy > ceiling) continue;
     if ((categoryCount[r.category] || 0) >= 3) continue;
     selected.push(r); categoryCount[r.category] = (categoryCount[r.category] || 0) + 1;
     seedBank -= r.buy;
@@ -1760,12 +1786,14 @@ function allocateCapital(rows, capital, slots, reserved = []) {
     seeded.push(r);
   }
   for (let pass = 0; pass < selected.length + 3; pass++) {
-    const hungry = seeded.filter((r) => r.allocated + r.buy <= r.capitalNeeded);
+    const hungry = seeded.filter((r) =>
+      r.allocated + r.buy <= Math.min(r.capitalNeeded, maxPerPosition));
     if (!hungry.length || remaining < Math.min(...hungry.map((r) => r.buy))) break;
     const weight = hungry.reduce((sum, r) => sum + r.rankingValue, 0);
     let progressed = false;
     for (const r of hungry) {
-      let grant = Math.min(r.capitalNeeded - r.allocated,
+      const ceiling = Math.min(r.capitalNeeded, maxPerPosition);
+      let grant = Math.min(ceiling - r.allocated,
         Math.floor(remaining * r.rankingValue / weight));
       grant -= grant % r.buy;
       if (grant <= 0 && remaining >= r.buy) grant = r.buy;
@@ -2948,7 +2976,14 @@ function screen(items, quotes, act5m, act1h, config, now) {
    factors: history replaces estimates instead of only penalising them, so an
    item trading below its long-run level can move UP. */
 async function refineTopRows(rows, config, now) {
-  const targets = rows.slice(0, DEEP_TOP_K * DEEP_BREADTH);
+  // Deep-check the candidates the automatic profile can actually recommend.
+  // Previously a 5m bank spent its history budget on expensive rows that the
+  // budget-aware shortlist should never have shown.
+  const eligible = applyPreferences(rows, config).kept;
+  const targets = [...eligible]
+    .sort((a, b) => quickPlanRiskTier(a) - quickPlanRiskTier(b) ||
+      b.rankingValue - a.rankingValue)
+    .slice(0, DEEP_TOP_K * DEEP_BREADTH);
   let cursor = 0;
   const workers = Array.from({ length: DEEP_CONCURRENCY }, async () => {
     while (cursor < targets.length) {
@@ -3049,7 +3084,32 @@ async function refineTopRows(rows, config, now) {
   return { refined: targets.filter((r) => r.deep).length, shrinkage };
 }
 
-/* Hide rows the user asked not to see. Never reorders what remains. */
+function quickPlanRiskTier(row) {
+  // Safety comes before theoretical gp/h. History-backed high/medium-confidence
+  // rows should fill the plan before an eye-catching but fragile spread.
+  const confidence = row.deep ? confidenceLabel(row) : "unchecked";
+  let tier = confidence === "high" ? 0 : confidence === "medium" ? 1 :
+    confidence === "unchecked" ? 2 : 4;
+  if (row.pricedFromReference) tier += 2;
+  if (row.drift <= -0.02) tier += 2;
+  if (row.pFill < 0.25) tier += 2;
+  if (row.deep && ((row.regimeScore || 0) >= CAL.regime_shift_threshold ||
+      (row.volatility || 0) >= 0.08)) tier += 2;
+  return tier;
+}
+
+function isAutomaticPlanCandidate(row) {
+  if (!state.deepReady) return false;
+  const confidence = confidenceLabel(row);
+  if (!row.deep || row.pricedFromReference || confidence === "speculative" ||
+      (row.mode === "active" && confidence !== "high")) {
+    return false;
+  }
+  const warnings = (row.warnings || []).join(" ").toLowerCase();
+  return !/falling|dumping|don't chase|regime shift|volatile|no realistic fill|only \d+% chance/.test(warnings);
+}
+
+/* Automatic quality gates. Never reorders what remains. */
 function applyPreferences(rows, config) {
   const hidden = {
     "quote too old": 0, "volume too thin": 0, "price out of range": 0,
@@ -3103,6 +3163,7 @@ const state = {
   planRows: [],
   planEntries: [],
   slotLocks: [],
+  deepReady: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -3211,53 +3272,73 @@ function trackOffer(row) {
   if (list.some((x) => x.itemId === row.id && !["sold", "cancelled"].includes(x.status))) return;
   list.unshift({ key: `${Date.now()}-${row.id}`, itemId: row.id, name: row.name,
     qty: row.allocatedQty || row.qty, buy: row.buy, sell: row.listAt ?? row.sell,
-    bought: 0, sold: 0, status: "planned", createdAt: Date.now(), updatedAt: Date.now(),
+    bought: 0, sold: 0, status: "watching", createdAt: Date.now(), updatedAt: Date.now(),
     limit: row.limit, limitGroup: row.limitGroup, mode: row.mode });
   saveExecutions(list);
 }
-function executionAction(x) {
-  const minutes = (Date.now() - x.updatedAt) / 60000;
-  if (x.status === "planned") return `Place ${num(x.qty)} @ ${num(x.buy)}; confirm margin first if this came from an average-price fallback.`;
-  if (x.status === "buy_placed") return minutes >= 20
-    ? "No fill after ~20m: cancel or improve one price step; never chase a moving market."
-    : "Wait for fills; record partial quantity instead of treating the batch as all-or-nothing.";
-  if (x.status === "partial_buy") return "Collect the partial buy. Active: sell the filled part in another slot; Overnight: leave the remaining buy until return.";
-  if (x.status === "buy_complete") return `Collect, then place ${num(x.bought)} @ ${num(x.sell)}.`;
-  if (["sell_placed", "partial_sell"].includes(x.status)) return minutes >= 20
-    ? "Sell still resting: lower one step, reassess margin, or cancel; do not dump through the spread blindly."
-    : "Wait; record sold quantity when it changes.";
-  return x.status === "sold" ? "Closed — compare realised outcome with the prediction." : "Cancelled — retained as a censored fill observation.";
-}
-function advanceExecution(key) {
+function editExecution(key) {
   const list = loadExecutions(), x = list.find((r) => r.key === key);
   if (!x) return;
-  if (x.status === "planned") x.status = "buy_placed";
-  else if (["buy_placed", "partial_buy"].includes(x.status)) {
-    const value = Number(prompt(`Total bought so far (0–${x.qty})`, String(x.bought || 0)));
-    if (!Number.isFinite(value)) return;
-    x.bought = Math.max(0, Math.min(x.qty, Math.floor(value)));
-    x.status = x.bought >= x.qty ? "buy_complete" : "partial_buy";
-  } else if (x.status === "buy_complete") x.status = "sell_placed";
-  else if (["sell_placed", "partial_sell"].includes(x.status)) {
-    const value = Number(prompt(`Total sold so far (0–${x.bought})`, String(x.sold || 0)));
-    if (!Number.isFinite(value)) return;
-    x.sold = Math.max(0, Math.min(x.bought, Math.floor(value)));
-    x.status = x.sold >= x.bought ? "sold" : "partial_sell";
+  const qty = Number(prompt("Quantity to monitor", String(x.qty)));
+  if (!Number.isFinite(qty) || qty <= 0) return;
+  const buy = Number(prompt("Your actual buy price per item", String(x.buy)));
+  if (!Number.isFinite(buy) || buy <= 0) return;
+  const sell = Number(prompt("Your target sell price per item", String(x.sell)));
+  if (!Number.isFinite(sell) || sell <= 0) return;
+  x.qty = Math.floor(qty); x.buy = Math.floor(buy); x.sell = Math.floor(sell);
+  x.updatedAt = Date.now();
+  if (state.config) {
+    const locks = locksFor(state.config).map((lock) => lock.id === x.itemId
+      ? { ...lock, qty: x.qty, buy: x.buy, sell: x.sell, commit: x.qty * x.buy }
+      : lock);
+    saveProfileLocks(state.config, locks);
   }
-  x.updatedAt = Date.now(); saveExecutions(list);
+  saveExecutions(list);
+  replanFromCurrentData();
+}
+function releaseLockForItem(itemId) {
+  if (!state.config) return;
+  const remaining = locksFor(state.config).filter((lock) => lock.id !== itemId);
+  saveProfileLocks(state.config, remaining);
+}
+function finishExecution(key, remove = false) {
+  const list = loadExecutions();
+  const index = list.findIndex((row) => row.key === key);
+  if (index < 0) return;
+  const itemId = list[index].itemId;
+  if (remove) list.splice(index, 1);
+  else { list[index].status = "sold"; list[index].updatedAt = Date.now(); }
+  releaseLockForItem(itemId);
+  saveExecutions(list);
+  replanFromCurrentData();
 }
 function renderExecutions() {
-  const list = loadExecutions();
+  const list = loadExecutions().filter((x) => !["sold", "cancelled"].includes(x.status));
   $("#execution").classList.toggle("hidden", !list.length);
-  if (!list.length) return;
-  $("#execution-figure").textContent = `${list.filter((x) => !["sold", "cancelled"].includes(x.status)).length} OPEN`;
-  $("#execution-body").innerHTML = list.slice(0, 25).map((x) => `<tr>
-    <td>${escapeHtml(x.name)}<br><span class="dim">${num(x.buy)} → ${num(x.sell)}</span></td>
-    <td>${escapeHtml(x.status.replaceAll("_", " ").toUpperCase())}</td>
-    <td>${num(x.bought || 0)} bought · ${num(x.sold || 0)} sold / ${num(x.qty)}</td>
-    <td>${escapeHtml(executionAction(x))}</td><td>
-      ${!["sold", "cancelled"].includes(x.status) ? `<button data-advance="${x.key}">Update</button>
-      <button data-cancel="${x.key}">Cancel</button>` : ""}</td></tr>`).join("");
+  if (!list.length) { $("#execution-body").innerHTML = ""; return; }
+  $("#execution-figure").textContent = `${list.length} SAVED`;
+  $("#execution-body").innerHTML = list.slice(0, 24).map((x) => {
+    const quote = state.quotes?.[x.itemId];
+    const liveBuy = quote?.low ?? null, liveSell = quote?.high ?? null;
+    const targetLive = liveSell != null && liveSell >= x.sell;
+    const status = liveSell == null ? "No fresh live price"
+      : targetLive ? "Target price is live now"
+        : `${num(x.sell - liveSell)} gp/item below your target`;
+    const exempt = state.exemptIds?.has(Number(x.itemId)) || false;
+    const targetProfit = (netRevenue(x.sell, exempt) - x.buy) * x.qty;
+    return `<article class="active-flip-card" data-execution="${escapeHtml(x.key)}">
+      <div class="plan-rank">SAVED FLIP · ${new Date(x.createdAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</div>
+      <h3>${escapeHtml(x.name)}</h3>
+      <div class="plan-line"><span>YOUR BUY</span><strong>${num(x.qty)} @ ${num(x.buy)}</strong></div>
+      <div class="plan-line"><span>TARGET SELL</span><strong>${num(x.sell)}</strong></div>
+      <div class="plan-line"><span>LIVE NOW</span><strong>${liveBuy == null || liveSell == null ? "—" : `${num(liveBuy)} → ${num(liveSell)}`}</strong></div>
+      <div class="plan-line"><span>TARGET PROFIT</span><strong>${formatGp(Math.round(targetProfit))} GP</strong></div>
+      <div class="flip-status${targetLive ? "" : " waiting"}">${escapeHtml(status)}</div>
+      <div class="plan-actions"><button data-edit-execution="${escapeHtml(x.key)}">Edit</button>
+        <button data-done-execution="${escapeHtml(x.key)}">Done</button>
+        <button data-remove-execution="${escapeHtml(x.key)}">Remove</button></div>
+    </article>`;
+  }).join("");
 }
 
 function accountSlots(account) {
@@ -3275,10 +3356,6 @@ function savePreferences() {
   const value = {
     capital: state.capital, account: $("#f-account").value,
     strategy: $("#f-strategy").value, horizon: Number($("#f-horizon").value),
-    age: Number($("#f-age").value), volume: Number($("#f-vol").value),
-    roi: Number($("#f-roi").value), depth: Number($("#f-depth").value),
-    minPrice: $("#f-price-min").value, maxPrice: $("#f-price-max").value,
-    taxFree: $("#f-taxfree").checked, noBots: $("#f-nobots").checked,
     timestep: state.timestep,
   };
   try { localStorage.setItem(PREF_KEY, JSON.stringify(value)); } catch {}
@@ -3290,14 +3367,6 @@ function restorePreferences() {
   $("#f-strategy").value = p.strategy === "overnight" ? p.strategy : DEFAULT_STRATEGY;
   $("#f-horizon").value = [6, 8, 10, 12].includes(Number(p.horizon))
     ? String(p.horizon) : String(DEFAULT_OVERNIGHT_HOURS);
-  for (const [selector, key] of [["#f-age", "age"], ["#f-vol", "volume"],
-    ["#f-roi", "roi"], ["#f-depth", "depth"]]) {
-    if (p[key] != null) $(selector).value = String(p[key]);
-  }
-  $("#f-price-min").value = p.minPrice || "";
-  $("#f-price-max").value = p.maxPrice || "";
-  $("#f-taxfree").checked = Boolean(p.taxFree);
-  $("#f-nobots").checked = Boolean(p.noBots);
   if (["5m", "1h", "6h", "24h"].includes(p.timestep)) state.timestep = p.timestep;
   return p;
 }
@@ -3308,10 +3377,28 @@ function parsePriceInput(sel) {
   try { return parseGp(raw); } catch { return null; }
 }
 
+function automaticFilterProfile(capital, account, strategy) {
+  const slots = accountSlots(account);
+  const overnight = strategy === "overnight";
+  const lowBank = capital <= 10_000_000;
+  const maxPositionCapital = Math.max(1, Math.floor(capital * (overnight ? 0.35 : 0.25)));
+  return {
+    maxQuoteAge: overnight ? 900 : 600,
+    minVolume1h: overnight ? (lowBank ? 40 : 20) : (lowBank ? 100 : 40),
+    minRoi: overnight ? 0.008 : 0.003,
+    minUndercutDepth: 1,
+    minPrice: 1,
+    maxPrice: Math.max(1, Math.floor(Math.min(capital / slots, maxPositionCapital))),
+    maxPositionCapital,
+    taxFreeOnly: false,
+    hideBotted: true,
+  };
+}
+
 function readConfig() {
-  const age = Number($("#f-age").value);
   const account = $("#f-account").value;
   const strategy = $("#f-strategy").value;
+  const automatic = automaticFilterProfile(state.capital, account, strategy);
   return {
     capital: state.capital,
     account,
@@ -3321,16 +3408,7 @@ function readConfig() {
     horizonHours: strategy === "overnight"
       ? Number($("#f-horizon").value) : WINDOW_HOURS,
     natureCost: state.natureCost,
-    // Display filters. All default to off: these are preferences, not
-    // correctness gates, and they are applied after scoring and shrinkage.
-    maxQuoteAge: age > 0 ? age : null,
-    minVolume1h: Number($("#f-vol").value),
-    minRoi: Number($("#f-roi").value) / 1000,   // slider is tenths of a percent
-    minUndercutDepth: Number($("#f-depth").value),
-    minPrice: parsePriceInput("#f-price-min") ?? 1,
-    maxPrice: parsePriceInput("#f-price-max"),
-    taxFreeOnly: $("#f-taxfree").checked,
-    hideBotted: $("#f-nobots").checked,
+    ...automatic,
   };
 }
 
@@ -3348,6 +3426,13 @@ function syncFilterLabels() {
     : formatGp(state.capital) + ` gp pooled across ${slots} slots`;
   const overnight = $("#f-strategy").value === "overnight";
   $("#overnight-field").classList.toggle("hidden", !overnight);
+  if (state.capital != null) {
+    const auto = automaticFilterProfile(state.capital, $("#f-account").value,
+      $("#f-strategy").value);
+    $("#auto-setup-text").textContent =
+      `${auto.maxQuoteAge / 60}m freshness · ${num(auto.minVolume1h)}+/h volume · ` +
+      `${(auto.minRoi * 100).toFixed(1)}%+ net ROI · max ${formatGp(auto.maxPositionCapital)} per trade`;
+  }
 }
 
 async function loadAndRender() {
@@ -3356,6 +3441,7 @@ async function loadAndRender() {
   status.className = "small dim";
   status.textContent = "Loading live prices…";
   state.feedStale = false;
+  state.deepReady = false;
   try {
     const previousQuotes = state.quotes;
     const [items, quotes, act5m, act1h] = await Promise.all([
@@ -3394,6 +3480,7 @@ async function loadAndRender() {
 
     const { refined, shrinkage } = await refineTopRows(rows, config, now);
     if (gen !== state.gen) return;
+    state.deepReady = true;
     let tail = `  →  ${refined} deep-checked vs 14-day history`;
     if (shrinkage.applied && shrinkage.tau2 <= 0) {
       tail += "  ·  every difference between today's scores is inside " +
@@ -3415,7 +3502,15 @@ async function loadAndRender() {
 
 /* Apply the display filters, allocate capital across the slots, render. */
 function show(allRows, config, statusText) {
-  const { kept, hidden } = applyPreferences(allRows, config);
+  const { kept: eligible, hidden } = applyPreferences(allRows, config);
+  // Allocation changes quantity-dependent scores. Work on disposable copies so
+  // a later history result or price refresh always starts from pristine rows.
+  const kept = eligible.map((row) => ({
+    ...row,
+    warnings: [...(row.warnings || [])],
+    tags: [...(row.tags || [])],
+    factors: { ...(row.factors || {}) },
+  }));
   const decisionKey = `${config.account}:${config.strategy}:${config.horizonHours}`;
   if (state.lastDecisionKey !== decisionKey) state.selected = null;
   state.lastDecisionKey = decisionKey;
@@ -3425,9 +3520,12 @@ function show(allRows, config, statusText) {
   kept.forEach((row) => {
     row.allocated = 0; row.allocatedQty = 0; row.allocatedExpected = 0;
   });
-  const candidates = kept.filter((row) => !lockedIds.has(row.id));
+  const candidates = kept.filter((row) => !lockedIds.has(row.id) &&
+    isAutomaticPlanCandidate(row));
+  candidates.sort((a, b) => quickPlanRiskTier(a) - quickPlanRiskTier(b) ||
+    b.rankingValue - a.rankingValue);
   allocateCapital(candidates, Math.max(0, config.capital - lockedCommit),
-    Math.max(0, config.slots - locks.length), locks);
+    Math.max(0, config.slots - locks.length), locks, config.maxPositionCapital);
   state.rows = [...candidates, ...kept.filter((row) => lockedIds.has(row.id))];
   state.planRows = candidates;
   state.slotLocks = locks;
@@ -3437,18 +3535,22 @@ function show(allRows, config, statusText) {
   const hiddenText = Object.entries(hidden).filter(([, v]) => v > 0)
     .map(([k, v]) => `${num(v)} ${k}`).join(", ");
   $("#status").className = "small dim";
-  $("#status").textContent = statusText +
-    (hiddenText ? `  ·  hidden by your filters: ${hiddenText}` : "");
+  $("#status").textContent = state.deepReady
+    ? `${candidates.length} quality flip${candidates.length === 1 ? "" : "s"} passed the live and 14-day checks.`
+    : "Checking the strongest live candidates against 14-day history…";
+  $("#status").title = statusText +
+    (hiddenText ? ` · automatic quality gates removed: ${hiddenText}` : "");
   // The crash view is a different reading of these same rows, so a refresh
   // has to redraw whichever of the two is on screen.
   renderActiveTable();
   renderPlan(config);
+  renderExecutions();
   renderTape();
   renderTerminalStats(config);
   const overnight = config.strategy === "overnight";
   $("#mode-summary").innerHTML = overnight
-    ? `<strong>OVERNIGHT · ${config.horizonHours}H</strong><span>${config.account === "members" ? "Members · 8 slots" : "F2P · 3 slots"} · buy while away, liquidate after return</span>`
-    : `<strong>ACTIVE FLIPPING</strong><span>${config.account === "members" ? "Members · 8 slots" : "F2P · 3 slots"} · maximize realistic slot turnover</span>`;
+    ? `<strong>OVERNIGHT · ${config.horizonHours}H</strong><span>${config.account === "members" ? "Members · 8 slots" : "F2P · 3 slots"} · automatic liquidity and risk gates</span>`
+    : `<strong>ACTIVE FLIPPING</strong><span>${config.account === "members" ? "Members · 8 slots" : "F2P · 3 slots"} · automatic liquidity and risk gates</span>`;
   $("#ranking-heading").textContent = overnight ? "Horizon EV" : "EV/slot/h";
   $("#time-heading").textContent = overnight ? "Return + sell" : "Round trip";
   $("#fill-heading").textContent = overnight ? "Full buy by return" : "Full-trip chance";
@@ -3462,7 +3564,9 @@ function show(allRows, config, statusText) {
     const row = state.rows.find((r) => r.id === state.selected);
     if (row) showDetail(row.id);
     else $("#detail").classList.add("hidden");
-  } else if (state.tab === "flip" && kept.length) showDetail(kept[0].id);
+  } else if (state.tab === "flip") {
+    $("#detail").classList.add("hidden");
+  }
 }
 
 function sortedRows() {
@@ -3542,7 +3646,7 @@ function renderTerminalStats(config) {
     ? entry.lock.commit : (entry.row.allocated || 0)), 0);
   const locked = state.planEntries.filter((entry) => entry.locked).length;
   $("#plan-figure").innerHTML = config
-    ? `${config.slots} SLOTS${locked ? ` · <b>${locked}</b> LOCKED` : ""} · ` +
+    ? `${state.planEntries.length} OF ${config.slots} QUALITY SLOTS${locked ? ` · <b>${locked}</b> LOCKED` : ""} · ` +
       `<b>${formatGp(committed)}</b> COMMITTED` : "";
 }
 
@@ -3555,6 +3659,9 @@ function renderTerminalStats(config) {
 
 function renderPlan(config) {
   const cards = $("#plan-cards");
+  const savedIds = new Set(loadExecutions()
+    .filter((x) => !["sold", "cancelled"].includes(x.status))
+    .map((x) => x.itemId));
   const rows = state.planRows.slice(0, Math.max(0, config.slots - state.slotLocks.length))
     .filter((r) => (r.allocatedQty || 0) > 0 && r.expected > 0);
   const entries = Array(config.slots).fill(null);
@@ -3598,8 +3705,10 @@ function renderPlan(config) {
             <span class="confidence confidence-${lock.confidence}">${lock.confidence}</span></div>
           <div class="lock-live">${liveText}</div>
           ${lock.warnings.length ? `<details class="plan-warn"><summary>${lock.warnings.length} saved risk flag${lock.warnings.length === 1 ? "" : "s"}</summary>${escapeHtml(lock.warnings.join(" · "))}</details>` : ""}
-          <div class="plan-actions"><button data-track-lock="${entry.slot}">Track offer</button>
-            <button class="unlock-btn" data-unlock="${entry.slot}">Unlock</button></div>
+          <div class="plan-actions">${savedIds.has(lock.id)
+            ? `<button class="save-flip-btn" disabled>SAVED &amp; MONITORED ✓</button>`
+            : `<button class="save-flip-btn" data-track-lock="${entry.slot}">SAVE &amp; MONITOR</button>`}
+            <button class="unlock-btn" data-unlock="${entry.slot}">Release slot</button></div>
         </div>`;
     }
     const r = entry.row;
@@ -3623,8 +3732,7 @@ function renderPlan(config) {
           : `${Math.round(r.pFill * 100)}% FULL TRIP · ${formatDuration(r.totalSeconds)} ETA · ${num(Math.round(r.fillLowQty))}–${num(Math.round(r.fillHighQty))} COMPLETED`} ·
           <span class="confidence confidence-${confidence}">${confidence}</span></div>
         ${r.warnings.length ? `<details class="plan-warn"><summary>${r.warnings.length} risk flag${r.warnings.length === 1 ? "" : "s"}</summary>${escapeHtml(r.warnings.join(" · "))}</details>` : ""}
-        <div class="plan-actions"><button data-lock="${r.id}" data-slot="${entry.slot}">Lock trade</button>
-          <button data-track="${r.id}">Track offer</button></div>
+        <div class="plan-actions"><button class="save-flip-btn" data-save="${r.id}" data-slot="${entry.slot}">SAVE &amp; MONITOR</button></div>
       </div>`;
   }).join("");
 
@@ -3638,7 +3746,7 @@ function renderPlan(config) {
     ? entry.lock.commit : (entry.row.allocated || 0)), 0);
   const locked = state.slotLocks.length;
   if (locked) {
-    parts.push(`${locked} locked trade${locked === 1 ? " keeps" : "s keep"} its saved buy, quantity and sell offer across price refreshes. Locked commitments reserve bank; live scanner prices are shown only as context until you unlock.`);
+    parts.push(`${locked} saved trade${locked === 1 ? " keeps" : "s keep"} its buy, quantity and sell target across refreshes. Saved commitments reserve bank until you mark the flip done or release its slot.`);
   }
   if (committed > config.capital) {
     parts.push(`Locked commitments exceed the current ${formatGp(config.capital)} bank. No new trade is funded until you raise the bank or unlock a slot.`);
@@ -3650,10 +3758,9 @@ function renderPlan(config) {
   }
   if (slots > state.planEntries.length) {
     parts.push(`${slots - state.planEntries.length} slot${
-      slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: the remaining candidates have no positive risk-adjusted EV or cannot buy one executable unit.`);
+      slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: the remaining candidates failed the automatic confidence, trend or executable-price checks.`);
   }
-  parts.push("Quantities already respect your bank, whole items, buy limits and " +
-    "the volume expected to be reachable. Click a card for chart and rationale.");
+  parts.push(`Automatic selection already enforces fresh prices, liquidity, net ROI, queue room and a maximum of ${formatGp(config.maxPositionCapital)} per new trade. Save a flip to keep watching its target.`);
   $("#plan-note").textContent = parts.join(" ");
 }
 
@@ -4531,22 +4638,6 @@ $("#change-budget").addEventListener("click", () => {
   $("#budget").focus();
 });
 
-let filterTimer = null;
-["#f-age", "#f-vol", "#f-roi", "#f-depth"].forEach((sel) => {
-  $(sel).addEventListener("input", () => {
-    syncFilterLabels();
-    clearTimeout(filterTimer);
-    filterTimer = setTimeout(loadAndRender, 200);
-  });
-});
-$("#f-taxfree").addEventListener("change", loadAndRender);
-$("#f-nobots").addEventListener("change", loadAndRender);
-["#f-price-min", "#f-price-max"].forEach((sel) => {
-  $(sel).addEventListener("input", () => {
-    clearTimeout(filterTimer);
-    filterTimer = setTimeout(loadAndRender, 400);
-  });
-});
 $("#f-account").addEventListener("change", () => {
   syncFilterLabels();
   loadAndRender();
@@ -4562,9 +4653,6 @@ $("#reset-preferences").addEventListener("click", () => {
   $("#f-account").value = DEFAULT_ACCOUNT;
   $("#f-strategy").value = DEFAULT_STRATEGY;
   $("#f-horizon").value = String(DEFAULT_OVERNIGHT_HOURS);
-  for (const selector of ["#f-age", "#f-vol", "#f-roi", "#f-depth"]) $(selector).value = "0";
-  $("#f-price-min").value = ""; $("#f-price-max").value = "";
-  $("#f-taxfree").checked = false; $("#f-nobots").checked = false;
   state.timestep = "1h";
   syncFilterLabels();
   loadAndRender();
@@ -4596,9 +4684,13 @@ $("#plan-cards").addEventListener("click", (event) => {
     unlockSlot(Number(unlock.dataset.unlock));
     event.stopPropagation(); return;
   }
-  const lock = event.target.closest("button[data-lock]");
-  if (lock) {
-    lockSlot(Number(lock.dataset.slot), Number(lock.dataset.lock));
+  const save = event.target.closest("button[data-save]");
+  if (save) {
+    const row = state.planRows.find((value) => value.id === Number(save.dataset.save));
+    if (row) {
+      trackOffer(row);
+      lockSlot(Number(save.dataset.slot), row.id);
+    }
     event.stopPropagation(); return;
   }
   const trackLock = event.target.closest("button[data-track-lock]");
@@ -4608,12 +4700,6 @@ $("#plan-cards").addEventListener("click", (event) => {
     if (saved) trackOffer(saved);
     event.stopPropagation(); return;
   }
-  const track = event.target.closest("button[data-track]");
-  if (track) {
-    const row = state.rows.find((r) => r.id === Number(track.dataset.track));
-    if (row) trackOffer(row);
-    event.stopPropagation(); return;
-  }
   const card = event.target.closest(".plan-card");
   if (card && state.rows.some((row) => row.id === Number(card.dataset.id))) {
     showDetail(Number(card.dataset.id));
@@ -4621,12 +4707,12 @@ $("#plan-cards").addEventListener("click", (event) => {
 });
 
 $("#execution-body").addEventListener("click", (event) => {
-  const advance = event.target.closest("button[data-advance]");
-  if (advance) { advanceExecution(advance.dataset.advance); return; }
-  const cancel = event.target.closest("button[data-cancel]");
-  if (!cancel) return;
-  const list = loadExecutions(), row = list.find((x) => x.key === cancel.dataset.cancel);
-  if (row) { row.status = "cancelled"; row.updatedAt = Date.now(); saveExecutions(list); }
+  const edit = event.target.closest("button[data-edit-execution]");
+  if (edit) { editExecution(edit.dataset.editExecution); return; }
+  const done = event.target.closest("button[data-done-execution]");
+  if (done) { finishExecution(done.dataset.doneExecution); return; }
+  const remove = event.target.closest("button[data-remove-execution]");
+  if (remove) finishExecution(remove.dataset.removeExecution, true);
 });
 
 $("#tabs").addEventListener("click", (event) => {
@@ -4700,7 +4786,6 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "r" || event.key === "R") { loadAndRender(); return; }
-  if (event.key === "/") { event.preventDefault(); $("#f-price-min").focus(); return; }
   if (event.key === "Escape") {
     $("#detail").classList.add("hidden");
     state.selected = null;
@@ -4723,6 +4808,14 @@ workbench.id = "workbench";
 $("#flip-wrap").parentNode.insertBefore(workbench, $("#flip-wrap"));
 workbench.appendChild($("#flip-wrap"));
 workbench.appendChild($("#detail"));
+const advancedMarket = document.createElement("details");
+advancedMarket.id = "advanced-market";
+const advancedSummary = document.createElement("summary");
+advancedSummary.textContent = "Charts & details";
+workbench.parentNode.insertBefore(advancedMarket, workbench);
+advancedMarket.appendChild(advancedSummary);
+advancedMarket.appendChild(workbench);
+advancedMarket.appendChild($("#flip-note"));
 const restored = restorePreferences();
 if (window.matchMedia("(max-width: 820px)").matches) {
   $("#filter-details").removeAttribute("open");

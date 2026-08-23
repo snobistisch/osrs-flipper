@@ -128,10 +128,27 @@ class PortSyncTests(unittest.TestCase):
             self.assertIn("function {}(".format(function), self.source)
 
     def test_live_execution_workflow_is_present(self):
-        self.assertIn("Manual offer tracker", self.source)
-        self.assertIn("data-track", self.source)
-        self.assertIn("partial_buy", self.source)
+        self.assertIn("My saved flips", self.source)
+        self.assertIn("SAVE &amp; MONITOR", self.source)
+        self.assertIn('status: "watching"', self.source)
+        self.assertIn("TARGET SELL", self.source)
+        self.assertIn("LIVE NOW", self.source)
         self.assertIn("60_000", self.source)
+
+    def test_quick_flow_uses_automatic_quality_and_concentration_gates(self):
+        self.assertIn("function automaticFilterProfile(", self.source)
+        self.assertIn("maxQuoteAge: overnight ? 900 : 600", self.source)
+        self.assertIn("minVolume1h: overnight ?", self.source)
+        self.assertIn("minRoi: overnight ? 0.008 : 0.003", self.source)
+        self.assertIn("maxPositionCapital", self.source)
+        self.assertIn("config.maxPositionCapital", self.source)
+        self.assertIn("quickPlanRiskTier", self.source)
+        self.assertIn("function isAutomaticPlanCandidate(", self.source)
+        self.assertIn('confidence !== "high"', self.source)
+        self.assertIn("state.deepReady = true", self.source)
+        self.assertIn("kept: eligible", self.source)
+        self.assertIn("eligible.map((row)", self.source)
+        self.assertIn('id="filter-details" class="hidden"', self.source)
 
     def test_slot_locks_survive_refresh_and_reserve_capital(self):
         self.assertIn('const LOCK_KEY = "osrs-flipper.slot-locks.v1"', self.source)

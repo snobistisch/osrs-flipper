@@ -221,20 +221,22 @@ instead of ranking anyway.
 
 ### Execution is part of the decision
 
-The browser refreshes prices every 60 seconds, highlights changed plans and
-disables “Track offer” actions once the feed is stale. Its local manual offer
-tracker records planned, placed, partial-buy, bought, sell, partial-sell, sold
-and cancelled states. At roughly 20 minutes without progress it suggests a
-cancel/reprice decision; partial inventory is collected and managed explicitly.
-It never places or automates an in-game offer. Cancelled offers remain useful
-censored observations instead of disappearing from the record.
+The browser is deliberately one-click. It derives freshness, minimum volume,
+net ROI, undercut room, maximum unit price and bot-supply gates from the bank,
+account and Active/Overnight strategy. New recommendations may commit at most
+25% of the bank per item in Active mode (35% Overnight), so a thin expensive
+item cannot consume nearly the whole cash stack merely because its estimated
+spread is wide. Direct live-price candidates are filled before rows reconstructed
+from hourly averages. The Active plan itself only shows history-checked,
+high-confidence candidates with executable live prices and rejects known
+falling, dumping, regime-shift and poor-fill warnings. It may leave a slot or
+part of the bank unused when the remaining choices are weaker.
 
-Any suggested slot can also be **locked** before the next refresh. The browser
-then preserves that trade's item, quantity, buy price and exact sell offer in
-local storage, while showing the newest scanner prices beside the saved target.
-Locked commitments and connected buy limits remain reserved when the other
-slots are re-planned; unlocking immediately returns both the slot and bank to
-the live allocator. Locks are isolated by account and Active/Overnight profile.
+**Save & monitor** records the suggested item, quantity, buy and target sell in
+local browser storage and pins the slot. A gold card at the top then compares
+that target with the newest live buy/sell prices after every 60-second refresh.
+The values can be edited to the player's actual fill; Done or Remove releases
+the reserved slot and bank. Nothing places or automates an in-game offer.
 
 The confidence badge means confidence in the model evidence, not certainty of
 execution. A price reconstructed from hourly averages can never be High;
