@@ -135,6 +135,16 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("LIVE NOW", self.source)
         self.assertIn("60_000", self.source)
 
+    def test_saved_trades_win_over_replaceable_market_cache(self):
+        self.assertIn('const TIMESERIES_KEY_PREFIX = "osrs-flipper.ts."', self.source)
+        self.assertIn("function clearLocalMarketCaches(", self.source)
+        self.assertIn("function pruneTimeseriesCache(maxEntries = 60)", self.source)
+        self.assertIn("function writeDurableStorage(", self.source)
+        self.assertIn("clearLocalMarketCaches();", self.source)
+        self.assertIn("writeDurableStorage(EXEC_KEY", self.source)
+        self.assertIn("writeDurableStorage(LOCK_KEY", self.source)
+        self.assertIn("Save & Monitor could not use browser storage", self.source)
+
     def test_quick_flow_uses_automatic_quality_and_concentration_gates(self):
         self.assertIn("function automaticFilterProfile(", self.source)
         self.assertIn("maxQuoteAge: overnight ? 900 : 600", self.source)

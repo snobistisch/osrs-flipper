@@ -247,6 +247,12 @@ that target with the newest live buy/sell prices after every 60-second refresh.
 The values can be edited to the player's actual fill; Done or Remove releases
 the reserved slot and bank. Nothing places or automates an in-game offer.
 
+Replaceable mapping and 14-day series caches are capped and evicted before a
+saved flip, lock, preference or holding is allowed to fail for storage quota.
+If the browser blocks site storage entirely, the page reports that explicitly
+instead of silently ignoring Save. Browser storage is origin-specific: the
+local `file://` copy and the GitHub Pages URL intentionally keep separate lists.
+
 The confidence badge means confidence in the model evidence, not certainty of
 execution. A price reconstructed from hourly averages can never be High;
 stale quotes and detected regime shifts are Speculative. Journal capture and

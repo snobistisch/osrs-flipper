@@ -837,6 +837,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     <p class="small dim" id="tab-blurb"></p>
 
     <div id="status" class="small dim"></div>
+    <div id="storage-warning" class="small err hidden" role="alert"></div>
 
     <div id="mode-summary"><strong>ACTIVE FLIPPING</strong><span>Members · 8 slots · automatic risk and liquidity filters</span></div>
 
@@ -2486,6 +2487,75 @@ const INTERVAL_TTL = { "5m": 60_000, "1h": 300_000 };
 const MAPPING_TTL = 24 * 3600 * 1000;
 // v2: the cached shape gained highalch, so old entries must not be reused.
 const MAPPING_KEY = "osrs-flipper.mapping.v3";
+const TIMESERIES_KEY_PREFIX = "osrs-flipper.ts.";
+
+function localMarketCacheKeys() {
+  const keys = [];
+  try {
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (key === MAPPING_KEY || key?.startsWith(TIMESERIES_KEY_PREFIX)) keys.push(key);
+    }
+  } catch { /* storage may be disabled entirely */ }
+  return keys;
+}
+
+function clearLocalMarketCaches() {
+  for (const key of localMarketCacheKeys()) {
+    try { localStorage.removeItem(key); } catch {}
+  }
+}
+
+function pruneTimeseriesCache(maxEntries = 60) {
+  const entries = [];
+  try {
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(TIMESERIES_KEY_PREFIX)) continue;
+      let at = 0;
+      try { at = Number(JSON.parse(localStorage.getItem(key) || "{}").at) || 0; }
+      catch { /* corrupt cache is the oldest cache */ }
+      entries.push({ key, at });
+    }
+    entries.sort((a, b) => b.at - a.at);
+    for (const entry of entries.slice(maxEntries)) localStorage.removeItem(entry.key);
+  } catch { /* cache pruning must never break live prices */ }
+}
+
+function writeMarketCache(key, value) {
+  pruneTimeseriesCache();
+  try { localStorage.setItem(key, value); return true; }
+  catch {
+    clearLocalMarketCaches();
+    try { localStorage.setItem(key, value); return true; } catch { return false; }
+  }
+}
+
+function showStorageWarning() {
+  const warning = document.querySelector("#storage-warning");
+  if (!warning) return;
+  warning.textContent = "Save & Monitor could not use browser storage. Allow site data for this GitHub Pages site, then try again.";
+  warning.classList.remove("hidden");
+}
+
+function writeDurableStorage(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    document.querySelector("#storage-warning")?.classList.add("hidden");
+    return true;
+  } catch {
+    // Market data is replaceable; saved flips, locks and holdings are not.
+    clearLocalMarketCaches();
+    try {
+      localStorage.setItem(key, value);
+      document.querySelector("#storage-warning")?.classList.add("hidden");
+      return true;
+    } catch {
+      showStorageWarning();
+      return false;
+    }
+  }
+}
 
 const memo = new Map();
 
@@ -2580,9 +2650,7 @@ async function fetchMapping() {
       exempt: EXEMPT_IDS.has(row.id) || EXEMPT_NAMES.has(row.name.trim().toLowerCase()),
     };
   }
-  try {
-    localStorage.setItem(MAPPING_KEY, JSON.stringify({ at: Date.now(), items }));
-  } catch { /* quota exceeded: fine, we just refetch next visit */ }
+  writeMarketCache(MAPPING_KEY, JSON.stringify({ at: Date.now(), items }));
   return items;
 }
 
@@ -2605,10 +2673,8 @@ const fetchTimeseries = (id, step) =>
     if (!payload || !Array.isArray(payload.data)) {
       throw new Error("/timeseries: response has no data list");
     }
-    try {
-      localStorage.setItem(storageKey,
-        JSON.stringify({ at: Date.now(), data: payload.data }));
-    } catch { /* quota full: fine, memory cache still holds it */ }
+    writeMarketCache(storageKey,
+      JSON.stringify({ at: Date.now(), data: payload.data }));
     return payload.data;
   });
 
@@ -3276,7 +3342,7 @@ function saveProfileLocks(config, locks) {
   const key = lockProfileKey(config);
   if (locks.length) store[key] = locks;
   else delete store[key];
-  try { localStorage.setItem(LOCK_KEY, JSON.stringify(store)); } catch {}
+  return writeDurableStorage(LOCK_KEY, JSON.stringify(store));
 }
 
 function replanFromCurrentData() {
@@ -3308,7 +3374,7 @@ function lockSnapshot(slot, row) {
 function saveLockForRow(slot, row) {
   const locks = locksFor(state.config).filter((lock) =>
     lock.slot !== slot && lock.id !== row.id);
-  saveProfileLocks(state.config, [...locks, lockSnapshot(slot, row)]);
+  return saveProfileLocks(state.config, [...locks, lockSnapshot(slot, row)]);
 }
 
 function monitorableRow(row) {
@@ -3329,7 +3395,7 @@ function saveOption(itemId) {
   const row = state.rows.find((value) => value.id === itemId);
   if (!row) return;
   const saved = monitorableRow(row);
-  trackOffer(saved);
+  if (!trackOffer(saved)) return;
   const locks = locksFor(state.config);
   if (!locks.some((lock) => lock.id === itemId)) {
     const used = new Set(locks.map((lock) => lock.slot));
@@ -3352,17 +3418,18 @@ function loadExecutions() {
   catch { return []; }
 }
 function saveExecutions(list) {
-  try { localStorage.setItem(EXEC_KEY, JSON.stringify(list)); } catch {}
+  const saved = writeDurableStorage(EXEC_KEY, JSON.stringify(list));
   renderExecutions();
+  return saved;
 }
 function trackOffer(row) {
   const list = loadExecutions();
-  if (list.some((x) => x.itemId === row.id && !["sold", "cancelled"].includes(x.status))) return;
+  if (list.some((x) => x.itemId === row.id && !["sold", "cancelled"].includes(x.status))) return true;
   list.unshift({ key: `${Date.now()}-${row.id}`, itemId: row.id, name: row.name,
     qty: row.allocatedQty || row.qty, buy: row.buy, sell: row.listAt ?? row.sell,
     bought: 0, sold: 0, status: "watching", createdAt: Date.now(), updatedAt: Date.now(),
     limit: row.limit, limitGroup: row.limitGroup, mode: row.mode });
-  saveExecutions(list);
+  return saveExecutions(list);
 }
 function editExecution(key) {
   const list = loadExecutions(), x = list.find((r) => r.key === key);
@@ -3446,7 +3513,7 @@ function savePreferences() {
     strategy: $("#f-strategy").value, horizon: Number($("#f-horizon").value),
     timestep: state.timestep,
   };
-  try { localStorage.setItem(PREF_KEY, JSON.stringify(value)); } catch {}
+  writeDurableStorage(PREF_KEY, JSON.stringify(value));
 }
 
 function restorePreferences() {
@@ -4170,8 +4237,7 @@ function loadHoldings() {
 }
 
 function saveHoldings(list) {
-  try { localStorage.setItem(HOLDINGS_KEY, JSON.stringify(list)); }
-  catch { /* quota or private mode: the table still works for this session */ }
+  writeDurableStorage(HOLDINGS_KEY, JSON.stringify(list));
 }
 
 function addHolding(id) {
@@ -4794,8 +4860,7 @@ $("#plan-cards").addEventListener("click", (event) => {
   const save = event.target.closest("button[data-save]");
   if (save) {
     const row = state.planRows.find((value) => value.id === Number(save.dataset.save));
-    if (row) {
-      trackOffer(row);
+    if (row && trackOffer(row)) {
       lockSlot(Number(save.dataset.slot), row.id);
     }
     event.stopPropagation(); return;
