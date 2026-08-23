@@ -1774,7 +1774,7 @@ function allocateCapital(rows, capital, slots, reserved = [], maxPerPosition = I
   let seedBank = capital;
   for (const r of rows.slice(0, Math.max(40, slots * 6))) {
     if (selected.length >= slots) break;
-    const ceiling = Math.min(r.capitalNeeded, maxPerPosition);
+    const ceiling = positionCapitalCeiling(r, maxPerPosition);
     if (!(r.rankingValue > 0) || !(r.expected > 0) ||
         r.buy > seedBank || r.buy > ceiling) continue;
     if ((categoryCount[r.category] || 0) >= 3) continue;
@@ -1791,12 +1791,12 @@ function allocateCapital(rows, capital, slots, reserved = [], maxPerPosition = I
   }
   for (let pass = 0; pass < selected.length + 3; pass++) {
     const hungry = seeded.filter((r) =>
-      r.allocated + r.buy <= Math.min(r.capitalNeeded, maxPerPosition));
+      r.allocated + r.buy <= positionCapitalCeiling(r, maxPerPosition));
     if (!hungry.length || remaining < Math.min(...hungry.map((r) => r.buy))) break;
     const weight = hungry.reduce((sum, r) => sum + r.rankingValue, 0);
     let progressed = false;
     for (const r of hungry) {
-      const ceiling = Math.min(r.capitalNeeded, maxPerPosition);
+      const ceiling = positionCapitalCeiling(r, maxPerPosition);
       let grant = Math.min(ceiling - r.allocated,
         Math.floor(remaining * r.rankingValue / weight));
       grant -= grant % r.buy;
@@ -1826,6 +1826,16 @@ function allocateCapital(rows, capital, slots, reserved = [], maxPerPosition = I
     .sort((a, b) => b.rankingValue - a.rankingValue);
   const ids = new Set(funded.map((r) => r.id));
   rows.splice(0, rows.length, ...funded, ...rows.filter((r) => !ids.has(r.id)));
+}
+
+function positionCapitalCeiling(row, maxPerPosition) {
+  // Do not fund more units than the model's optimistic completed-quantity
+  // bound. This keeps a larger bank from turning a good small flip into a huge
+  // low-fill order merely because more cash is available.
+  const optimisticFill = Number.isFinite(row.fillHighQty)
+    ? row.fillHighQty : (row.qty || 1);
+  const reachableQty = Math.max(1, Math.floor(optimisticFill));
+  return Math.min(row.capitalNeeded, maxPerPosition, reachableQty * row.buy);
 }
 
 function rescoreAllocated(r) {
@@ -2845,7 +2855,9 @@ function optimiseExecution(o) {
   let best = null;
   for (const buyImprovement of concessionPoints(maxTotal)) {
     const buy = o.baseBuy + buyImprovement;
-    const affordable = Math.floor(o.config.capital / buy);
+    const positionBank = Math.min(o.config.capital,
+      o.config.maxPositionCapital ?? o.config.capital);
+    const affordable = Math.floor(positionBank / buy);
     if (affordable <= 0) continue;
     for (const extraSell of concessionPoints(Math.max(0, maxTotal - (o.baseSell - freeSell)))) {
       const sell = freeSell - extraSell;
@@ -2913,7 +2925,9 @@ function screen(items, quotes, act5m, act1h, config, now) {
     const touchMargin = netMargin(baseBuy, baseSell, exempt);
     if (touchMargin <= 0) { funnel["margin not positive"]++; continue; }
 
-    const affordable = Math.floor(config.capital / baseBuy);
+    const positionBank = Math.min(config.capital,
+      config.maxPositionCapital ?? config.capital);
+    const affordable = Math.floor(positionBank / baseBuy);
     if (affordable === 0) { funnel["cannot afford one"]++; continue; }
 
     const depth = undercutDepth(baseBuy, baseSell, exempt);
@@ -2984,10 +2998,25 @@ async function refineTopRows(rows, config, now) {
   // Previously a 5m bank spent its history budget on expensive rows that the
   // budget-aware shortlist should never have shown.
   const eligible = applyPreferences(rows, config).kept;
-  const targets = [...eligible]
-    .sort((a, b) => quickPlanRiskTier(a) - quickPlanRiskTier(b) ||
-      b.rankingValue - a.rankingValue)
-    .slice(0, DEEP_TOP_K * DEEP_BREADTH);
+  const targetCount = DEEP_TOP_K * DEEP_BREADTH;
+  const byRank = (values) => [...values]
+    .sort((a, b) => b.rankingValue - a.rankingValue);
+  // /latest often prints both sides at the same price. Those rows use the
+  // traded 5m/1h averages and used to be placed behind every direct-print row,
+  // so none of them received a history check. Reserve one third of the same
+  // fixed request budget for that cohort; no extra API traffic is created.
+  const directBudget = Math.ceil(targetCount * 2 / 3);
+  const seeded = [
+    ...byRank(eligible.filter((row) => !row.pricedFromReference)).slice(0, directBudget),
+    ...byRank(eligible.filter((row) => row.pricedFromReference)).slice(0, targetCount - directBudget),
+  ];
+  const seen = new Set();
+  const targets = [];
+  for (const row of [...seeded, ...byRank(eligible)]) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id); targets.push(row);
+    if (targets.length >= targetCount) break;
+  }
   let cursor = 0;
   const workers = Array.from({ length: DEEP_CONCURRENCY }, async () => {
     while (cursor < targets.length) {
@@ -3088,10 +3117,19 @@ async function refineTopRows(rows, config, now) {
   return { refined: targets.filter((r) => r.deep).length, shrinkage };
 }
 
+function planEvidenceConfidence(row) {
+  if (!row.deep || row.age > 300 ||
+      (row.regimeScore || 0) >= CAL.regime_shift_threshold) return "speculative";
+  if (!row.pricedFromReference && (row.shrinkWeight || 0) >= 0.60 &&
+      row.volume >= 200) return "high";
+  if ((row.shrinkWeight || 0) >= 0.25 && row.age <= 180) return "medium";
+  return "speculative";
+}
+
 function quickPlanRiskTier(row) {
   // Safety comes before theoretical gp/h. History-backed high/medium-confidence
   // rows should fill the plan before an eye-catching but fragile spread.
-  const confidence = row.deep ? confidenceLabel(row) : "unchecked";
+  const confidence = row.deep ? planEvidenceConfidence(row) : "unchecked";
   let tier = confidence === "high" ? 0 : confidence === "medium" ? 1 :
     confidence === "unchecked" ? 2 : 4;
   if (row.pricedFromReference) tier += 2;
@@ -3104,13 +3142,21 @@ function quickPlanRiskTier(row) {
 
 function isAutomaticPlanCandidate(row) {
   if (!state.deepReady) return false;
-  const confidence = confidenceLabel(row);
-  if (!row.deep || row.pricedFromReference || confidence === "speculative" ||
-      (row.mode === "active" && confidence !== "high")) {
+  const confidence = planEvidenceConfidence(row);
+  if (!row.deep || confidence === "speculative") {
     return false;
   }
+  // High-only made the budget a cosmetic input: in a quiet market a 10m and
+  // 100m bank could both collapse to the same single low-capacity item. Medium
+  // evidence is allowed here; the allocator separately caps quantity at the
+  // model's reachable fill bound. Average-derived prices remain clearly
+  // flagged on the card, so the player knows to margin-check them in game.
   const warnings = (row.warnings || []).join(" ").toLowerCase();
-  return !/falling|dumping|don't chase|regime shift|volatile|no realistic fill|only \d+% chance/.test(warnings);
+  if (/price falling|dumping|dump fills|don't chase|regime shift|volatile|price swings|no realistic fill|only \d+% chance/.test(warnings)) {
+    return false;
+  }
+  const recentFalls = [...warnings.matchAll(/falling (\d+(?:\.\d+)?)% over recent days/g)];
+  return !recentFalls.some((match) => Number(match[1]) >= 5);
 }
 
 /* Automatic quality gates. Never reorders what remains. */
@@ -3691,7 +3737,7 @@ function renderTerminalStats(config) {
   const locked = state.planEntries.filter((entry) => entry.locked).length;
   $("#plan-figure").innerHTML = config
     ? `${state.planEntries.length} OF ${config.slots} QUALITY SLOTS${locked ? ` · <b>${locked}</b> LOCKED` : ""} · ` +
-      `<b>${formatGp(committed)}</b> COMMITTED` : "";
+      `<b>${formatGp(committed)}</b> / ${formatGp(config.capital)} COMMITTED` : "";
 }
 
 /* ---- the plan ----
@@ -3802,7 +3848,7 @@ function renderPlan(config) {
   }
   if (slots > state.planEntries.length) {
     parts.push(`${slots - state.planEntries.length} slot${
-      slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: the remaining candidates failed the automatic confidence, trend or executable-price checks.`);
+      slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: the remaining candidates failed the automatic confidence, trend or fill checks.`);
   }
   parts.push(`Automatic selection already enforces fresh prices, liquidity, net ROI, queue room and a maximum of ${formatGp(config.maxPositionCapital)} per new trade. Save a flip to keep watching its target.`);
   $("#plan-note").textContent = parts.join(" ");

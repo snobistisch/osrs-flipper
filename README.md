@@ -227,10 +227,12 @@ account and Active/Overnight strategy. New recommendations may commit at most
 25% of the bank per item in Active mode (35% Overnight), so a thin expensive
 item cannot consume nearly the whole cash stack merely because its estimated
 spread is wide. Direct live-price candidates are filled before rows reconstructed
-from hourly averages. The Active plan itself only shows history-checked,
-high-confidence candidates with executable live prices and rejects known
-falling, dumping, regime-shift and poor-fill warnings. It may leave a slot or
-part of the bank unused when the remaining choices are weaker.
+from hourly averages. The Active plan itself shows history-checked High and
+usable Medium-confidence candidates, while rejecting known sharp falls,
+dumping, regime shifts, volatility spikes and poor fills. Average-derived
+prices remain explicitly flagged so they can be margin-checked in game. The
+planner may leave a slot or part of the bank unused when market volume or buy
+limits cannot absorb more cash safely.
 
 That strict plan is not the whole market. **All flip options** keeps every
 candidate that passed the automatic freshness, liquidity, ROI, queue-room and

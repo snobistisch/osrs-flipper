@@ -144,11 +144,21 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("config.maxPositionCapital", self.source)
         self.assertIn("quickPlanRiskTier", self.source)
         self.assertIn("function isAutomaticPlanCandidate(", self.source)
-        self.assertIn('confidence !== "high"', self.source)
+        self.assertIn("function planEvidenceConfidence(", self.source)
+        self.assertIn("recentFalls.some", self.source)
         self.assertIn("state.deepReady = true", self.source)
         self.assertIn("kept: eligible", self.source)
         self.assertIn("eligible.map((row)", self.source)
         self.assertIn('id="filter-details" class="hidden"', self.source)
+
+    def test_budget_changes_history_pool_and_visible_commitment(self):
+        self.assertIn("const directBudget = Math.ceil(targetCount * 2 / 3)", self.source)
+        self.assertIn("row.pricedFromReference", self.source)
+        self.assertIn("config.maxPositionCapital", self.source)
+        self.assertIn("function positionCapitalCeiling(", self.source)
+        self.assertIn("reachableQty * row.buy", self.source)
+        self.assertIn("o.config.maxPositionCapital ?? o.config.capital", self.source)
+        self.assertIn("/ ${formatGp(config.capital)} COMMITTED", self.source)
 
     def test_complete_candidate_list_can_be_searched_and_saved(self):
         self.assertIn("All flip options", self.source)
