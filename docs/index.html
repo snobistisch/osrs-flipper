@@ -167,11 +167,12 @@
   border:1px solid var(--rule); font-family:var(--mono); font-size:.82rem;
 }
 #mode-summary strong { color:var(--gold-bright); }
-#workbench { display:grid; grid-template-columns:minmax(480px,.9fr) minmax(500px,1.1fr); gap:.8rem; align-items:start; }
-#workbench #flip-wrap { max-height:740px; overflow:auto; }
-#workbench #detail { position:sticky; top:.6rem; margin:0; }
-#advanced-market { margin:1rem 0; }
-#advanced-market > summary { color:var(--gold); font:600 .82rem var(--mono); cursor:pointer; }
+#options-panel { margin-top:1rem; }
+.option-toolbar { display:flex; gap:.55rem; align-items:center; margin:.6rem 0; }
+#option-search { width:100%; max-width:430px; }
+#options-panel #flip-wrap { max-height:620px; overflow:auto; }
+#options-panel thead { position:sticky; top:0; z-index:2; background:var(--panel-dark); }
+.option-save-btn { white-space:nowrap; padding:.25rem .45rem; font-size:.7rem; }
 .hold-btn {
   background: var(--panel-dark);
   color: var(--text-dim);
@@ -555,17 +556,13 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
   #termbar { padding: 0.4rem 0.6rem; }
   #termstat { font-size: 0.7rem; gap: 0.6rem; }
   .metrics { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
-  #workbench { grid-template-columns:1fr; }
-  #workbench #flip-wrap { max-height:none; }
-  #workbench #detail { position:static; }
   #plan-cards { grid-template-columns:repeat(2,minmax(0,1fr)); gap:.35rem; }
   .plan-name { font-size:.83rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .plan-line { font-size:.7rem; gap:.25rem; }
   .plan-foot, .plan-warn { font-size:.64rem; }
   #flips th:nth-child(3), #flips td:nth-child(3),
-  #flips th:nth-child(6), #flips td:nth-child(6),
-  #flips th:nth-child(7), #flips td:nth-child(7),
-  #flips th:nth-child(9), #flips td:nth-child(9) { display:none; }
+  #flips th:nth-child(5), #flips td:nth-child(5),
+  #flips th:nth-child(7), #flips td:nth-child(7) { display:none; }
   #main { padding:.55rem; }
   #keys { display: none; }   /* no keyboard to hint at */
 }
@@ -860,19 +857,25 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
       <p class="small dim" id="plan-note"></p>
     </section>
 
+    <section id="options-panel" class="panel">
+      <div class="panel-bar"><h2>All flip options</h2>
+        <div class="figure" id="option-figure">—</div></div>
+      <p class="small dim">The automatic picks stay at the top. Search every
+        other liquid candidate here and save one yourself when you prefer it.</p>
+      <div class="option-toolbar">
+        <input id="option-search" type="search" placeholder="Search an item…" aria-label="Search all flip options">
+      </div>
     <div class="table-wrap" id="flip-wrap">
       <table id="flips" aria-label="Ranked Grand Exchange opportunities">
         <thead><tr>
           <th data-sort="name">Item</th>
           <th data-sort="buy">Buy</th>
           <th data-sort="listAt" title="Where to place the sell offer. The GE tax rounds down, so every price inside a 50 gp band nets the seller the same — the lowest one buys queue priority for free.">Sell at</th>
-          <th data-sort="allocatedQty">Qty</th>
-          <th data-sort="expected">Expected</th>
           <th data-sort="roi">ROI</th>
           <th id="time-heading" data-sort="totalSeconds">Round trip</th>
-          <th id="fill-heading" data-sort="pFill">Full-trip chance</th>
           <th data-sort="confidence">Confidence</th>
           <th data-sort="rankingValue" id="ranking-heading">EV/slot/h</th>
+          <th>Save</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -880,6 +883,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     <p class="small dim" id="flip-note">The primary table contains only the
       numbers needed to act. Click a row for the live chart, execution context,
       rationale and advanced model diagnostics.</p>
+    </section>
 
     <div class="table-wrap hidden" id="merch-wrap">
       <table id="merch">
@@ -3164,6 +3168,7 @@ const state = {
   planEntries: [],
   slotLocks: [],
   deepReady: false,
+  optionQuery: "",
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -3237,8 +3242,12 @@ function lockSlot(slot, itemId) {
   const entry = state.planEntries.find((value) =>
     value.slot === slot && !value.locked && value.row.id === itemId);
   if (!entry) return;
-  const row = entry.row;
-  const snapshot = {
+  saveLockForRow(slot, entry.row);
+  replanFromCurrentData();
+}
+
+function lockSnapshot(slot, row) {
+  return {
     slot, id: row.id, name: row.name, qty: row.allocatedQty, buy: row.buy,
     sell: row.listAt, commit: row.allocated || 0,
     expected: row.allocatedExpected || row.expected || 0, lockedAt: Date.now(),
@@ -3248,7 +3257,40 @@ function lockSlot(slot, itemId) {
     limit: row.limit, limitGroup: row.limitGroup, category: row.category,
     mode: row.mode, horizonHours: row.horizonHours,
   };
-  saveProfileLocks(state.config, [...locksFor(state.config), snapshot]);
+}
+
+function saveLockForRow(slot, row) {
+  const locks = locksFor(state.config).filter((lock) =>
+    lock.slot !== slot && lock.id !== row.id);
+  saveProfileLocks(state.config, [...locks, lockSnapshot(slot, row)]);
+}
+
+function monitorableRow(row) {
+  const maxQty = Math.max(1, Math.floor(state.config.maxPositionCapital / row.buy));
+  const copy = {
+    ...row,
+    warnings: [...(row.warnings || [])], tags: [...(row.tags || [])],
+    factors: { ...(row.factors || {}) },
+    allocatedQty: Math.max(1, Math.min(row.qty, maxQty)),
+  };
+  copy.allocated = copy.allocatedQty * copy.buy;
+  rescoreAllocated(copy);
+  return copy;
+}
+
+function saveOption(itemId) {
+  if (!state.config) return;
+  const row = state.rows.find((value) => value.id === itemId);
+  if (!row) return;
+  const saved = monitorableRow(row);
+  trackOffer(saved);
+  const locks = locksFor(state.config);
+  if (!locks.some((lock) => lock.id === itemId)) {
+    const used = new Set(locks.map((lock) => lock.slot));
+    const slot = Array.from({ length: state.config.slots }, (_, index) => index)
+      .find((index) => !used.has(index));
+    if (slot != null) saveLockForRow(slot, saved);
+  }
   replanFromCurrentData();
 }
 
@@ -3526,7 +3568,10 @@ function show(allRows, config, statusText) {
     b.rankingValue - a.rankingValue);
   allocateCapital(candidates, Math.max(0, config.capital - lockedCommit),
     Math.max(0, config.slots - locks.length), locks, config.maxPositionCapital);
-  state.rows = [...candidates, ...kept.filter((row) => lockedIds.has(row.id))];
+  // Keep the strict automatic plan separate from the complete selectable
+  // market list. The previous implementation replaced the list with the
+  // shortlist, making every medium-confidence alternative disappear.
+  state.rows = kept;
   state.planRows = candidates;
   state.slotLocks = locks;
   state.sourceRows = allRows;
@@ -3553,7 +3598,6 @@ function show(allRows, config, statusText) {
     : `<strong>ACTIVE FLIPPING</strong><span>${config.account === "members" ? "Members · 8 slots" : "F2P · 3 slots"} · automatic liquidity and risk gates</span>`;
   $("#ranking-heading").textContent = overnight ? "Horizon EV" : "EV/slot/h";
   $("#time-heading").textContent = overnight ? "Return + sell" : "Round trip";
-  $("#fill-heading").textContent = overnight ? "Full buy by return" : "Full-trip chance";
   if (state.tab === "flip") $("#tab-blurb").textContent = overnight
     ? `Buy offers rest for ${config.horizonHours}h; expected inventory is collected on return and gets a separate ${CAL.overnight_liquidation_hours}h sell window.`
     : TAB_BLURB.flip;
@@ -3582,7 +3626,7 @@ function sortedRows() {
   });
 }
 
-const TABLE_COLUMNS = 10;
+const TABLE_COLUMNS = 8;
 
 /* ==================== terminal chrome ====================
 
@@ -3635,8 +3679,8 @@ function renderTape() {
 }
 
 function renderTerminalStats(config) {
-  $("#stat-scored").textContent = state.rows.length
-    ? num(state.rows.length) : "—";
+  $("#stat-scored").textContent = state.planRows.length
+    ? num(state.planRows.length) : "—";
   // Median ROI across what survived the filters: one number for how much edge
   // is on the board today, which the funnel line never said.
   const rois = state.rows.map((r) => r.roi).sort((a, b) => a - b);
@@ -3774,27 +3818,34 @@ function tagHtml(tags) {
 
 function renderTable() {
   const body = $("#flips tbody");
-  const rows = sortedRows().slice(0, 100);
+  const query = state.optionQuery.trim().toLowerCase();
+  const rows = sortedRows().filter((row) =>
+    !query || row.name.toLowerCase().includes(query));
+  $("#option-figure").textContent = query
+    ? `${num(rows.length)} OF ${num(state.rows.length)}`
+    : `${num(rows.length)} SELECTABLE`;
   if (!rows.length) {
     body.innerHTML = `<tr><td colspan="${TABLE_COLUMNS}" style="text-align:center;padding:2rem">
-      Nothing to show. Loosen the display filters, or the market is genuinely
-      offering nothing right now.</td></tr>`;
+      No item matches this search.</td></tr>`;
     $("#detail").classList.add("hidden");
     return;
   }
+  const savedIds = new Set(loadExecutions()
+    .filter((x) => !["sold", "cancelled"].includes(x.status))
+    .map((x) => x.itemId));
   body.innerHTML = rows.map((r) => `
     <tr data-id="${r.id}" tabindex="0"${state.selected === r.id ? ' class="selected"' : ""}>
       <td>${iconHtml(r.icon)}${escapeHtml(r.name)}${r.warnings.length
         ? ` <span class="flag" title="${escapeHtml(r.warnings.join(" · "))}">!</span>` : ""}</td>
       <td>${num(r.buy)}</td>
       <td${r.listAt < r.sell ? ` class="pos" title="List here, not ${num(r.sell)} — identical net revenue after tax, better queue position"` : ""}>${num(r.listAt)}</td>
-      <td>${num((r.allocatedQty || 0) > 0 ? r.allocatedQty : r.qty)}</td>
-      <td class="pos">${formatGp(Math.round(r.allocatedExpected || r.expected))}</td>
       <td>${(r.roi * 100).toFixed(1)}%</td>
       <td class="${r.totalSeconds > 8 * SECONDS_PER_HOUR ? "bad" : ""}">${formatDuration(r.totalSeconds)}</td>
-      <td class="${r.pFill < 0.25 ? "bad" : ""}">${Math.round(r.pFill * 100)}%</td>
       <td><span class="confidence confidence-${confidenceLabel(r)}">${confidenceLabel(r)}</span></td>
       <td class="pos"><strong>${formatGp(Math.round(r.rankingValue))}</strong></td>
+      <td>${savedIds.has(r.id)
+        ? `<button class="option-save-btn" disabled>SAVED ✓</button>`
+        : `<button class="option-save-btn" data-save-option="${r.id}">SAVE &amp; MONITOR</button>`}</td>
     </tr>`).join("");
 
   if (state.selected != null && !rows.some((r) => r.id === state.selected)) {
@@ -3923,8 +3974,7 @@ function selectTab(tab) {
     ? `Buy offers rest for ${state.config.horizonHours}h; liquidation begins only after you return.`
     : TAB_BLURB[tab];
   const flip = tab === "flip";
-  $("#flip-wrap").classList.toggle("hidden", !flip);
-  $("#flip-note").classList.toggle("hidden", !flip);
+  $("#options-panel").classList.toggle("hidden", !flip);
   $("#merch-wrap").classList.toggle("hidden", flip);
   $("#merch-note").classList.toggle("hidden", flip);
   $("#portfolio").classList.toggle("hidden", tab !== "merch");
@@ -4668,6 +4718,12 @@ document.querySelectorAll("#flips thead th").forEach((th) => {
 });
 
 $("#flips tbody").addEventListener("click", (event) => {
+  const save = event.target.closest("button[data-save-option]");
+  if (save) {
+    saveOption(Number(save.dataset.saveOption));
+    event.stopPropagation();
+    return;
+  }
   const tr = event.target.closest("tr[data-id]");
   if (tr) showDetail(Number(tr.dataset.id));
 });
@@ -4676,6 +4732,11 @@ $("#flips tbody").addEventListener("keydown", (event) => {
   if (tr && (event.key === "Enter" || event.key === " ")) {
     event.preventDefault(); showDetail(Number(tr.dataset.id));
   }
+});
+
+$("#option-search").addEventListener("input", (event) => {
+  state.optionQuery = event.target.value;
+  renderTable();
 });
 
 $("#plan-cards").addEventListener("click", (event) => {
@@ -4803,19 +4864,6 @@ tickClock();
 syncFilterLabels();
 renderExecutions();
 $("#tab-blurb").textContent = TAB_BLURB.flip;
-const workbench = document.createElement("div");
-workbench.id = "workbench";
-$("#flip-wrap").parentNode.insertBefore(workbench, $("#flip-wrap"));
-workbench.appendChild($("#flip-wrap"));
-workbench.appendChild($("#detail"));
-const advancedMarket = document.createElement("details");
-advancedMarket.id = "advanced-market";
-const advancedSummary = document.createElement("summary");
-advancedSummary.textContent = "Charts & details";
-workbench.parentNode.insertBefore(advancedMarket, workbench);
-advancedMarket.appendChild(advancedSummary);
-advancedMarket.appendChild(workbench);
-advancedMarket.appendChild($("#flip-note"));
 const restored = restorePreferences();
 if (window.matchMedia("(max-width: 820px)").matches) {
   $("#filter-details").removeAttribute("open");

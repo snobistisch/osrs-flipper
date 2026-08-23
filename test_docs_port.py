@@ -150,6 +150,16 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("eligible.map((row)", self.source)
         self.assertIn('id="filter-details" class="hidden"', self.source)
 
+    def test_complete_candidate_list_can_be_searched_and_saved(self):
+        self.assertIn("All flip options", self.source)
+        self.assertIn('id="option-search"', self.source)
+        self.assertIn("state.rows = kept", self.source)
+        self.assertNotIn("sortedRows().slice(0, 100)", self.source)
+        self.assertIn('data-save-option="${r.id}"', self.source)
+        self.assertIn("function monitorableRow(", self.source)
+        self.assertIn("function saveOption(", self.source)
+        self.assertIn("saveLockForRow(slot, saved)", self.source)
+
     def test_slot_locks_survive_refresh_and_reserve_capital(self):
         self.assertIn('const LOCK_KEY = "osrs-flipper.slot-locks.v1"', self.source)
         self.assertIn("function lockSlot(", self.source)

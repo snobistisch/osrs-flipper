@@ -232,6 +232,13 @@ high-confidence candidates with executable live prices and rejects known
 falling, dumping, regime-shift and poor-fill warnings. It may leave a slot or
 part of the bank unused when the remaining choices are weaker.
 
+That strict plan is not the whole market. **All flip options** keeps every
+candidate that passed the automatic freshness, liquidity, ROI, queue-room and
+affordability gates in a searchable table. Each row has its own **Save &
+monitor** action. A manually chosen row uses the same per-position bank cap,
+takes the first free GE slot and remains visibly labelled with its confidence
+and risk flags instead of being presented as an automatic recommendation.
+
 **Save & monitor** records the suggested item, quantity, buy and target sell in
 local browser storage and pins the slot. A gold card at the top then compares
 that target with the newest live buy/sell prices after every 60-second refresh.
