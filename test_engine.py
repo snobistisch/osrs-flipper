@@ -602,6 +602,47 @@ class HistoryTests(unittest.TestCase):
         self.assertIsNotNone(engine.history_view(points, 98, 102))
 
 
+class ExecutionEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def buckets(high, count=12):
+        return [{
+            "timestamp": index * 300,
+            "avgLowPrice": 100,
+            "avgHighPrice": high,
+            "lowPriceVolume": 1_000,
+            "highPriceVolume": 1_000,
+        } for index in range(count)]
+
+    def test_repeated_tax_adjusted_edge_raises_rank(self):
+        view = engine.execution_evidence_view(
+            self.buckets(110), False, 8, 5 / 60, 1)
+        quality, factor = engine.combined_execution_evidence(
+            view, None, 5_000, 5_000, engine.TradeMode.ACTIVE, 4)
+        self.assertGreater(quality, 0.70)
+        self.assertGreater(factor, 1.0)
+        self.assertEqual(view.profitable_buckets, 12)
+
+    def test_spread_that_does_not_survive_tax_is_demoted(self):
+        view = engine.execution_evidence_view(
+            self.buckets(101), False, 8, 5 / 60, 1)
+        quality, factor = engine.combined_execution_evidence(
+            view, None, 5_000, 5_000, engine.TradeMode.ACTIVE, 4)
+        self.assertLess(quality, 0.40)
+        self.assertLess(factor, 1.0)
+
+    def test_a_few_lucky_buckets_are_shrunk_toward_neutral(self):
+        thin = engine.execution_evidence_view(
+            self.buckets(110, count=2), False, 8, 5 / 60, 1)
+        full = engine.execution_evidence_view(
+            self.buckets(110), False, 8, 5 / 60, 1)
+        thin_quality = engine.execution_evidence_quality(
+            thin, 5_000, 5_000, engine.TradeMode.ACTIVE, 4)
+        full_quality = engine.execution_evidence_quality(
+            full, 5_000, 5_000, engine.TradeMode.ACTIVE, 4)
+        self.assertLess(thin_quality, full_quality)
+        self.assertLess(thin.evidence_strength, 1.0)
+
+
 class FormattingTests(unittest.TestCase):
     def test_parse_player_shorthand(self):
         self.assertEqual(engine.parse_gp("250k"), 250_000)

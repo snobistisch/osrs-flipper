@@ -289,11 +289,18 @@ def rank(client: api.WikiClient, capital: int,
         except api.ApiError:
             return None
 
+    def fetch_recent(item_id):
+        try:
+            return client.timeseries(item_id, engine.RECENT_EXECUTION_TIMESTEP)
+        except api.ApiError:
+            return None
+
     try:
         return filters.rank_flips(
             items, quotes, activity_5m, activity_1h, config, now=time.time(),
             fetch_history=fetch if deep > 0 else None, top_k=deep,
-            exempt=exempt, volume_lookup=volume_lookup)
+            exempt=exempt, volume_lookup=volume_lookup,
+            fetch_recent=fetch_recent if deep > 0 else None)
     finally:
         if store is not None:
             store.close()

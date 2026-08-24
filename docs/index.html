@@ -82,6 +82,7 @@
 .tag-CRASH, .tag-PUMPED { border-color: var(--sell); color: #ffb59a; }
 .tag-DIP, .tag-SUPPLY_DROP { border-color: #b8862f; color: var(--gold); }
 .tag-DIPPED_STABLE, .tag-MERCH { border-color: var(--good); color: var(--good); }
+.tag-REPEATABLE { border-color: var(--good); color: var(--good); }
 .tag-SUPPLY_CRUNCH { border-color: var(--sell); color: var(--gold-bright); }
 #plan { margin: 0 0 1.4rem; }
 #plan-cards {
@@ -1746,6 +1747,7 @@ function shrinkScores(rows) {
     row.warnings = row.warnings.filter((note) => !note.startsWith("score cut "));
     row.rankingValue = Math.exp(fit.values[i]);
     row.shrinkWeight = fit.weights[i];
+    row.shrinkRetention = row.rankingValue / row.rawRankingValue;
     if (row.mode === "active") row.perSlotHour = row.rankingValue;
     const kept = row.rankingValue / row.rawRankingValue;
     if (kept < 0.85) {
@@ -1757,6 +1759,7 @@ function shrinkScores(rows) {
   for (const row of rows) if (row.rawRankingValue <= 0) {
     row.rankingValue = row.rawRankingValue;
     row.shrinkWeight = 0;
+    row.shrinkRetention = 0;
     if (row.mode === "active") row.perSlotHour = row.rawPerSlotHour;
   }
   return { applied: true, tau2: fit.tau2, centreGp: Math.exp(fit.centre) };
@@ -1840,7 +1843,7 @@ function positionCapitalCeiling(row, maxPerPosition) {
 }
 
 function rescoreAllocated(r) {
-  const retained = r.rawRankingValue > 0 ? r.rankingValue / r.rawRankingValue : 1;
+  const retained = (r.shrinkRetention ?? 1) * (r.executionFactor ?? 1);
   const b = scoreFlip({
     buy: r.buy, sell: r.sell, margin: r.margin, qty: r.allocatedQty, depth: 0,
     buyVolume1h: r.modelBuyVolume1h, sellVolume1h: r.modelSellVolume1h,
@@ -1860,20 +1863,24 @@ function rescoreAllocated(r) {
   r.fillLowQty = b.fillLowQty; r.fillHighQty = b.fillHighQty;
   r.liquidationHours = b.liquidationHours; r.expected = b.expected;
   r.allocatedExpected = b.expected; r.rawPerSlotHour = b.perSlotHour;
-  r.rawRankingValue = b.rankingValue; r.rankingValue = b.rankingValue * Math.max(0, retained);
+  r.rawRankingValue = b.rankingValue;
+  r.executionBaseRanking = b.rankingValue * (r.shrinkRetention ?? 1);
+  r.rankingValue = b.rankingValue * Math.max(0, retained);
   r.perSlotHour = r.mode === "active" ? r.rankingValue : b.perSlotHour;
   r.downsideRisk = b.downsideRisk; r.factors = b.factors;
 }
 
 function confidenceLabel(row) {
-  const retained = row.rawRankingValue > 0
-    ? row.rankingValue / row.rawRankingValue : 0;
+  const retained = row.shrinkRetention ?? (row.rawRankingValue > 0
+    ? row.rankingValue / row.rawRankingValue : 0);
   const width = (row.fillHighQty - row.fillLowQty) / Math.max(1, row.qty);
   if (row.age > 300 || (row.regimeScore || 0) >= CAL.regime_shift_threshold) return "speculative";
   if (!row.pricedFromReference && (row.shrinkWeight || 0) >= 0.60 && row.deep &&
-      row.pFill >= 0.50 && row.volume >= 200 && retained >= 0.85 && width <= .55) return "high";
+      row.pFill >= 0.50 && row.volume >= 200 && retained >= 0.85 && width <= .55 &&
+      (row.executionQuality ?? 0.5) >= 0.62) return "high";
   if ((row.shrinkWeight || 0) >= 0.25 && row.pFill >= 0.25 &&
-      row.age <= 180 && width <= .85) return "medium";
+      row.age <= 180 && width <= .85 &&
+      (row.executionQuality ?? 0.5) >= 0.45) return "medium";
   return "speculative";
 }
 
@@ -1939,6 +1946,9 @@ const HISTORY_WINDOW_BUCKETS = 56;   // 14 days of 6h buckets
 const MIN_HISTORY_BUCKETS = 8;       // fewer traded buckets: refuse to judge
 const RECENT_TREND_BUCKETS = 12;     // ~3 days
 const FILL_TOLERANCE = 0.01;         // prices within 1% count as reachable
+const RECENT_EXECUTION_TIMESTEP = "5m";
+const RECENT_EXECUTION_HOURS = 6;
+const RECENT_EXECUTION_TOP_K = 15;
 
 function weightedAvg(pairs) {
   const total = pairs.reduce((s, [, v]) => s + v, 0);
@@ -2028,6 +2038,87 @@ function historyView(rawPoints, buy, sell) {
     meanVolume: volumes.length
       ? volumes.reduce((a, b) => a + b, 0) / volumes.length : 0,
   };
+}
+
+/* A large quoted spread can be one lucky print. A useful flip is an edge that
+   survived tax in many separate buckets and carried volume on BOTH sides.
+   This is deliberately evidence about the score, not a second profit model:
+   scoreFlip still owns fill time and expected gp/h. */
+function executionEvidenceView(rawPoints, exempt, liveMargin, bucketHours,
+                               windowHours) {
+  const valid = rawPoints.filter((p) => p && typeof p === "object");
+  if (!valid.length) return null;
+  const timestamps = valid.map((p) => Number(p.timestamp)).filter(Number.isFinite);
+  const newest = timestamps.length ? Math.max(...timestamps) : null;
+  const expectedBuckets = Math.max(1, Math.round(windowHours / bucketHours));
+  const windowed = newest == null
+    ? valid.slice(-expectedBuckets)
+    : valid.filter((p) => Number(p.timestamp) >= newest - windowHours * SECONDS_PER_HOUR);
+  const traded = windowed.filter((p) =>
+    (p.highPriceVolume || 0) > 0 && (p.lowPriceVolume || 0) > 0 &&
+    (p.avgHighPrice || 0) > 0 && (p.avgLowPrice || 0) > 0);
+  if (!traded.length) return null;
+
+  const margins = traded.map((p) => netMargin(
+    Math.round(p.avgLowPrice), Math.round(p.avgHighPrice), exempt));
+  const profitableBuckets = margins.filter((margin) => margin > 0).length;
+  // A small symmetric prior prevents three lucky buckets from looking like a
+  // perfect market. Twelve separate traded buckets are enough for full weight.
+  const positiveShare = (profitableBuckets + 2) / (traded.length + 4);
+  const evidenceStrength = Math.min(1, traded.length / 12);
+  const medianNetMargin = median(margins) ?? 0;
+  const marginSupport = Math.max(0, Math.min(1,
+    medianNetMargin / Math.max(1, liveMargin)));
+  const edgeGp = traded.reduce((sum, p, index) => sum +
+    Math.max(0, margins[index]) * Math.min(p.highPriceVolume || 0,
+                                          p.lowPriceVolume || 0), 0);
+  return {
+    buckets: traded.length,
+    profitableBuckets,
+    positiveShare,
+    evidenceStrength,
+    medianNetMargin,
+    marginSupport,
+    edgeThroughputGpHour: edgeGp / Math.max(bucketHours, windowHours),
+    activityShare: Math.min(1, traded.length / expectedBuckets),
+    windowHours,
+  };
+}
+
+function executionEvidenceQuality(view, row) {
+  if (!view) return 0.5;
+  const modelGpHour = row.mode === "overnight"
+    ? row.rawRankingValue / Math.max(1, row.horizonHours)
+    : row.rawPerSlotHour;
+  const capacitySupport = Math.max(0, Math.min(1,
+    view.edgeThroughputGpHour / Math.max(1, modelGpHour)));
+  const measured = 0.60 * view.positiveShare +
+    0.25 * view.marginSupport + 0.15 * capacitySupport;
+  return 0.5 + view.evidenceStrength * (measured - 0.5);
+}
+
+function applyExecutionEvidence(row) {
+  if (!row.deep || !row.longExecution) return;
+  const longQuality = executionEvidenceQuality(row.longExecution, row);
+  const recentQuality = row.recentExecution
+    ? executionEvidenceQuality(row.recentExecution, row) : null;
+  // Recent microstructure answers whether the edge exists NOW; the 14-day
+  // sample keeps a short burst from receiving the whole vote.
+  const quality = recentQuality == null ? longQuality
+    : 0.35 * longQuality + 0.65 * recentQuality;
+  const factor = 0.70 + 0.60 * quality; // neutral .5 = 1; bounded .7–1.3
+  row.executionQuality = quality;
+  row.executionFactor = factor;
+  row.executionBaseRanking = row.rankingValue;
+  row.rankingValue *= factor;
+  if (row.mode === "active") row.perSlotHour = row.rankingValue;
+  if (quality >= 0.70 && !row.tags.includes("REPEATABLE")) {
+    row.tags.push("REPEATABLE");
+  }
+  if (recentQuality != null && recentQuality < 0.38) {
+    row.warnings = [...row.warnings,
+      "recent spread rarely survived tax — the live quote is not repeating"];
+  }
 }
 
 function historyWarnings(view) {
@@ -2312,7 +2403,7 @@ const BADGE_LABELS = {
   [CRASH]: "🔴 CRASH", [DIP]: "🟠 DIP", [DIPPED_STABLE]: "🟢 DIPPED",
   [PUMPED]: "🔴 PUMPED", [SUPPLY_CRUNCH]: "🔥 SUPPLY CRUNCH",
   [SUPPLY_DROP]: "⚠️ SUPPLY DROP", BOTTED: "🤖 BOTTED", MERCH: "📈 MERCH",
-  RAID: "🏛️ RAID",
+  RAID: "🏛️ RAID", REPEATABLE: "✓ REPEATABLE EDGE",
 };
 
 /* Nothing fires through a regime shift: a level that moved because the game
@@ -3088,9 +3179,10 @@ async function refineTopRows(rows, config, now) {
     while (cursor < targets.length) {
       const row = targets[cursor++];
       let view = null;
+      let historyPoints = null;
       try {
-        view = historyView(await fetchTimeseries(row.id, HISTORY_TIMESTEP),
-                           row.buy, row.sell);
+        historyPoints = await fetchTimeseries(row.id, HISTORY_TIMESTEP);
+        view = historyView(historyPoints, row.buy, row.sell);
       } catch { /* fetch failed: leave the row on intraday data */ }
       if (view == null) {
         row.warnings = [...row.warnings,
@@ -3164,6 +3256,9 @@ async function refineTopRows(rows, config, now) {
         ? view.ou.halfLifeDays * HOURS_PER_DAY : null;
       row.ouLevel = view.ou ? Math.round(view.ou.levelGp) : null;
       row.regimeScore = view.regimeScore;
+      row.longExecution = executionEvidenceView(historyPoints, row.exempt,
+        row.margin, HISTORY_BUCKET_HOURS,
+        HISTORY_WINDOW_BUCKETS * HISTORY_BUCKET_HOURS);
       // Crash context, from data the deep check already paid for. The baseline
       // is the 14-day average bucket converted to an hourly rate, so both
       // sides of the ratio are units per hour.
@@ -3178,7 +3273,26 @@ async function refineTopRows(rows, config, now) {
     }
   });
   await Promise.all(workers);
+  // Five-minute history is reserved for the leaders after the cheaper 14-day
+  // check. It verifies that today's edge recurred rather than promoting a
+  // single lucky print, while keeping API traffic bounded to fifteen series.
+  const recentTargets = targets.filter((row) => row.deep)
+    .sort((a, b) => b.rawRankingValue - a.rawRankingValue)
+    .slice(0, RECENT_EXECUTION_TOP_K);
+  let recentCursor = 0;
+  const recentWorkers = Array.from({ length: DEEP_CONCURRENCY }, async () => {
+    while (recentCursor < recentTargets.length) {
+      const row = recentTargets[recentCursor++];
+      try {
+        const points = await fetchTimeseries(row.id, RECENT_EXECUTION_TIMESTEP);
+        row.recentExecution = executionEvidenceView(points, row.exempt,
+          row.margin, 5 / 60, RECENT_EXECUTION_HOURS);
+      } catch { /* 14-day execution evidence remains available */ }
+    }
+  });
+  await Promise.all(recentWorkers);
   const shrinkage = shrinkScores(rows);
+  rows.forEach(applyExecutionEvidence);
   rows.sort((a, b) => b.rankingValue - a.rankingValue);
   return { refined: targets.filter((r) => r.deep).length, shrinkage };
 }
@@ -3187,8 +3301,9 @@ function planEvidenceConfidence(row) {
   if (!row.deep || row.age > 300 ||
       (row.regimeScore || 0) >= CAL.regime_shift_threshold) return "speculative";
   if (!row.pricedFromReference && (row.shrinkWeight || 0) >= 0.60 &&
-      row.volume >= 200) return "high";
-  if ((row.shrinkWeight || 0) >= 0.25 && row.age <= 180) return "medium";
+      row.volume >= 200 && (row.executionQuality ?? 0.5) >= 0.62) return "high";
+  if ((row.shrinkWeight || 0) >= 0.25 && row.age <= 180 &&
+      (row.executionQuality ?? 0.5) >= 0.45) return "medium";
   return "speculative";
 }
 
@@ -3203,7 +3318,9 @@ function quickPlanRiskTier(row) {
   if (row.pFill < 0.25) tier += 2;
   if (row.deep && ((row.regimeScore || 0) >= CAL.regime_shift_threshold ||
       (row.volatility || 0) >= 0.08)) tier += 2;
-  return tier;
+  if ((row.executionQuality ?? 0.5) >= 0.72) tier -= 1;
+  if ((row.executionQuality ?? 0.5) < 0.40) tier += 2;
+  return Math.max(0, tier);
 }
 
 function isAutomaticPlanCandidate(row) {
@@ -3212,6 +3329,7 @@ function isAutomaticPlanCandidate(row) {
   if (!row.deep || confidence === "speculative") {
     return false;
   }
+  if ((row.executionQuality ?? 0.5) < 0.40) return false;
   // High-only made the budget a cosmetic input: in a quiet market a 10m and
   // 100m bank could both collapse to the same single low-capacity item. Medium
   // evidence is allowed here; the allocator separately caps quantity at the
@@ -4331,7 +4449,7 @@ function showDetail(id) {
   // attributable to the factor that caused it.
   const pct = (f) => `${Math.round(f * 100)}%`;
   const lines = [
-    `<strong>Why this ranks here:</strong> ${row.margin > 0 ? "positive executable spread after tax" : "no executable spread"}; ${row.pFill >= .5 ? "stronger" : row.pFill >= .25 ? "usable" : "weak"} full-quantity probability with partial fills counted separately; ${row.volume >= 1000 ? "dense" : "thin"} two-sided volume; ${row.drift < -.02 ? "falling price raises adverse-selection risk" : "recent drift is manageable"}; ${confidenceLabel(row)} model confidence.`,
+    `<strong>Why this ranks here:</strong> ${row.margin > 0 ? "positive executable spread after tax" : "no executable spread"}; ${row.pFill >= .5 ? "stronger" : row.pFill >= .25 ? "usable" : "weak"} full-quantity probability with partial fills counted separately; ${row.volume >= 1000 ? "dense" : "thin"} two-sided volume; ${row.executionQuality >= .70 ? "recently repeatable edge" : "no strong repeatability bonus"}; ${row.drift < -.02 ? "falling price raises adverse-selection risk" : "recent drift is manageable"}; ${confidenceLabel(row)} model confidence.`,
     `Quoted best case: <strong>${num(row.gross)} gp</strong>; expected completed quantity is ${num(Math.round(row.expectedSellQty))}.`,
     row.mode === "overnight"
       ? `Overnight workflow: the buy rests for ${row.horizonHours}h, you collect on return, then sell for up to ${row.liquidationHours}h. Horizon EV is <strong>${formatGp(Math.round(row.rankingValue))} gp</strong> after ${formatGp(Math.round(row.downsideRisk))} gp of unsold-inventory stress risk.`
@@ -4355,11 +4473,19 @@ function showDetail(id) {
           }. Today's quote sits ${Math.abs(row.elevation) < 0.01 ? "at" :
             pct(row.elevation) + (row.elevation > 0 ? " above" : " below")} its 14-day median.`
         : `Does not mean-revert on 14 days of data, so "above its median" carries no prediction — the level factor stays near neutral and only a small capped trend term applies.`);
+    const execution = row.recentExecution || row.longExecution;
+    if (execution) {
+      const observedShare = execution.profitableBuckets / execution.buckets;
+      lines.push(`${row.recentExecution ? "Last 6 hours" : "14-day execution sample"}: the average spread stayed profitable after tax in <strong>${pct(observedShare)}</strong> of ${num(execution.buckets)} two-sided traded buckets; median net margin ${num(execution.medianNetMargin)} gp and observed two-sided edge capacity ${formatGp(Math.round(execution.edgeThroughputGpHour))} gp/h.`);
+    }
+    if (row.executionFactor != null && Math.abs(row.executionFactor - 1) >= 0.005) {
+      lines.push(`Repeatability ${row.executionFactor > 1 ? "raises" : "reduces"} the evidence-weighted rank by ${Math.round(Math.abs(row.executionFactor - 1) * 100)}%; it does not change the quoted profit or pretend that all observed market volume belongs to your offer.`);
+    }
   } else {
     lines.push("Not deep-checked against 14-day history (outside the shortlist).");
   }
-  if (row.rawRankingValue > 0 && row.rankingValue / row.rawRankingValue < 0.995) {
-    lines.push(`Shrinkage took its decision value from ${formatGp(Math.round(row.rawRankingValue))} to <strong>${formatGp(Math.round(row.rankingValue))}</strong>: ranking hundreds of noisy estimates surfaces the biggest errors, so thin observations are pulled harder toward the market average.`);
+  if (row.rawRankingValue > 0 && (row.shrinkRetention ?? 1) < 0.995) {
+    lines.push(`Shrinkage took its raw decision value from ${formatGp(Math.round(row.rawRankingValue))} to <strong>${formatGp(Math.round(row.executionBaseRanking ?? row.rankingValue))}</strong> before the separate repeatability adjustment: ranking hundreds of noisy estimates surfaces the biggest errors, so thin observations are pulled harder toward the market average.`);
   }
   $("#d-notes").innerHTML = lines.map((l) => `<li>${l}</li>`).join("");
   loadChart();

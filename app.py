@@ -604,12 +604,18 @@ def main():
         except api.ApiError:
             return None
 
+    def fetch_recent(item_id):
+        try:
+            return client.timeseries(item_id, engine.RECENT_EXECUTION_TIMESTEP)
+        except api.ApiError:
+            return None
+
     with st.spinner("Scoring every tradable item, then checking the shortlist "
-                    "against 14-day history…"):
+                    "against 14-day and recent execution history…"):
         result = filters.rank_flips(
             items, quotes, activity_5m, activity_1h, config, now=time.time(),
             fetch_history=fetch_history, top_k=15, exempt=exempt,
-            volume_lookup=volume_lookup())
+            volume_lookup=volume_lookup(), fetch_recent=fetch_recent)
 
     st.title("🪙 Grand Exchange Flipper")
     st.caption("Live snapshot refreshed automatically every 60 seconds · {}"

@@ -183,6 +183,11 @@ class FlipRow:
     # wrong one for a spike ratio.
     volume_1h_total: int = 0
     history_mean_volume: Optional[float] = None
+    long_execution: Optional[engine.ExecutionEvidenceView] = None
+    recent_execution: Optional[engine.ExecutionEvidenceView] = None
+    execution_quality: float = 0.5
+    execution_factor: float = 1.0
+    shrink_retention: float = 1.0
 
     # Capital allocation, filled by allocate()
     allocated_capital: Optional[int] = None
@@ -553,6 +558,9 @@ def _apply_shrinkage(
                        else row.gp_per_slot_hour)
         out.append(replace(row, ranking_value=value,
                            gp_per_slot_hour=gp_per_hour,
+                           shrink_retention=(value / row.raw_ranking_value
+                                             if row.raw_ranking_value > 0
+                                             else 0.0),
                            edge_probability=probability, warnings=warnings))
     return out, shrunk
 
@@ -568,6 +576,7 @@ def refine_with_history(
     now: float,
     top_k: int = 15,
     breadth: int = 3,
+    fetch_recent: Optional[Callable[[int], Optional[List[dict]]]] = None,
 ) -> ScreenResult:
     """Re-score the leading candidates against ~14 days of 6h history.
 
@@ -596,12 +605,57 @@ def refine_with_history(
                 "no usable 14-day history — ranked on intraday data only",))
             continue
         refined_count += 1
-        rows[index] = _rescore_with_history(row, view, config, now)
+        rescored = _rescore_with_history(row, view, config, now)
+        long_execution = engine.execution_evidence_view(
+            points, rescored.tax_exempt, rescored.margin,
+            engine.HISTORY_BUCKET_HOURS,
+            engine.HISTORY_WINDOW_BUCKETS * engine.HISTORY_BUCKET_HOURS)
+        rows[index] = replace(rescored, long_execution=long_execution)
+
+    if fetch_recent is not None:
+        leaders = sorted(
+            (row for row in rows if row.deep_checked),
+            key=lambda row: row.raw_ranking_value, reverse=True,
+        )[:engine.RECENT_EXECUTION_TOP_K]
+        by_id = {row.item_id: index for index, row in enumerate(rows)}
+        for row in leaders:
+            points = fetch_recent(row.item_id)
+            if not points:
+                continue
+            recent = engine.execution_evidence_view(
+                points, row.tax_exempt, row.margin, 5 / 60,
+                engine.RECENT_EXECUTION_HOURS)
+            rows[by_id[row.item_id]] = replace(row, recent_execution=recent)
 
     rows, shrinkage = _apply_shrinkage(rows, config)
+    rows = [_apply_execution_evidence(row) for row in rows]
     rows.sort(key=lambda r: r.ranking_value, reverse=True)
     return ScreenResult(rows=rows, funnel=result.funnel,
                         shrinkage=shrinkage, deep_checked=refined_count)
+
+
+def _apply_execution_evidence(row: FlipRow) -> FlipRow:
+    if not row.deep_checked or row.long_execution is None:
+        return row
+    quality, factor = engine.combined_execution_evidence(
+        row.long_execution, row.recent_execution,
+        row.raw_ranking_value, row.raw_gp_per_slot_hour,
+        row.trade_mode, row.horizon_hours)
+    warnings = row.warnings
+    if row.recent_execution is not None:
+        recent_quality = engine.execution_evidence_quality(
+            row.recent_execution, row.raw_ranking_value,
+            row.raw_gp_per_slot_hour, row.trade_mode, row.horizon_hours)
+        if recent_quality < 0.38:
+            warnings += ("recent spread rarely survived tax — the live quote "
+                         "is not repeating",)
+    ranking = row.ranking_value * factor
+    return replace(
+        row, execution_quality=quality, execution_factor=factor,
+        ranking_value=ranking,
+        gp_per_slot_hour=(ranking if row.trade_mode is engine.TradeMode.ACTIVE
+                          else row.gp_per_slot_hour),
+        warnings=warnings)
 
 
 def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
@@ -838,12 +892,14 @@ def rank_flips(
     top_k: int = 15,
     exempt: Optional[exemptions.ExemptionSet] = None,
     volume_lookup: Optional["VolumeLookup"] = None,
+    fetch_recent: Optional[Callable[[int], Optional[List[dict]]]] = None,
 ) -> ScreenResult:
     """The whole pipeline: score, shrink, deep-check, filter, allocate."""
     result = screen(items, quotes, activity_5m, activity_1h, config, now, exempt,
                     volume_lookup)
     if fetch_history is not None and top_k > 0:
-        result = refine_with_history(result, fetch_history, config, now, top_k)
+        result = refine_with_history(result, fetch_history, config, now, top_k,
+                                     fetch_recent=fetch_recent)
     result = apply_preferences(result, config)
     return allocate(result, config)
 
@@ -963,8 +1019,7 @@ def confidence_label(row: FlipRow) -> str:
     reconstructed from bucket averages or a detected regime shift cannot be
     High however attractive its point estimate looks.
     """
-    retained = (row.ranking_value / row.raw_ranking_value
-                if row.raw_ranking_value > 0 else 0.0)
+    retained = row.shrink_retention
     interval_width = ((row.fill_high_qty - row.fill_low_qty) /
                       max(1.0, row.qty_per_window))
     regime = row.regime_score or 0.0
@@ -974,9 +1029,10 @@ def confidence_label(row: FlipRow) -> str:
     if (not row.priced_from_reference and row.deep_checked
             and row.edge_probability >= 0.80 and row.p_fill >= 0.50
             and row.thin_volume_1h >= 200 and retained >= 0.85
-            and interval_width <= 0.55):
+            and interval_width <= 0.55 and row.execution_quality >= 0.62):
         return "High"
     if (row.edge_probability >= 0.55 and row.p_fill >= 0.25
-            and row.quote_age <= 180 and interval_width <= 0.85):
+            and row.quote_age <= 180 and interval_width <= 0.85
+            and row.execution_quality >= 0.45):
         return "Medium"
     return "Speculative"

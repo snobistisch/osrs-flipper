@@ -244,11 +244,18 @@ def main(argv=None):
         except api.ApiError:
             return None
 
+    def fetch_recent(item_id):
+        try:
+            return client.timeseries(item_id, engine.RECENT_EXECUTION_TIMESTEP)
+        except api.ApiError:
+            return None
+
     try:
         result = filters.rank_flips(
             items, quotes, activity_5m, activity_1h, config, now=time.time(),
             fetch_history=fetch if opts.deep > 0 else None,
-            top_k=opts.deep, exempt=exempt, volume_lookup=volume_lookup)
+            top_k=opts.deep, exempt=exempt, volume_lookup=volume_lookup,
+            fetch_recent=fetch_recent if opts.deep > 0 else None)
         if opts.mode == "crash":
             print_crash_table(result, opts)
         else:

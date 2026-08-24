@@ -466,6 +466,22 @@ class HistoryStageTests(unittest.TestCase):
         filters.refine_with_history(result, fetch, cfg, NOW, top_k=5)
         self.assertEqual(len(seen), 15)
 
+    def test_recent_repeating_spread_is_attached_and_changes_rank(self):
+        cfg = filters.FilterConfig(capital=10_000_000)
+        result = filters.screen({1: item()}, {1: quote()}, {1: act_5m()},
+                                {1: act_1h()}, cfg, NOW, NO_EXEMPTIONS)
+        recent = [{"timestamp": index * 300,
+                   "avgHighPrice": 1_250, "avgLowPrice": 950,
+                   "highPriceVolume": 2_000, "lowPriceVolume": 2_000}
+                  for index in range(72)]
+        refined = filters.refine_with_history(
+            result, lambda _: self.buckets(1_100), cfg, NOW, top_k=1,
+            fetch_recent=lambda _: recent)
+        row = refined.rows[0]
+        self.assertIsNotNone(row.recent_execution)
+        self.assertGreater(row.execution_quality, 0.70)
+        self.assertGreater(row.execution_factor, 1.0)
+
 
 class AllocationStageTests(unittest.TestCase):
     def test_capital_is_split_by_score_across_the_slots(self):

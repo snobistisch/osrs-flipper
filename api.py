@@ -248,8 +248,8 @@ class WikiClient:
     def timeseries(self, item_id: int, timestep: str = "1h") -> List[dict]:
         """History for ONE item: the detail view, plus top-K refinement.
 
-        Never called across all items — only for a single selected item or a
-        shortlist of ~15 candidates, and cached 30 minutes so repeated
+        Never called across all items — only for a single selected item or the
+        bounded deep/recent shortlist, and cached 30 minutes so repeated
         rankings reuse the same fetch.
         """
         if timestep not in TIMESTEPS:

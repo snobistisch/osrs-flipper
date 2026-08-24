@@ -146,6 +146,9 @@ HISTORY_WINDOW_BUCKETS = 56       # 14 days of 6h buckets
 MIN_HISTORY_BUCKETS = 8           # fewer traded buckets: refuse to refine
 RECENT_TREND_BUCKETS = 12         # ~3 days
 FILL_TOLERANCE = 0.01             # prices within 1% count as reachable
+RECENT_EXECUTION_TIMESTEP = "5m"
+RECENT_EXECUTION_HOURS = 6.0
+RECENT_EXECUTION_TOP_K = 15
 
 _GP_SUFFIXES = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
 
@@ -1725,6 +1728,105 @@ def history_view(points: List[dict], buy: int, sell: int,
         median_mid=int(round(median_mid)) if median_mid else None,
         elevation=elevation, volatility=volatility, ou=ou, regime_score=regime,
         mean_volume=(sum(volumes) / len(volumes)) if volumes else 0.0)
+
+
+@dataclass(frozen=True)
+class ExecutionEvidenceView:
+    """Whether a tax-adjusted spread repeated across two-sided buckets."""
+    buckets: int
+    profitable_buckets: int
+    positive_share: float
+    evidence_strength: float
+    median_net_margin: float
+    margin_support: float
+    edge_throughput_gp_hour: float
+    activity_share: float
+    window_hours: float
+
+
+def execution_evidence_view(
+    points: List[dict], tax_exempt: bool, live_margin: int,
+    bucket_hours: float, window_hours: float,
+) -> Optional[ExecutionEvidenceView]:
+    """Measure repeatable edge without treating market volume as our fills."""
+    valid = [point for point in points if isinstance(point, dict)]
+    if not valid:
+        return None
+    timestamps = [float(point["timestamp"]) for point in valid
+                  if isinstance(point.get("timestamp"), (int, float))]
+    expected = max(1, int(round(window_hours / bucket_hours)))
+    if timestamps:
+        newest = max(timestamps)
+        windowed = [point for point in valid
+                    if isinstance(point.get("timestamp"), (int, float))
+                    and point["timestamp"] >= newest - window_hours * SECONDS_PER_HOUR]
+    else:
+        windowed = valid[-expected:]
+    traded = [point for point in windowed
+              if (point.get("highPriceVolume") or 0) > 0
+              and (point.get("lowPriceVolume") or 0) > 0
+              and (point.get("avgHighPrice") or 0) > 0
+              and (point.get("avgLowPrice") or 0) > 0]
+    if not traded:
+        return None
+
+    margins = [net_margin(int(round(point["avgLowPrice"])),
+                          int(round(point["avgHighPrice"])), tax_exempt)
+               for point in traded]
+    profitable = sum(margin > 0 for margin in margins)
+    positive_share = (profitable + 2) / (len(traded) + 4)
+    strength = min(1.0, len(traded) / 12.0)
+    median_margin = stats.median(margins) or 0.0
+    margin_support = max(0.0, min(1.0,
+                         median_margin / max(1.0, float(live_margin))))
+    edge_gp = sum(max(0, margin) * min(
+        point.get("highPriceVolume") or 0,
+        point.get("lowPriceVolume") or 0)
+        for point, margin in zip(traded, margins))
+    return ExecutionEvidenceView(
+        buckets=len(traded), profitable_buckets=profitable,
+        positive_share=positive_share, evidence_strength=strength,
+        median_net_margin=median_margin, margin_support=margin_support,
+        edge_throughput_gp_hour=edge_gp / max(bucket_hours, window_hours),
+        activity_share=min(1.0, len(traded) / expected),
+        window_hours=window_hours)
+
+
+def execution_evidence_quality(view: Optional[ExecutionEvidenceView],
+                               raw_ranking_value: float,
+                               raw_gp_per_slot_hour: float,
+                               mode: TradeMode,
+                               horizon_hours: float) -> float:
+    """Convert repeated spreads to bounded evidence; neutral evidence is .5."""
+    if view is None:
+        return 0.5
+    model_gp_hour = (raw_ranking_value / max(1.0, horizon_hours)
+                     if mode is TradeMode.OVERNIGHT
+                     else raw_gp_per_slot_hour)
+    capacity = max(0.0, min(1.0,
+                   view.edge_throughput_gp_hour / max(1.0, model_gp_hour)))
+    measured = (0.60 * view.positive_share +
+                0.25 * view.margin_support + 0.15 * capacity)
+    return 0.5 + view.evidence_strength * (measured - 0.5)
+
+
+def combined_execution_evidence(
+    long_view: Optional[ExecutionEvidenceView],
+    recent_view: Optional[ExecutionEvidenceView],
+    raw_ranking_value: float, raw_gp_per_slot_hour: float,
+    mode: TradeMode, horizon_hours: float,
+) -> Tuple[float, float]:
+    """Return (quality, rank factor); recent evidence gets the larger vote."""
+    long_quality = execution_evidence_quality(
+        long_view, raw_ranking_value, raw_gp_per_slot_hour, mode, horizon_hours)
+    if recent_view is None:
+        quality = long_quality
+    else:
+        recent_quality = execution_evidence_quality(
+            recent_view, raw_ranking_value, raw_gp_per_slot_hour,
+            mode, horizon_hours)
+        quality = 0.35 * long_quality + 0.65 * recent_quality
+    return quality, 0.70 + 0.60 * quality
 
 
 def gp_per_slot_hour(expected_gp: float, total_seconds: float) -> float:

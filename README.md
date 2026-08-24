@@ -177,6 +177,24 @@ punished for trading above last week. That share feeds the fill *rate*: a price
 only 5% of the market ever reached is not a flip earning 5% of its margin, it is
 a flip that takes twenty times as long.
 
+### 5b. A good spread repeats
+
+One wide print is not an edge. The deep check now measures the spread in every
+two-sided 6-hour bucket over 14 days and, for the leading 15 candidates, every
+traded 5-minute bucket over the latest 6 hours. It asks three separate
+questions: how often the average high/low spread remained positive after GE
+tax, how much of the live per-item margin the historical median supports, and
+how much positive-margin volume actually appeared on the thinner side of the
+market.
+
+Those readings form a bounded execution-evidence factor (0.7–1.3, with neutral
+evidence equal to 1). It adjusts rank and automatic-plan confidence, not the
+quoted profit or fill quantity. Twelve separate traded buckets are required for
+full evidence weight, so a few lucky transactions cannot earn a
+**REPEATABLE EDGE** badge. This favours liquid consumables whose modest margin
+can be captured across thousands of units while demoting a spectacular but
+one-off spread.
+
 ### 6. The list itself is the biggest source of error
 
 This is the correction that matters most, and no amount of better factors

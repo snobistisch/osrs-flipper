@@ -161,6 +161,26 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("eligible.map((row)", self.source)
         self.assertIn('id="filter-details" class="hidden"', self.source)
 
+    def test_recent_repeatable_edge_changes_ranking_and_plan_quality(self):
+        timestep = re.search(
+            r'const RECENT_EXECUTION_TIMESTEP\s*=\s*"([^"]+)"', self.source)
+        self.assertEqual(timestep.group(1), engine.RECENT_EXECUTION_TIMESTEP)
+        for name, expected in (
+                ("RECENT_EXECUTION_HOURS", engine.RECENT_EXECUTION_HOURS),
+                ("RECENT_EXECUTION_TOP_K", engine.RECENT_EXECUTION_TOP_K)):
+            match = re.search(r"const {}\s*=\s*([0-9.]+)".format(name), self.source)
+            self.assertIsNotNone(match)
+            self.assertEqual(float(match.group(1)), float(expected))
+        self.assertIn("function executionEvidenceView(", self.source)
+        self.assertIn("profitableBuckets", self.source)
+        self.assertIn("edgeThroughputGpHour", self.source)
+        self.assertIn("function applyExecutionEvidence(", self.source)
+        self.assertIn("rows.forEach(applyExecutionEvidence)", self.source)
+        self.assertIn("row.executionQuality", self.source)
+        self.assertIn('row.tags.push("REPEATABLE")', self.source)
+        self.assertIn("RECENT_EXECUTION_TOP_K", self.source)
+        self.assertIn("row.executionQuality ?? 0.5", self.source)
+
     def test_budget_changes_history_pool_and_visible_commitment(self):
         self.assertIn("const directBudget = Math.ceil(targetCount * 2 / 3)", self.source)
         self.assertIn("row.pricedFromReference", self.source)
