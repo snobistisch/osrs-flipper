@@ -181,7 +181,7 @@ class Calibration:
     # applies where that crowd term does not bind — a quiet item nobody else is
     # watching. CALIBRATE: from the tick archive, as observed fill rate divided
     # by total volume at the touch.
-    competitors_at_touch: float = 4.0
+    competitors_at_touch: float = 8.0
 
     # How much of the spread you must concede before you have essentially
     # jumped the whole queue. Expressed as a fraction of the spread rather than
@@ -191,6 +191,14 @@ class Calibration:
     # the old fixed-gp queue constant misranked them.
     # CALIBRATE: regress observed fill rate on distance from the touch.
     aggressiveness_scale: float = 0.25
+
+    # Moving one tick inside the observed spread gives price priority, but the
+    # public feed exposes neither the quantities already at that tick nor how
+    # quickly other flippers re-price around us. The old curve therefore let a
+    # 1 gp concession claim most of all traded volume. In crowded markets cap
+    # the improved TOTAL share at 3%; a quiet market whose measured touch share
+    # is already larger keeps that base. CALIBRATE from completed journal trades.
+    priority_capture_ceiling: float = 0.03
 
     # Uncertainty in the realised fill rate. The public feed contains executed
     # trades, not queue depth or our position in it, so the point estimate
@@ -667,9 +675,10 @@ def aggressiveness(edge: float,
     touch you are willing to price.
 
     At the touch you are one of N offers at that price and take roughly 1/N of
-    what arrives, where N comes from touch_competitors. Concede some of the
-    spread and you move ahead of them; concede enough and you are taking
-    essentially everything that arrives.
+    what arrives, where N comes from touch_competitors. Conceding spread moves
+    you forward, but cannot reveal the hidden quantities already queued at the
+    next tick or stop another flipper from immediately matching your price.
+    The improvement is therefore capped rather than claiming all volume.
 
     `edge` is the concession as a fraction of the spread, so an item with no
     room to improve — the air rune at 5/6, where the spread is one gp and the
@@ -682,7 +691,8 @@ def aggressiveness(edge: float,
     if edge <= 0:
         return share
     scale = max(calibration.aggressiveness_scale, 1e-9)
-    return share + (1.0 - share) * (1.0 - math.exp(-edge / scale))
+    ceiling = max(share, min(1.0, calibration.priority_capture_ceiling))
+    return share + (ceiling - share) * (1.0 - math.exp(-edge / scale))
 
 
 def price_edge(depth: int, spread: float) -> float:

@@ -155,6 +155,9 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("quickPlanRiskTier", self.source)
         self.assertIn("function isAutomaticPlanCandidate(", self.source)
         self.assertIn("function planEvidenceConfidence(", self.source)
+        self.assertIn("function singleUnitRoundTripSeconds(", self.source)
+        self.assertIn("ACTIVE_AUTO_MAX_ROUND_TRIP_SECONDS", self.source)
+        self.assertIn("if (row.pricedFromReference) return false", self.source)
         self.assertIn("recentFalls.some", self.source)
         self.assertIn("state.deepReady = true", self.source)
         self.assertIn("kept: eligible", self.source)
@@ -186,6 +189,8 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("row.pricedFromReference", self.source)
         self.assertIn("config.maxPositionCapital", self.source)
         self.assertIn("function positionCapitalCeiling(", self.source)
+        self.assertIn('row.mode === "active" ? row.fillLowQty : row.fillHighQty',
+                      self.source)
         self.assertIn("reachableQty * row.buy", self.source)
         self.assertIn("o.config.maxPositionCapital ?? o.config.capital", self.source)
         self.assertIn("/ ${formatGp(config.capital)} COMMITTED", self.source)

@@ -803,9 +803,19 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
         category_count[row.category] = category_count.get(row.category, 0) + 1
         remaining_seed -= row.buy
 
+    # Active sizing uses the lower 80% completed-quantity bound. Using the
+    # optimistic bound let a large bank turn a fast small flip into a long
+    # queue. Overnight intentionally waits and keeps the upper bound.
+    capital_caps = []
+    for row in selected:
+        fill_bound = (row.fill_low_qty
+                      if config.trade_mode is engine.TradeMode.ACTIVE
+                      else row.fill_high_qty)
+        reachable = max(1, int(fill_bound))
+        capital_caps.append(min(row.capital_needed, reachable * row.buy))
     amounts = engine.allocate_portfolio(
         [row.ranking_value for row in selected], config.capital,
-        [row.buy for row in selected], [row.capital_needed for row in selected],
+        [row.buy for row in selected], capital_caps,
         config.slots)
 
     group_used: Dict[str, int] = {}

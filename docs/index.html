@@ -1057,8 +1057,9 @@ const NATURE_RUNE_FALLBACK = 100;
    archive or the journal that the Python tools collect. Nothing is tuned by
    feel inside a function. */
 const CAL = {
-  competitors_at_touch: 4.0,       // CALIBRATE: offers you queue behind
+  competitors_at_touch: 8.0,       // CALIBRATE: offers you queue behind
   aggressiveness_scale: 0.25,      // CALIBRATE: share of spread that jumps it
+  priority_capture_ceiling: 0.03,  // CALIBRATE: crowded improved-share cap
   fill_rate_log_sigma: 0.75,       // CALIBRATE: realised/predicted throughput
   max_completion_probability: 0.99,
   overnight_liquidation_hours: 4.0,
@@ -1263,15 +1264,16 @@ function touchCompetitors(volumePerHour, buyLimit) {
 }
 
 /* Share of arriving volume your offer captures. At the touch you are one of N
-   offers and take roughly 1/N of what arrives; concede enough of the spread
-   and you are taking essentially everything. An item with no room to improve
-   sits at its queue share and cannot buy its way out — the trap this exists to
-   price, and it only bites once N reflects how crowded the item really is. */
+   offers and take roughly 1/N of what arrives. A concession moves you forward,
+   but the feed cannot see quantities at the next tick or competitors matching
+   the new price, so the boost is capped instead of claiming all market flow. */
 function aggressiveness(edge, competitors) {
   const crowd = competitors != null ? competitors : CAL.competitors_at_touch;
   const share = 1 / Math.max(1, crowd);
   if (edge <= 0) return share;
-  return share + (1 - share) * (1 - Math.exp(-edge / Math.max(CAL.aggressiveness_scale, 1e-9)));
+  const ceiling = Math.max(share, Math.min(1, CAL.priority_capture_ceiling));
+  return share + (ceiling - share) *
+    (1 - Math.exp(-edge / Math.max(CAL.aggressiveness_scale, 1e-9)));
 }
 
 /* ---- fill time ---- */
@@ -1833,12 +1835,13 @@ function allocateCapital(rows, capital, slots, reserved = [], maxPerPosition = I
 }
 
 function positionCapitalCeiling(row, maxPerPosition) {
-  // Do not fund more units than the model's optimistic completed-quantity
-  // bound. This keeps a larger bank from turning a good small flip into a huge
-  // low-fill order merely because more cash is available.
-  const optimisticFill = Number.isFinite(row.fillHighQty)
-    ? row.fillHighQty : (row.qty || 1);
-  const reachableQty = Math.max(1, Math.floor(optimisticFill));
+  // Active flips are funded only to the LOW 80% throughput bound. The old
+  // optimistic bound was exactly how a larger bank turned a good small trade
+  // into a two-hour queue. Overnight keeps the high bound because waiting is
+  // the chosen strategy there rather than a failed active trade.
+  const fillBound = row.mode === "active" ? row.fillLowQty : row.fillHighQty;
+  const reachableQty = Math.max(1, Math.floor(Number.isFinite(fillBound)
+    ? fillBound : (row.qty || 1)));
   return Math.min(row.capitalNeeded, maxPerPosition, reachableQty * row.buy);
 }
 
@@ -3307,6 +3310,14 @@ function planEvidenceConfidence(row) {
   return "speculative";
 }
 
+const ACTIVE_AUTO_MAX_ROUND_TRIP_SECONDS = 2 * SECONDS_PER_HOUR;
+
+function singleUnitRoundTripSeconds(row) {
+  const buyRate = fillRate(row.modelBuyVolume1h, row.buyShare);
+  const sellRate = fillRate(row.modelSellVolume1h, row.sellShare);
+  return expectedFillSeconds(1, buyRate) + expectedFillSeconds(1, sellRate);
+}
+
 function quickPlanRiskTier(row) {
   // Safety comes before theoretical gp/h. History-backed high/medium-confidence
   // rows should fill the plan before an eye-catching but fragile spread.
@@ -3329,12 +3340,18 @@ function isAutomaticPlanCandidate(row) {
   if (!row.deep || confidence === "speculative") {
     return false;
   }
+  // Bucket averages describe where trades happened, not a live offer you can
+  // join. Keep those rows searchable, but never auto-deploy bank into them.
+  if (row.pricedFromReference) return false;
   if ((row.executionQuality ?? 0.5) < 0.40) return false;
+  if (row.mode === "active" &&
+      singleUnitRoundTripSeconds(row) > ACTIVE_AUTO_MAX_ROUND_TRIP_SECONDS) {
+    return false;
+  }
   // High-only made the budget a cosmetic input: in a quiet market a 10m and
   // 100m bank could both collapse to the same single low-capacity item. Medium
-  // evidence is allowed here; the allocator separately caps quantity at the
-  // model's reachable fill bound. Average-derived prices remain clearly
-  // flagged on the card, so the player knows to margin-check them in game.
+  // evidence is allowed here; the allocator separately caps active quantity
+  // at the conservative fill bound.
   const warnings = (row.warnings || []).join(" ").toLowerCase();
   if (/price falling|dumping|dump fills|don't chase|regime shift|volatile|price swings|no realistic fill|only \d+% chance/.test(warnings)) {
     return false;
@@ -3704,7 +3721,8 @@ function syncFilterLabels() {
       $("#f-strategy").value);
     $("#auto-setup-text").textContent =
       `${auto.maxQuoteAge / 60}m freshness · ${num(auto.minVolume1h)}+/h volume · ` +
-      `${(auto.minRoi * 100).toFixed(1)}%+ net ROI · max ${formatGp(auto.maxPositionCapital)} per trade`;
+      `${(auto.minRoi * 100).toFixed(1)}%+ net ROI · direct quotes · conservative fills · ` +
+      `max ${formatGp(auto.maxPositionCapital)} per trade`;
   }
 }
 
@@ -4035,7 +4053,7 @@ function renderPlan(config) {
     parts.push(`${slots - state.planEntries.length} slot${
       slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: the remaining candidates failed the automatic confidence, trend or fill checks.`);
   }
-  parts.push(`Automatic selection already enforces fresh prices, liquidity, net ROI, queue room and a maximum of ${formatGp(config.maxPositionCapital)} per new trade. Save a flip to keep watching its target.`);
+  parts.push(`Automatic selection only uses direct live quotes, checks that even one unit has a sub-2h modelled round trip, and funds Active trades to the conservative fill bound with a maximum of ${formatGp(config.maxPositionCapital)} per new trade. If an offer has not started filling after 45 minutes, re-check the live margin instead of leaving it parked. Save a flip to keep watching its target.`);
   $("#plan-note").textContent = parts.join(" ");
 }
 

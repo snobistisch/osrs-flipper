@@ -244,13 +244,15 @@ net ROI, undercut room, maximum unit price and bot-supply gates from the bank,
 account and Active/Overnight strategy. New recommendations may commit at most
 25% of the bank per item in Active mode (35% Overnight), so a thin expensive
 item cannot consume nearly the whole cash stack merely because its estimated
-spread is wide. Direct live-price candidates are filled before rows reconstructed
-from hourly averages. The Active plan itself shows history-checked High and
-usable Medium-confidence candidates, while rejecting known sharp falls,
-dumping, regime shifts, volatility spikes and poor fills. Average-derived
-prices remain explicitly flagged so they can be margin-checked in game. The
+spread is wide. The Active plan uses only direct live quotes: rows reconstructed
+from hourly averages stay searchable, but cannot receive bank automatically.
+It funds quantity to the lower 80% throughput bound, rejects a market where
+even one unit has a modelled round trip over two hours, and no longer assumes
+that moving one tick captures most of all traded volume. Known sharp falls,
+dumping, regime shifts, volatility spikes and poor fills are rejected too. The
 planner may leave a slot or part of the bank unused when market volume or buy
-limits cannot absorb more cash safely.
+limits cannot absorb more cash safely. An Active offer that has not started
+filling after 45 minutes should be margin-checked and re-priced, not left parked.
 
 That strict plan is not the whole market. **All flip options** keeps every
 candidate that passed the automatic freshness, liquidity, ROI, queue-room and
@@ -533,8 +535,9 @@ The ones most worth fitting first, because they do the most work:
 
 | Parameter | What it claims | Fit it from |
 |---|---|---|
-| `competitors_at_touch` | You are one of ~4 offers at the touch price | Archive: observed fill rate over volume at the touch |
-| `aggressiveness_scale` | Conceding ~25% of the spread jumps the queue | Archive: fill rate against distance from the touch |
+| `competitors_at_touch` | Quiet-market floor: you are one of ~8 offers at the touch price | Journal: observed fill rate over volume at the touch |
+| `aggressiveness_scale` | How quickly price improvement reaches its capture ceiling | Journal: fill rate against distance from the touch |
+| `priority_capture_ceiling` | In crowded items, re-pricing captures at most 3% of total side volume; a higher quiet-market touch share is preserved | Journal: realised share after improving the price |
 | `score_noise_scale`, `score_noise_floor` | How much of a score is noise — this sets how hard shrinkage bites | Archive: how far an item's score moves between polls |
 | `adverse_selection_gamma` | Sensitivity to order flow running against you | Journal: holding-period return against OFI at entry |
 | `risk_aversion_eta` | Price risk between the legs | Journal, against a target Sharpe |

@@ -111,15 +111,17 @@ class AggressivenessTests(unittest.TestCase):
         share = engine.aggressiveness(0.0, CAL)
         self.assertAlmostEqual(share, 1.0 / CAL.competitors_at_touch)
 
-    def test_conceding_the_whole_spread_takes_almost_everything(self):
-        self.assertGreater(engine.aggressiveness(1.0, CAL), 0.9)
+    def test_conceding_spread_cannot_claim_the_whole_market(self):
+        share = engine.aggressiveness(1.0, CAL, competitors=100)
+        self.assertGreater(share, 0.01)
+        self.assertLessEqual(share, CAL.priority_capture_ceiling)
 
     def test_share_rises_with_room_and_is_bounded(self):
         previous = 0.0
         for edge in (0.0, 0.1, 0.25, 0.5, 1.0, 5.0):
-            share = engine.aggressiveness(edge, CAL)
+            share = engine.aggressiveness(edge, CAL, competitors=100)
             self.assertGreaterEqual(share, previous)
-            self.assertLessEqual(share, 1.0)
+            self.assertLessEqual(share, CAL.priority_capture_ceiling)
             previous = share
 
     def test_edge_is_measured_against_the_spread_not_the_price(self):
@@ -378,8 +380,11 @@ class ScoreTests(unittest.TestCase):
         self.assertEqual(result.p_fill_both, 0.0)
 
     def test_no_undercut_room_slows_the_fill(self):
-        with_room = self.score(depth=25)
-        without = self.score(depth=0)
+        # Price priority helps when the touch is genuinely crowded. It must not
+        # manufacture a boost for a quiet item whose base queue share already
+        # exceeds the conservative priority ceiling.
+        with_room = self.score(depth=25, competitors=100)
+        without = self.score(depth=0, competitors=100)
         self.assertGreater(without.total_seconds, with_room.total_seconds)
 
     def test_every_factor_is_reported_separately(self):
@@ -847,7 +852,9 @@ class TouchCompetitorsTests(unittest.TestCase):
         crowd = engine.touch_competitors(1_681_042, 50_000)
         at_touch = engine.aggressiveness(0.0, competitors=crowd)
         inside = engine.aggressiveness(0.5, competitors=crowd)
-        self.assertGreater(inside, 10 * at_touch)
+        self.assertGreater(inside, at_touch)
+        self.assertLessEqual(inside,
+                             engine.DEFAULT_CALIBRATION.priority_capture_ceiling)
 
     def test_the_crowd_makes_a_botted_flip_slower_than_a_quiet_one(self):
         """The regression the whole change exists to prevent."""

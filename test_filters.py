@@ -260,10 +260,10 @@ class ShrinkageStageTests(unittest.TestCase):
         # The optimizer's-curse case: a spread far above the market's, resting
         # on almost no traded volume. It must be revised down.
         items, quotes, acts5, acts1 = self.make(40)
-        quotes[1] = quote(low=1_000, high=1_600)
-        acts5[1] = act_5m(avg_low=1_000, avg_high=1_600,
+        quotes[1] = quote(low=1_000, high=2_400)
+        acts5[1] = act_5m(avg_low=1_000, avg_high=2_400,
                           high_volume=4, low_volume=4)
-        acts1[1] = act_1h(avg_low=1_000, avg_high=1_600,
+        acts1[1] = act_1h(avg_low=1_000, avg_high=2_400,
                           high_volume=40, low_volume=40)
         result = screen(items, quotes, acts5, acts1, capital=100_000_000)
         thin = next(r for r in result.rows if r.item_id == 1)
@@ -526,6 +526,28 @@ class AllocationStageTests(unittest.TestCase):
         old = before[row.item_id]
         linear = old.expected_gp * row.allocated_quantity / old.qty_per_window
         self.assertNotAlmostEqual(row.allocated_expected_gp, linear, places=4)
+
+    def test_active_allocation_uses_the_conservative_fill_bound(self):
+        cfg = filters.FilterConfig(capital=10_000_000,
+                                   trade_mode=engine.TradeMode.ACTIVE)
+        row = one(capital=cfg.capital).rows[0]
+        row = dataclasses.replace(
+            row, fill_low_qty=3.9, fill_high_qty=100.0,
+            capital_needed=100 * row.buy)
+        result = filters.allocate(
+            filters.ScreenResult(rows=[row], funnel={}), cfg)
+        self.assertEqual(result.rows[0].allocated_quantity, 3)
+
+    def test_overnight_allocation_can_use_the_upper_fill_bound(self):
+        cfg = filters.FilterConfig(capital=10_000_000,
+                                   trade_mode=engine.TradeMode.OVERNIGHT)
+        row = one(capital=cfg.capital).rows[0]
+        row = dataclasses.replace(
+            row, fill_low_qty=3.9, fill_high_qty=7.9,
+            capital_needed=100 * row.buy)
+        result = filters.allocate(
+            filters.ScreenResult(rows=[row], funnel={}), cfg)
+        self.assertEqual(result.rows[0].allocated_quantity, 7)
 
 
 class ExecutionDecisionTests(unittest.TestCase):
