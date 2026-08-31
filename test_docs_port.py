@@ -195,6 +195,27 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("o.config.maxPositionCapital ?? o.config.capital", self.source)
         self.assertIn("/ ${formatGp(config.capital)} COMMITTED", self.source)
 
+    def test_bank_risk_slider_controls_the_per_trade_cap(self):
+        self.assertIn('id="f-bank-risk" min="10" max="100" step="5" value="25"',
+                      self.source)
+        self.assertIn("const DEFAULT_BANK_RISK_PERCENT = 25", self.source)
+        self.assertIn("bankRiskPercent: normalizeBankRiskPercent", self.source)
+        self.assertIn('$("#f-bank-risk").value = String(normalizeBankRiskPercent',
+                      self.source)
+        self.assertIn("capital * riskPercent / 100", self.source)
+        self.assertIn("maxPrice: maxPositionCapital", self.source)
+        self.assertIn("bankRiskPercent = DEFAULT_BANK_RISK_PERCENT", self.source)
+        self.assertIn("const riskBlend = Math.max(0, Math.min(1,", self.source)
+        self.assertIn("modelledQty - baseQty", self.source)
+        self.assertIn("config.bankRiskPercent", self.source)
+        self.assertIn("Batch fill warnings describe the quantity", self.source)
+        automatic_gate = js_block(
+            self.source, "function isAutomaticPlanCandidate(row) {", "\n}\n\n/* Automatic quality gates")
+        self.assertNotIn("no realistic fill", automatic_gate)
+        self.assertNotIn("only \\d+% chance", automatic_gate)
+        self.assertIn('$("#f-bank-risk").addEventListener("change", loadAndRender)',
+                      self.source)
+
     def test_complete_candidate_list_can_be_searched_and_saved(self):
         self.assertIn("All flip options", self.source)
         self.assertIn('id="option-search"', self.source)

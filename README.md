@@ -241,14 +241,18 @@ instead of ranking anyway.
 
 The browser is deliberately one-click. It derives freshness, minimum volume,
 net ROI, undercut room, maximum unit price and bot-supply gates from the bank,
-account and Active/Overnight strategy. New recommendations may commit at most
-25% of the bank per item in Active mode (35% Overnight), so a thin expensive
-item cannot consume nearly the whole cash stack merely because its estimated
-spread is wide. The Active plan uses only direct live quotes: rows reconstructed
-from hourly averages stay searchable, but cannot receive bank automatically.
-It funds quantity to the lower 80% throughput bound, rejects a market where
-even one unit has a modelled round trip over two hours, and no longer assumes
-that moving one tick captures most of all traded volume. Known sharp falls,
+account and Active/Overnight strategy. The **Max bank per trade** slider sets
+how much of the total bank one new recommendation may commit, from 10% to 100%
+(25% by default). Raising it can put more cash behind the strongest opportunity,
+but also concentrates more of the bank in one item; the total plan can never
+commit more than the available bank. Above the default, quantity sizing also
+moves gradually from the conservative 80% fill lower bound toward the full
+modelled capacity. The Active plan uses only direct live quotes: rows
+reconstructed from hourly averages stay searchable, but cannot receive bank
+automatically. At the default risk setting it funds quantity to the lower 80%
+throughput bound, rejects a market where even one unit has a modelled round trip
+over two hours, and no longer assumes that moving one tick captures most of all
+traded volume. Known sharp falls,
 dumping, regime shifts, volatility spikes and poor fills are rejected too. The
 planner may leave a slot or part of the bank unused when market volume or buy
 limits cannot absorb more cash safely. An Active offer that has not started

@@ -710,6 +710,24 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
         <option value="10">10 hours</option><option value="12">12 hours</option>
       </select>
     </div>
+    <div class="field">
+      <div class="field-head">
+        <label for="f-bank-risk">Max bank per trade
+          <span class="val" id="f-bank-risk-v">25%</span></label>
+        <span class="hint-wrap">
+          <button type="button" class="hint" aria-label="About max bank per trade"
+                  aria-describedby="tip-bank-risk">?</button>
+          <span class="tip" role="tooltip" id="tip-bank-risk">Maximum share of
+            your total flipping bank that one new trade may use. Raising it can
+            deploy more cash into the strongest opportunities and sizes beyond
+            the conservative fill bound toward modelled capacity, but also
+            concentrates more of your bank in one item. Buy limits, modelled
+            capacity and quality checks still apply.</span>
+        </span>
+      </div>
+      <input type="range" id="f-bank-risk" min="10" max="100" step="5" value="25"
+             aria-describedby="tip-bank-risk">
+    </div>
     <div id="auto-setup" aria-live="polite">
       <strong>AUTO FILTERS</strong>
       <span id="auto-setup-text">Set from your bank and strategy.</span>
@@ -1010,6 +1028,9 @@ const MEMBER_SLOTS = 8;
 const DEFAULT_ACCOUNT = "members";
 const DEFAULT_STRATEGY = "active";
 const DEFAULT_OVERNIGHT_HOURS = 8;
+const DEFAULT_BANK_RISK_PERCENT = 25;
+const MIN_BANK_RISK_PERCENT = 10;
+const MAX_BANK_RISK_PERCENT = 100;
 const MAX_CASH_STACK = 2_147_483_647;
 
 /* Prices are whole gp, so this is the smallest move the market can make and
@@ -1771,7 +1792,9 @@ function shrinkScores(rows) {
    An equal split strands capital: a 10 gp item with a 10,000 buy limit can
    absorb 100k and no more, so a third of a 3m bank sits idle while the 50k
    item that could have used it is capped. */
-function allocateCapital(rows, capital, slots, reserved = [], maxPerPosition = Infinity) {
+function allocateCapital(rows, capital, slots, reserved = [],
+                         maxPerPosition = Infinity,
+                         bankRiskPercent = DEFAULT_BANK_RISK_PERCENT) {
   rows.forEach((r) => { r.allocated = 0; r.allocatedQty = 0; r.allocatedExpected = 0; });
   const selected = [], categoryCount = {};
   for (const lock of reserved) {
@@ -1780,7 +1803,7 @@ function allocateCapital(rows, capital, slots, reserved = [], maxPerPosition = I
   let seedBank = capital;
   for (const r of rows.slice(0, Math.max(40, slots * 6))) {
     if (selected.length >= slots) break;
-    const ceiling = positionCapitalCeiling(r, maxPerPosition);
+    const ceiling = positionCapitalCeiling(r, maxPerPosition, bankRiskPercent);
     if (!(r.rankingValue > 0) || !(r.expected > 0) ||
         r.buy > seedBank || r.buy > ceiling) continue;
     if ((categoryCount[r.category] || 0) >= 3) continue;
@@ -1797,12 +1820,13 @@ function allocateCapital(rows, capital, slots, reserved = [], maxPerPosition = I
   }
   for (let pass = 0; pass < selected.length + 3; pass++) {
     const hungry = seeded.filter((r) =>
-      r.allocated + r.buy <= positionCapitalCeiling(r, maxPerPosition));
+      r.allocated + r.buy <= positionCapitalCeiling(
+        r, maxPerPosition, bankRiskPercent));
     if (!hungry.length || remaining < Math.min(...hungry.map((r) => r.buy))) break;
     const weight = hungry.reduce((sum, r) => sum + r.rankingValue, 0);
     let progressed = false;
     for (const r of hungry) {
-      const ceiling = positionCapitalCeiling(r, maxPerPosition);
+      const ceiling = positionCapitalCeiling(r, maxPerPosition, bankRiskPercent);
       let grant = Math.min(ceiling - r.allocated,
         Math.floor(remaining * r.rankingValue / weight));
       grant -= grant % r.buy;
@@ -1834,12 +1858,21 @@ function allocateCapital(rows, capital, slots, reserved = [], maxPerPosition = I
   rows.splice(0, rows.length, ...funded, ...rows.filter((r) => !ids.has(r.id)));
 }
 
-function positionCapitalCeiling(row, maxPerPosition) {
+function positionCapitalCeiling(row, maxPerPosition, bankRiskPercent) {
   // Active flips are funded only to the LOW 80% throughput bound. The old
   // optimistic bound was exactly how a larger bank turned a good small trade
-  // into a two-hour queue. Overnight keeps the high bound because waiting is
-  // the chosen strategy there rather than a failed active trade.
-  const fillBound = row.mode === "active" ? row.fillLowQty : row.fillHighQty;
+  // into a two-hour queue. Above the safe default, the user's risk setting
+  // deliberately blends toward the full quantity already capped by modelled
+  // capacity and the GE buy limit. Overnight starts from its high bound because
+  // waiting is the chosen strategy there rather than a failed active trade.
+  const baseFillBound = row.mode === "active" ? row.fillLowQty : row.fillHighQty;
+  const riskPercent = normalizeBankRiskPercent(bankRiskPercent);
+  const riskBlend = Math.max(0, Math.min(1,
+    (riskPercent - DEFAULT_BANK_RISK_PERCENT) /
+    (MAX_BANK_RISK_PERCENT - DEFAULT_BANK_RISK_PERCENT)));
+  const baseQty = Number(baseFillBound) || 0;
+  const modelledQty = Math.max(baseQty, Number(row.qty) || 1);
+  const fillBound = baseQty + (modelledQty - baseQty) * riskBlend;
   const reachableQty = Math.max(1, Math.floor(Number.isFinite(fillBound)
     ? fillBound : (row.qty || 1)));
   return Math.min(row.capitalNeeded, maxPerPosition, reachableQty * row.buy);
@@ -3353,7 +3386,11 @@ function isAutomaticPlanCandidate(row) {
   // evidence is allowed here; the allocator separately caps active quantity
   // at the conservative fill bound.
   const warnings = (row.warnings || []).join(" ").toLowerCase();
-  if (/price falling|dumping|dump fills|don't chase|regime shift|volatile|price swings|no realistic fill|only \d+% chance/.test(warnings)) {
+  // Batch fill warnings describe the quantity the risk slider is choosing,
+  // not whether the market is executable at all. The single-unit round-trip
+  // gate above remains the hard safety check; lower batch completion odds stay
+  // visible on the card instead of paradoxically removing every high-risk pick.
+  if (/price falling|dumping|dump fills|don't chase|regime shift|volatile|price swings/.test(warnings)) {
     return false;
   }
   const recentFalls = [...warnings.matchAll(/falling (\d+(?:\.\d+)?)% over recent days/g)];
@@ -3646,9 +3683,17 @@ function savePreferences() {
   const value = {
     capital: state.capital, account: $("#f-account").value,
     strategy: $("#f-strategy").value, horizon: Number($("#f-horizon").value),
+    bankRiskPercent: normalizeBankRiskPercent($("#f-bank-risk").value),
     timestep: state.timestep,
   };
   writeDurableStorage(PREF_KEY, JSON.stringify(value));
+}
+
+function normalizeBankRiskPercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_BANK_RISK_PERCENT;
+  const stepped = Math.round(numeric / 5) * 5;
+  return Math.max(MIN_BANK_RISK_PERCENT, Math.min(MAX_BANK_RISK_PERCENT, stepped));
 }
 
 function restorePreferences() {
@@ -3657,6 +3702,7 @@ function restorePreferences() {
   $("#f-strategy").value = p.strategy === "overnight" ? p.strategy : DEFAULT_STRATEGY;
   $("#f-horizon").value = [6, 8, 10, 12].includes(Number(p.horizon))
     ? String(p.horizon) : String(DEFAULT_OVERNIGHT_HOURS);
+  $("#f-bank-risk").value = String(normalizeBankRiskPercent(p.bankRiskPercent));
   if (["5m", "1h", "6h", "24h"].includes(p.timestep)) state.timestep = p.timestep;
   return p;
 }
@@ -3667,18 +3713,19 @@ function parsePriceInput(sel) {
   try { return parseGp(raw); } catch { return null; }
 }
 
-function automaticFilterProfile(capital, account, strategy) {
-  const slots = accountSlots(account);
+function automaticFilterProfile(capital, account, strategy, bankRiskPercent) {
   const overnight = strategy === "overnight";
   const lowBank = capital <= 10_000_000;
-  const maxPositionCapital = Math.max(1, Math.floor(capital * (overnight ? 0.35 : 0.25)));
+  const riskPercent = normalizeBankRiskPercent(bankRiskPercent);
+  const maxPositionCapital = Math.max(1, Math.floor(capital * riskPercent / 100));
   return {
     maxQuoteAge: overnight ? 900 : 600,
     minVolume1h: overnight ? (lowBank ? 40 : 20) : (lowBank ? 100 : 40),
     minRoi: overnight ? 0.008 : 0.003,
     minUndercutDepth: 1,
     minPrice: 1,
-    maxPrice: Math.max(1, Math.floor(Math.min(capital / slots, maxPositionCapital))),
+    maxPrice: maxPositionCapital,
+    bankRiskPercent: riskPercent,
     maxPositionCapital,
     taxFreeOnly: false,
     hideBotted: true,
@@ -3688,7 +3735,9 @@ function automaticFilterProfile(capital, account, strategy) {
 function readConfig() {
   const account = $("#f-account").value;
   const strategy = $("#f-strategy").value;
-  const automatic = automaticFilterProfile(state.capital, account, strategy);
+  const bankRiskPercent = normalizeBankRiskPercent($("#f-bank-risk").value);
+  const automatic = automaticFilterProfile(
+    state.capital, account, strategy, bankRiskPercent);
   return {
     capital: state.capital,
     account,
@@ -3711,6 +3760,8 @@ function syncFilterLabels() {
   $("#f-roi-v").textContent = roi === 0 ? "off" : (roi / 10).toFixed(1) + " %";
   const depth = Number($("#f-depth").value);
   $("#f-depth-v").textContent = depth === 0 ? "off" : depth + " gp";
+  const bankRiskPercent = normalizeBankRiskPercent($("#f-bank-risk").value);
+  $("#f-bank-risk-v").textContent = bankRiskPercent + "%";
   const slots = accountSlots($("#f-account").value);
   $("#per-slot").textContent = state.capital == null ? "—"
     : formatGp(state.capital) + ` gp pooled across ${slots} slots`;
@@ -3718,11 +3769,11 @@ function syncFilterLabels() {
   $("#overnight-field").classList.toggle("hidden", !overnight);
   if (state.capital != null) {
     const auto = automaticFilterProfile(state.capital, $("#f-account").value,
-      $("#f-strategy").value);
+      $("#f-strategy").value, bankRiskPercent);
     $("#auto-setup-text").textContent =
       `${auto.maxQuoteAge / 60}m freshness · ${num(auto.minVolume1h)}+/h volume · ` +
-      `${(auto.minRoi * 100).toFixed(1)}%+ net ROI · direct quotes · conservative fills · ` +
-      `max ${formatGp(auto.maxPositionCapital)} per trade`;
+      `${(auto.minRoi * 100).toFixed(1)}%+ net ROI · direct quotes · adjustable sizing · ` +
+      `max ${auto.bankRiskPercent}% (${formatGp(auto.maxPositionCapital)}) per trade`;
   }
 }
 
@@ -3802,7 +3853,7 @@ function show(allRows, config, statusText) {
     tags: [...(row.tags || [])],
     factors: { ...(row.factors || {}) },
   }));
-  const decisionKey = `${config.account}:${config.strategy}:${config.horizonHours}`;
+  const decisionKey = `${config.account}:${config.strategy}:${config.horizonHours}:${config.bankRiskPercent}`;
   if (state.lastDecisionKey !== decisionKey) state.selected = null;
   state.lastDecisionKey = decisionKey;
   const locks = locksFor(config);
@@ -3816,7 +3867,8 @@ function show(allRows, config, statusText) {
   candidates.sort((a, b) => quickPlanRiskTier(a) - quickPlanRiskTier(b) ||
     b.rankingValue - a.rankingValue);
   allocateCapital(candidates, Math.max(0, config.capital - lockedCommit),
-    Math.max(0, config.slots - locks.length), locks, config.maxPositionCapital);
+    Math.max(0, config.slots - locks.length), locks, config.maxPositionCapital,
+    config.bankRiskPercent);
   // Keep the strict automatic plan separate from the complete selectable
   // market list. The previous implementation replaced the list with the
   // shortlist, making every medium-confidence alternative disappear.
@@ -4053,7 +4105,10 @@ function renderPlan(config) {
     parts.push(`${slots - state.planEntries.length} slot${
       slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: the remaining candidates failed the automatic confidence, trend or fill checks.`);
   }
-  parts.push(`Automatic selection only uses direct live quotes, checks that even one unit has a sub-2h modelled round trip, and funds Active trades to the conservative fill bound with a maximum of ${formatGp(config.maxPositionCapital)} per new trade. If an offer has not started filling after 45 minutes, re-check the live margin instead of leaving it parked. Save a flip to keep watching its target.`);
+  const sizingText = config.bankRiskPercent <= DEFAULT_BANK_RISK_PERCENT
+    ? "the conservative fill bound"
+    : "a risk-adjusted quantity between the conservative fill bound and modelled capacity";
+  parts.push(`Automatic selection only uses direct live quotes, checks that even one unit has a sub-2h modelled round trip, and funds Active trades to ${sizingText}, with a maximum of ${config.bankRiskPercent}% of your bank (${formatGp(config.maxPositionCapital)}) per new trade. If an offer has not started filling after 45 minutes, re-check the live margin instead of leaving it parked. Save a flip to keep watching its target.`);
   $("#plan-note").textContent = parts.join(" ");
 }
 
@@ -4953,12 +5008,15 @@ $("#f-strategy").addEventListener("change", () => {
   loadAndRender();
 });
 $("#f-horizon").addEventListener("change", loadAndRender);
+$("#f-bank-risk").addEventListener("input", syncFilterLabels);
+$("#f-bank-risk").addEventListener("change", loadAndRender);
 $("#refresh").addEventListener("click", loadAndRender);
 $("#reset-preferences").addEventListener("click", () => {
   try { localStorage.removeItem(PREF_KEY); } catch {}
   $("#f-account").value = DEFAULT_ACCOUNT;
   $("#f-strategy").value = DEFAULT_STRATEGY;
   $("#f-horizon").value = String(DEFAULT_OVERNIGHT_HOURS);
+  $("#f-bank-risk").value = String(DEFAULT_BANK_RISK_PERCENT);
   state.timestep = "1h";
   syncFilterLabels();
   loadAndRender();
