@@ -10,6 +10,7 @@ Acceptable-use constraints (https://prices.runescape.wiki):
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 import urllib.error
@@ -17,7 +18,10 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Callable, Dict, List, Optional, Tuple
+
+from storage import write_json
 
 # v1 and v2 return byte-identical payloads on every route used here (/latest,
 # /5m, /1h, /mapping, /timeseries) — checked directly, not assumed. There is
@@ -34,6 +38,7 @@ LATEST_TTL = 30          # seconds; also the minimum poll interval
 INTERVAL_TTL = {"5m": 60, "1h": 300}
 MAPPING_MAX_AGE = 24 * 3600
 TIMESERIES_TTL = 1800    # per-item history moves slowly at 6h buckets
+STALE_GRACE = 300       # at most five extra minutes after an endpoint's TTL
 TIMESTEPS = ("5m", "1h", "6h", "24h")
 
 # Per-item history also caches to DISK, keyed by timestep. The in-memory cache
@@ -79,11 +84,45 @@ class Activity:
 def _opt_int(value: object) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
+    if (value < 0 or value > 2 ** 53 - 1
+            or not math.isfinite(value) or int(value) != value):
+        return None
     return int(value)
 
 
+def _positive_int(value: object) -> Optional[int]:
+    return _opt_int(value) or None
+
+
+def _timestamp(value: object) -> Optional[int]:
+    value = _positive_int(value)
+    return value if value is not None and value <= time.time() + 60 else None
+
+
+def clean_history(data: object) -> List[dict]:
+    """Validate history before it reaches statistics; keep missing sides null."""
+    if not isinstance(data, list):
+        raise ApiError("/timeseries: response has no 'data' list")
+    rows = {}
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        timestamp = _positive_int(row.get("timestamp"))
+        if timestamp is None or timestamp > time.time() + 60:
+            continue
+        cleaned = dict(row)
+        for side in ("High", "Low"):
+            price = _positive_int(row.get("avg" + side + "Price"))
+            cleaned["avg" + side + "Price"] = price
+            cleaned[side.lower() + "PriceVolume"] = (
+                _opt_int(row.get(side.lower() + "PriceVolume")) or 0
+            ) if price is not None else 0
+        rows[timestamp] = cleaned
+    return [rows[key] for key in sorted(rows)]
+
+
 class WikiClient:
-    def __init__(self, cache_dir: "str | Path" = None,
+    def __init__(self, cache_dir: "str | Path | None" = None,
                  base_url: str = BASE_URL):
         if cache_dir is None:
             cache_dir = Path(__file__).parent / "cache"
@@ -91,6 +130,9 @@ class WikiClient:
         self.base_url = base_url
         self._memory: Dict[str, Tuple[float, object]] = {}
         self.stale_keys = set()
+        self.interval_timestamps: Dict[str, int] = {}
+        self._lock = RLock()
+        self._retry_at = {}
 
     # -- transport -----------------------------------------------------------
 
@@ -112,7 +154,10 @@ class WikiClient:
                     break
                 retry_after = exc.headers.get("Retry-After") if exc.headers else None
                 try:
-                    delay = min(5.0, float(retry_after))
+                    delay = float(retry_after)
+                    if not math.isfinite(delay) or delay < 0:
+                        raise ValueError("invalid Retry-After")
+                    delay = min(5.0, delay)
                 except (TypeError, ValueError):
                     delay = 0.35 * (2 ** attempt) + random.random() * 0.10
                 if attempt < 2:
@@ -126,26 +171,38 @@ class WikiClient:
                 url, last_error)) from last_error
         try:
             return json.loads(body)
-        except json.JSONDecodeError as exc:
+        except (ValueError, UnicodeError) as exc:
             raise ApiError("GET {} returned invalid JSON".format(url)) from exc
 
     def _cached(self, key: str, ttl: float, fetch: Callable[[], object]) -> object:
+        # The Streamlit resource is shared between sessions. Coalesce fetches
+        # and enforce the poll floor even when several sessions refresh at once.
+        with self._lock:
+            return self._cached_locked(key, ttl, fetch)
+
+    def _cached_locked(self, key: str, ttl: float, fetch: Callable[[], object]) -> object:
         now = time.monotonic()
         hit = self._memory.get(key)
         if hit is not None and now - hit[0] < ttl:
             return hit[1]
+        if now < self._retry_at.get(key, 0):
+            if hit is not None and now - hit[0] <= ttl + STALE_GRACE:
+                return hit[1]
+            raise ApiError("{}: retry deferred after API failure".format(key))
         try:
             value = fetch()
         except ApiError:
             # A briefly stale complete snapshot is safer than a half-rendered
             # terminal.  Callers can surface stale_keys while the next refresh
             # retries; a cold start still fails loudly.
-            if hit is not None:
+            self._retry_at[key] = time.monotonic() + LATEST_TTL
+            if hit is not None and now - hit[0] <= ttl + STALE_GRACE:
                 self.stale_keys.add(key)
                 return hit[1]
             raise
         self.stale_keys.discard(key)
-        self._memory[key] = (now, value)
+        self._retry_at.pop(key, None)
+        self._memory[key] = (time.monotonic(), value)
         return value
 
     # -- endpoints -----------------------------------------------------------
@@ -167,11 +224,13 @@ class WikiClient:
                 item_id = int(raw_id)
             except (TypeError, ValueError):
                 continue
+            if item_id <= 0:
+                continue
             quotes[item_id] = Quote(
-                high=_opt_int(row.get("high")),
-                high_time=_opt_int(row.get("highTime")),
-                low=_opt_int(row.get("low")),
-                low_time=_opt_int(row.get("lowTime")),
+                high=_positive_int(row.get("high")),
+                high_time=_timestamp(row.get("highTime")),
+                low=_positive_int(row.get("low")),
+                low_time=_timestamp(row.get("lowTime")),
             )
         return quotes
 
@@ -196,12 +255,21 @@ class WikiClient:
                 item_id = int(raw_id)
             except (TypeError, ValueError):
                 continue
+            if item_id <= 0:
+                continue
+            high = _positive_int(row.get("avgHighPrice"))
+            low = _positive_int(row.get("avgLowPrice"))
             activity[item_id] = Activity(
-                avg_high=_opt_int(row.get("avgHighPrice")),
-                high_volume=_opt_int(row.get("highPriceVolume")) or 0,
-                avg_low=_opt_int(row.get("avgLowPrice")),
-                low_volume=_opt_int(row.get("lowPriceVolume")) or 0,
+                avg_high=high,
+                high_volume=(_opt_int(row.get("highPriceVolume")) or 0) if high else 0,
+                avg_low=low,
+                low_volume=(_opt_int(row.get("lowPriceVolume")) or 0) if low else 0,
             )
+        timestamp = _positive_int(payload.get("timestamp"))
+        if timestamp is not None and timestamp <= time.time() + 60:
+            self.interval_timestamps[timestep] = timestamp
+        else:
+            self.interval_timestamps.pop(timestep, None)
         return activity
 
     def mapping(self) -> Dict[int, Item]:
@@ -211,19 +279,20 @@ class WikiClient:
     def _load_mapping(self) -> Dict[int, Item]:
         path = self.cache_dir / "mapping.json"
         raw = None
-        if path.exists() and time.time() - path.stat().st_mtime < MAPPING_MAX_AGE:
-            try:
+        try:
+            if 0 <= time.time() - path.stat().st_mtime < MAPPING_MAX_AGE:
                 raw = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError):
-                raw = None
+                if not isinstance(raw, list):
+                    raw = None
+        except (OSError, ValueError):
+            raw = None
         if raw is None:
             raw = self._get("/mapping")
+            if not isinstance(raw, list):
+                raise ApiError("/mapping: expected a list")
             try:
-                self.cache_dir.mkdir(parents=True, exist_ok=True)
-                temporary = path.with_suffix(".tmp")
-                temporary.write_text(json.dumps(raw))
-                temporary.replace(path)
-            except OSError:
+                write_json(path, raw)
+            except (OSError, ValueError):
                 pass
         if not isinstance(raw, list):
             raise ApiError("/mapping: expected a list")
@@ -231,15 +300,15 @@ class WikiClient:
         for row in raw:
             if not isinstance(row, dict):
                 continue
-            item_id = _opt_int(row.get("id"))
+            item_id = _positive_int(row.get("id"))
             name = row.get("name")
             if item_id is None or not isinstance(name, str):
                 continue
             items[item_id] = Item(
                 id=item_id,
                 name=name,
-                members=bool(row.get("members", True)),
-                limit=_opt_int(row.get("limit")),
+                members=row.get("members") is not False,
+                limit=_positive_int(row.get("limit")),
                 value=_opt_int(row.get("value")) or 0,
                 highalch=_opt_int(row.get("highalch")),
             )
@@ -274,19 +343,15 @@ class WikiClient:
         try:
             with path.open(encoding="utf-8") as handle:
                 stored = json.load(handle)
-            if time.time() - stored["at"] < ttl:
-                return [row for row in stored["data"] if isinstance(row, dict)]
-        except (OSError, ValueError, KeyError, TypeError):
+            if 0 <= time.time() - stored["at"] < ttl:
+                return clean_history(stored["data"])
+        except (OSError, ValueError, KeyError, TypeError, ApiError):
             pass
 
         data = self._fetch_timeseries(item_id, timestep)
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_suffix(".tmp")
-            with temporary.open("w", encoding="utf-8") as handle:
-                json.dump({"at": time.time(), "data": data}, handle)
-            temporary.replace(path)
-        except OSError:
+            write_json(path, {"at": time.time(), "data": data})
+        except (OSError, ValueError):
             pass                      # read-only disk: the fetch still worked
         return data
 
@@ -305,4 +370,4 @@ class WikiClient:
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list):
             raise ApiError("/timeseries: response has no 'data' list")
-        return [row for row in data if isinstance(row, dict)]
+        return clean_history(data)

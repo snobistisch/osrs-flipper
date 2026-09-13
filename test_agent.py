@@ -130,11 +130,13 @@ class TrendChangeTests(unittest.TestCase):
 
 
 class StateFileTests(unittest.TestCase):
-    def test_a_corrupt_state_file_is_not_fatal(self):
+    def test_corrupt_state_is_preserved_and_reported(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "watch_state.json"
             path.write_text("{ this is not json")
-            self.assertEqual(agent._read_json(path, {}), {})
+            with self.assertRaises(ValueError):
+                agent._read_json(path, {})
+            self.assertEqual(path.read_text(), "{ this is not json")
 
     def test_writes_are_atomic(self):
         with TemporaryDirectory() as directory:

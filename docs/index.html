@@ -567,6 +567,9 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
   #main { padding:.55rem; }
   #keys { display: none; }   /* no keyboard to hint at */
 }
+@media (prefers-reduced-motion: reduce) {
+  #tape-track, .dot { animation: none; }
+}
 </style>
 </head>
 <body>
@@ -849,13 +852,13 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     <div id="tape"><div id="tape-track"></div></div>
 
     <div id="tabs" role="tablist">
-      <button class="tab on" data-tab="flip" role="tab"><span class="fkey">F1</span>FLIP</button>
-      <button class="tab" data-tab="merch" role="tab"><span class="fkey">F2</span>MERCH</button>
-      <button class="tab" data-tab="crash" role="tab"><span class="fkey">F3</span>CRASH</button>
+      <button class="tab on" data-tab="flip" role="tab" aria-selected="true"><span class="fkey">F1</span>FLIP</button>
+      <button class="tab" data-tab="merch" role="tab" aria-selected="false"><span class="fkey">F2</span>MERCH</button>
+      <button class="tab" data-tab="crash" role="tab" aria-selected="false"><span class="fkey">F3</span>CRASH</button>
     </div>
     <p class="small dim" id="tab-blurb"></p>
 
-    <div id="status" class="small dim"></div>
+    <div id="status" class="small dim" role="status" aria-live="polite"></div>
     <div id="storage-warning" class="small err hidden" role="alert"></div>
 
     <div id="mode-summary"><strong>ACTIVE FLIPPING</strong><span>Members · 8 slots · automatic risk and liquidity filters</span></div>
@@ -890,7 +893,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
         <thead><tr>
           <th data-sort="name">Item</th>
           <th data-sort="buy">Buy</th>
-          <th data-sort="listAt" title="Where to place the sell offer. The GE tax rounds down, so every price inside a 50 gp band nets the seller the same — the lowest one buys queue priority for free.">Sell at</th>
+          <th data-sort="listAt" title="Where to place the sell offer. At a tax step, a one-gp cut can preserve net proceeds: 1,000 and 999 both net 980. Other cuts cost profit.">Sell at</th>
           <th data-sort="roi">ROI</th>
           <th id="time-heading" data-sort="totalSeconds">Round trip</th>
           <th data-sort="confidence">Confidence</th>
@@ -1151,7 +1154,7 @@ const legHorizonHours = (horizonHours = CAL.horizon_hours) =>
 /* ---- tax ---- */
 
 const geTax = (sell, exempt) =>
-  exempt ? 0 : Math.min(TAX_CAP, Math.floor(sell * TAX_RATE));
+  exempt ? 0 : Math.min(TAX_CAP, Math.floor(sell / Math.round(1 / TAX_RATE)));
 
 const netRevenue = (sell, exempt) => sell - geTax(sell, exempt);
 
@@ -1160,11 +1163,8 @@ const netMargin = (buy, sell, exempt) => netRevenue(sell, exempt) - buy;
 const roi = (buy, sell, exempt) =>
   buy <= 0 ? 0 : netMargin(buy, sell, exempt) / buy;
 
-/* Because the tax rounds down, net revenue is a staircase with 50 gp treads:
-   selling at 100 nets 98, and so does 99. Every price inside a band is
-   identical to the seller, so undercutting inside it buys queue priority for
-   free. Listing at exactly 1,000 when 999 nets the same is giving away
-   position for nothing. */
+/* Only at a tax step do adjacent prices net the same: 100 and 99 net 98.
+   Further cuts lose proceeds, and no free tick exists above the tax cap. */
 function taxBoundaryUndercut(sell, exempt) {
   if (exempt || sell <= 0) return sell;
   const target = netRevenue(sell, exempt);
@@ -1935,7 +1935,7 @@ function parseGp(text) {
   const pattern = multiplier > 1 ? /^\d+(\.\d+)?$/ : /^\d+$/;
   if (!pattern.test(s)) throw new Error("not a gp amount");
   const amount = Math.round(parseFloat(s) * multiplier);
-  if (!(amount > 0)) throw new Error("amount must be positive");
+  if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error("amount must be a positive safe integer");
   return amount;
 }
 
@@ -2658,24 +2658,30 @@ function writeMarketCache(key, value) {
   }
 }
 
-function showStorageWarning() {
+const invalidStorageKeys = new Set();
+
+function showStorageWarning(message) {
   const warning = document.querySelector("#storage-warning");
   if (!warning) return;
-  warning.textContent = "Save & Monitor could not use browser storage. Allow site data for this GitHub Pages site, then try again.";
+  warning.textContent = message || "Save & Monitor could not use browser storage. Allow site data for this GitHub Pages site, then try again.";
   warning.classList.remove("hidden");
 }
 
 function writeDurableStorage(key, value) {
+  if (invalidStorageKeys.has(key)) {
+    showStorageWarning("Some saved data is damaged. The original data has been preserved; restore it from a backup before editing this list.");
+    return false;
+  }
   try {
     localStorage.setItem(key, value);
-    document.querySelector("#storage-warning")?.classList.add("hidden");
+    if (!invalidStorageKeys.size) document.querySelector("#storage-warning")?.classList.add("hidden");
     return true;
   } catch {
     // Market data is replaceable; saved flips, locks and holdings are not.
     clearLocalMarketCaches();
     try {
       localStorage.setItem(key, value);
-      document.querySelector("#storage-warning")?.classList.add("hidden");
+      if (!invalidStorageKeys.size) document.querySelector("#storage-warning")?.classList.add("hidden");
       return true;
     } catch {
       showStorageWarning();
@@ -2685,6 +2691,49 @@ function writeDurableStorage(key, value) {
 }
 
 const memo = new Map();
+const pending = new Map();
+const retryAt = new Map();
+const isRecord = (value) => value != null && typeof value === "object" && !Array.isArray(value);
+const positiveInteger = (value) => Number.isSafeInteger(value) && value > 0 ? value : null;
+const validTimestamp = (value) => positiveInteger(value) && value <= Date.now() / 1000 + 60 ? value : null;
+
+function loadStoredArray(key, valid) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) || "[]");
+    if (!Array.isArray(raw)) throw new Error("invalid list");
+    const rows = raw.filter(valid);
+    if (rows.length !== raw.length) {
+      invalidStorageKeys.add(key);
+      showStorageWarning("Some saved records are damaged and cannot be displayed. The original records have been preserved.");
+    }
+    return rows;
+  } catch {
+    invalidStorageKeys.add(key);
+    showStorageWarning();
+    return [];
+  }
+}
+
+function cleanActivity(row) {
+  const result = {};
+  for (const side of ["High", "Low"]) {
+    const price = positiveInteger(row[`avg${side}Price`]);
+    result[`avg${side}Price`] = price;
+    result[`${side.toLowerCase()}PriceVolume`] = price == null ? 0
+      : positiveInteger(row[`${side.toLowerCase()}PriceVolume`]) || 0;
+  }
+  return result;
+}
+
+function cleanHistory(data) {
+  if (!Array.isArray(data)) throw new Error("/timeseries: response has no data list");
+  const rows = new Map();
+  for (const row of data) {
+    if (!isRecord(row) || !validTimestamp(row.timestamp)) continue;
+    rows.set(row.timestamp, { ...row, ...cleanActivity(row) });
+  }
+  return [...rows.values()].sort((a, b) => a.timestamp - b.timestamp);
+}
 
 async function getJson(path) {
   let lastError;
@@ -2697,7 +2746,11 @@ async function getJson(path) {
       });
       if (!res.ok) {
         const retryable = res.status === 429 || res.status >= 500;
-        if (!retryable) throw new Error(`${path} returned HTTP ${res.status}`);
+        if (!retryable) {
+          const error = new Error(`${path} returned HTTP ${res.status}`);
+          error.permanent = true;
+          throw error;
+        }
         throw new Error(`${path} temporarily returned HTTP ${res.status}`);
       }
       const value = await res.json();
@@ -2706,6 +2759,7 @@ async function getJson(path) {
     } catch (error) {
       lastError = error;
       clearTimeout(timeout);
+      if (error.permanent) throw error;
       if (attempt < 2) await new Promise((resolve) =>
         setTimeout(resolve, 350 * 2 ** attempt + Math.random() * 100));
     }
@@ -2716,33 +2770,54 @@ async function getJson(path) {
 async function cached(key, ttl, fetcher) {
   const hit = memo.get(key);
   if (hit && Date.now() - hit.at < ttl) return hit.value;
-  try {
-    const value = await fetcher();
-    memo.set(key, { at: Date.now(), value });
-    return value;
-  } catch (error) {
-    if (hit) {
-      state.feedStale = true;
-      return hit.value;
-    }
-    throw error;
+  if (pending.has(key)) return pending.get(key);
+  if (Date.now() < (retryAt.get(key) || 0)) {
+    if (hit && Date.now() - hit.at <= ttl + 300_000) return hit.value;
+    throw new Error(`${key}: retry deferred after API failure`);
   }
+  const request = (async () => {
+    try {
+      const value = await fetcher();
+      retryAt.delete(key);
+      memo.set(key, { at: Date.now(), value, stale: false });
+      return value;
+    } catch (error) {
+      retryAt.set(key, Date.now() + LATEST_TTL);
+      if (hit && Date.now() - hit.at <= ttl + 300_000) {
+        hit.stale = true;
+        state.feedStale = true;
+        return hit.value;
+      }
+      throw error;
+    }
+  })();
+  pending.set(key, request);
+  try { return await request; }
+  finally { pending.delete(key); }
 }
 
 const fetchLatest = () => cached("latest", LATEST_TTL, async () => {
   const payload = await getJson("/latest");
-  if (!payload || typeof payload.data !== "object") {
+  if (!payload || !isRecord(payload.data)) {
     throw new Error("/latest: response has no data object");
   }
-  return payload.data;
+  const quotes = {};
+  for (const [id, row] of Object.entries(payload.data)) {
+    if (!positiveInteger(Number(id)) || !isRecord(row)) continue;
+    quotes[id] = { high: positiveInteger(row.high), low: positiveInteger(row.low),
+      highTime: validTimestamp(row.highTime), lowTime: validTimestamp(row.lowTime) };
+  }
+  return quotes;
 });
 
 const fetchInterval = (step) => cached(step, INTERVAL_TTL[step], async () => {
   const payload = await getJson("/" + step);
-  if (!payload || typeof payload.data !== "object") {
+  if (!payload || !isRecord(payload.data)) {
     throw new Error(`/${step}: response has no data object`);
   }
-  return payload.data;
+  return Object.fromEntries(Object.entries(payload.data)
+    .filter(([id, row]) => positiveInteger(Number(id)) && isRecord(row))
+    .map(([id, row]) => [id, cleanActivity(row)]));
 });
 
 /* Only the fields the ranking needs are kept, so the cache fits comfortably
@@ -2759,7 +2834,9 @@ async function fetchMapping() {
     const raw = localStorage.getItem(MAPPING_KEY);
     if (raw) {
       const stored = JSON.parse(raw);
-      if (Date.now() - stored.at < MAPPING_TTL) return stored.items;
+      if (0 <= Date.now() - stored.at && Date.now() - stored.at < MAPPING_TTL
+          && isRecord(stored.items) && Object.values(stored.items).every((row) =>
+            isRecord(row) && typeof row.name === "string" && typeof row.members === "boolean")) return stored.items;
     }
   } catch { /* corrupt or unavailable cache: refetch below */ }
 
@@ -2767,12 +2844,12 @@ async function fetchMapping() {
   if (!Array.isArray(list)) throw new Error("/mapping: expected a list");
   const items = {};
   for (const row of list) {
-    if (!row || typeof row.id !== "number" || typeof row.name !== "string") continue;
+    if (!row || !positiveInteger(row.id) || typeof row.name !== "string") continue;
     items[row.id] = {
       name: row.name,
-      members: Boolean(row.members),
-      limit: typeof row.limit === "number" ? row.limit : null,
-      highalch: typeof row.highalch === "number" ? row.highalch : null,
+      members: row.members !== false,
+      limit: positiveInteger(row.limit),
+      highalch: positiveInteger(row.highalch),
       icon: typeof row.icon === "string" ? row.icon : null,
       exempt: EXEMPT_IDS.has(row.id) || EXEMPT_NAMES.has(row.name.trim().toLowerCase()),
     };
@@ -2793,16 +2870,16 @@ const fetchTimeseries = (id, step) =>
       const raw = localStorage.getItem(storageKey);
       if (raw) {
         const stored = JSON.parse(raw);
-        if (Date.now() - stored.at < TIMESERIES_TTL) return stored.data;
+        if (0 <= Date.now() - stored.at && Date.now() - stored.at < TIMESERIES_TTL) return cleanHistory(stored.data);
       }
     } catch { /* corrupt cache: refetch below */ }
     const payload = await getJson(`/timeseries?id=${id}&timestep=${step}`);
     if (!payload || !Array.isArray(payload.data)) {
       throw new Error("/timeseries: response has no data list");
     }
-    writeMarketCache(storageKey,
-      JSON.stringify({ at: Date.now(), data: payload.data }));
-    return payload.data;
+    const data = cleanHistory(payload.data);
+    writeMarketCache(storageKey, JSON.stringify({ at: Date.now(), data }));
+    return data;
   });
 
 /* ---- year-long history, for the merch and crash tabs ----
@@ -2852,15 +2929,16 @@ function idbRequest(request) {
 
 async function readTrendCache(id) {
   const memo = trendMemory.get(id);
-  if (memo && Date.now() - memo.at < TREND_TTL) return memo.data;
+  if (memo && 0 <= Date.now() - memo.at && Date.now() - memo.at < TREND_TTL) return memo.data;
   const db = await openTrendDb();
   if (!db) return null;
   try {
     const store = db.transaction(TREND_STORE, "readonly").objectStore(TREND_STORE);
     const row = await idbRequest(store.get(id));
-    if (row && Date.now() - row.at < TREND_TTL) {
-      trendMemory.set(id, { at: row.at, data: row.data });
-      return row.data;
+    if (row && 0 <= Date.now() - row.at && Date.now() - row.at < TREND_TTL) {
+      const data = cleanHistory(row.data);
+      trendMemory.set(id, { at: row.at, data });
+      return data;
     }
   } catch { /* a broken transaction is a cache miss, not an error */ }
   return null;
@@ -2903,8 +2981,9 @@ async function fetchTrendSeries(id) {
   if (!payload || !Array.isArray(payload.data)) {
     throw new Error("/timeseries: response has no data list");
   }
-  await writeTrendCache(id, payload.data);
-  return payload.data;
+  const data = cleanHistory(payload.data);
+  await writeTrendCache(id, data);
+  return data;
 }
 
 /* Load the whole watchlist at the same concurrency the deep check uses. One
@@ -3468,19 +3547,21 @@ function lockProfileKey(config) {
 function loadSlotLockStore() {
   try {
     const value = JSON.parse(localStorage.getItem(LOCK_KEY) || "{}");
-    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  } catch { return {}; }
+    if (!isRecord(value) || !Object.values(value).every(Array.isArray)) throw new Error("invalid reservations");
+    return value;
+  } catch { invalidStorageKeys.add(LOCK_KEY); showStorageWarning(); return {}; }
 }
 
 function validSlotLock(value, slots) {
   if (!value || !Number.isInteger(value.slot) || value.slot < 0 || value.slot >= slots) return null;
   const numeric = ["id", "qty", "buy", "sell", "commit", "expected", "lockedAt"];
   if (numeric.some((key) => !Number.isFinite(Number(value[key])))) return null;
-  if (value.id <= 0 || value.qty <= 0 || value.buy <= 0 || value.sell <= 0) return null;
+  if (["id", "qty", "buy", "sell"].some((key) => !positiveInteger(Number(value[key])))
+      || !Number.isSafeInteger(Number(value.qty) * Number(value.buy))) return null;
   return {
     slot: value.slot, id: Number(value.id), name: String(value.name || `Item ${value.id}`),
     qty: Math.floor(Number(value.qty)), buy: Math.floor(Number(value.buy)),
-    sell: Math.floor(Number(value.sell)), commit: Math.max(0, Math.floor(Number(value.commit))),
+    sell: Math.floor(Number(value.sell)), commit: Number(value.qty) * Number(value.buy),
     expected: Number(value.expected), lockedAt: Number(value.lockedAt),
     pFill: Number.isFinite(Number(value.pFill)) ? Number(value.pFill) : 0,
     totalSeconds: Number.isFinite(Number(value.totalSeconds)) ? Number(value.totalSeconds) : 0,
@@ -3498,12 +3579,35 @@ function validSlotLock(value, slots) {
 }
 
 function locksFor(config) {
-  const raw = loadSlotLockStore()[lockProfileKey(config)];
-  if (!Array.isArray(raw)) return [];
+  // Switching strategy does not release an in-game offer or its committed bank.
+  const raw = Object.values(loadSlotLockStore()).filter(Array.isArray).flat();
+  // Older saves (or a failed second storage write) can have a monitored offer
+  // without a slot lock. They still consume bank and an offer slot.
+  for (const execution of loadExecutions()) {
+    if (["sold", "cancelled"].includes(execution.status)) continue;
+    const existing = raw.find((lock) => lock?.id === execution.itemId);
+    if (existing) {
+      existing.qty = execution.qty; existing.buy = execution.buy; existing.sell = execution.sell;
+      continue;
+    }
+    const item = state.items?.[execution.itemId];
+    raw.push({ slot: 0, id: execution.itemId, name: execution.name,
+      qty: execution.qty, buy: execution.buy, sell: execution.sell,
+      commit: execution.qty * execution.buy, expected: 0,
+      lockedAt: execution.createdAt || Date.now(),
+      limit: execution.limit ?? item?.limit, limitGroup: execution.limitGroup ?? connectedLimitGroup(execution.name),
+      category: itemCategory(execution.name), mode: execution.mode });
+  }
   const slots = new Set(), items = new Set(), locks = [];
   for (const value of raw) {
-    const lock = validSlotLock(value, config.slots);
-    if (!lock || slots.has(lock.slot) || items.has(lock.id)) continue;
+    const lock = validSlotLock(value, Math.max(MEMBER_SLOTS, raw.length));
+    if (!lock) { invalidStorageKeys.add(LOCK_KEY); showStorageWarning(); continue; }
+    if (items.has(lock.id)) continue;
+    if (slots.has(lock.slot)) {
+      let slot = 0;
+      while (slots.has(slot)) slot++;
+      lock.slot = slot;
+    }
     slots.add(lock.slot); items.add(lock.id); locks.push(lock);
   }
   return locks.sort((a, b) => a.slot - b.slot);
@@ -3512,6 +3616,8 @@ function locksFor(config) {
 function saveProfileLocks(config, locks) {
   const store = loadSlotLockStore();
   const key = lockProfileKey(config);
+  // Consolidate legacy per-profile reservations without losing active offers.
+  for (const profile of Object.keys(store)) if (Array.isArray(store[profile])) delete store[profile];
   if (locks.length) store[key] = locks;
   else delete store[key];
   return writeDurableStorage(LOCK_KEY, JSON.stringify(store));
@@ -3550,12 +3656,19 @@ function saveLockForRow(slot, row) {
 }
 
 function monitorableRow(row) {
-  const maxQty = Math.max(1, Math.floor(state.config.maxPositionCapital / row.buy));
+  const locks = locksFor(state.config).filter((lock) => lock.id !== row.id);
+  const remaining = Math.max(0, state.config.capital - locks.reduce((sum, lock) => sum + lock.commit, 0));
+  let maxQty = Math.floor(Math.min(remaining, state.config.maxPositionCapital) / row.buy);
+  if (row.limitGroup && row.limit != null) {
+    const used = locks.filter((lock) => lock.limitGroup === row.limitGroup)
+      .reduce((sum, lock) => sum + lock.qty, 0);
+    maxQty = Math.min(maxQty, Math.max(0, effectiveBuyLimit(row.limit, row.horizonHours, row.mode) - used));
+  }
   const copy = {
     ...row,
     warnings: [...(row.warnings || [])], tags: [...(row.tags || [])],
     factors: { ...(row.factors || {}) },
-    allocatedQty: Math.max(1, Math.min(row.qty, maxQty)),
+    allocatedQty: Math.max(0, Math.min(row.qty, maxQty)),
   };
   copy.allocated = copy.allocatedQty * copy.buy;
   rescoreAllocated(copy);
@@ -3564,11 +3677,18 @@ function monitorableRow(row) {
 
 function saveOption(itemId) {
   if (!state.config) return;
+  if (state.loadFailed || state.feedStale) { alert("Refresh prices successfully before saving a new offer."); return; }
   const row = state.rows.find((value) => value.id === itemId);
   if (!row) return;
-  const saved = monitorableRow(row);
-  if (!trackOffer(saved)) return;
   const locks = locksFor(state.config);
+  if (invalidStorageKeys.has(LOCK_KEY) || invalidStorageKeys.has(EXEC_KEY)) {
+    showStorageWarning("Saved reservations need recovery before more bank can be committed."); return;
+  }
+  if (locks.some((lock) => lock.id === itemId)) return;
+  if (locks.length >= state.config.slots) { alert("All GE slots are reserved. Finish or remove an offer first."); return; }
+  const saved = monitorableRow(row);
+  if (saved.allocatedQty <= 0) { alert("No bank or buy limit remains for this offer."); return; }
+  if (!trackOffer(saved)) return;
   if (!locks.some((lock) => lock.id === itemId)) {
     const used = new Set(locks.map((lock) => lock.slot));
     const slot = Array.from({ length: state.config.slots }, (_, index) => index)
@@ -3580,14 +3700,25 @@ function saveOption(itemId) {
 
 function unlockSlot(slot) {
   if (!state.config) return;
-  saveProfileLocks(state.config, locksFor(state.config)
-    .filter((lock) => lock.slot !== slot));
+  const locks = locksFor(state.config);
+  const lock = locks.find((value) => value.slot === slot);
+  if (!lock) return;
+  const executions = loadExecutions();
+  for (const execution of executions) if (execution.itemId === lock.id
+      && !["sold", "cancelled"].includes(execution.status)) {
+    execution.status = "cancelled";
+    execution.updatedAt = Date.now();
+  }
+  if (!saveExecutions(executions)) return;
+  saveProfileLocks(state.config, locks.filter((value) => value.slot !== slot));
   replanFromCurrentData();
 }
 
 function loadExecutions() {
-  try { return JSON.parse(localStorage.getItem(EXEC_KEY) || "[]"); }
-  catch { return []; }
+  return loadStoredArray(EXEC_KEY, (x) => isRecord(x) && typeof x.key === "string"
+      && typeof x.name === "string" && positiveInteger(x.itemId)
+      && [x.qty, x.buy, x.sell].every(positiveInteger)
+      && Number.isSafeInteger(x.qty * x.buy));
 }
 function saveExecutions(list) {
   const saved = writeDurableStorage(EXEC_KEY, JSON.stringify(list));
@@ -3607,11 +3738,11 @@ function editExecution(key) {
   const list = loadExecutions(), x = list.find((r) => r.key === key);
   if (!x) return;
   const qty = Number(prompt("Quantity to monitor", String(x.qty)));
-  if (!Number.isFinite(qty) || qty <= 0) return;
+  if (!positiveInteger(qty)) return;
   const buy = Number(prompt("Your actual buy price per item", String(x.buy)));
-  if (!Number.isFinite(buy) || buy <= 0) return;
+  if (!positiveInteger(buy)) return;
   const sell = Number(prompt("Your target sell price per item", String(x.sell)));
-  if (!Number.isFinite(sell) || sell <= 0) return;
+  if (!positiveInteger(sell) || !Number.isSafeInteger(qty * buy)) return;
   x.qty = Math.floor(qty); x.buy = Math.floor(buy); x.sell = Math.floor(sell);
   x.updatedAt = Date.now();
   if (state.config) {
@@ -3635,8 +3766,8 @@ function finishExecution(key, remove = false) {
   const itemId = list[index].itemId;
   if (remove) list.splice(index, 1);
   else { list[index].status = "sold"; list[index].updatedAt = Date.now(); }
+  if (!saveExecutions(list)) return;
   releaseLockForItem(itemId);
-  saveExecutions(list);
   replanFromCurrentData();
 }
 function renderExecutions() {
@@ -3646,7 +3777,10 @@ function renderExecutions() {
   $("#execution-figure").textContent = `${list.length} SAVED`;
   $("#execution-body").innerHTML = list.slice(0, 24).map((x) => {
     const quote = state.quotes?.[x.itemId];
-    const liveBuy = quote?.low ?? null, liveSell = quote?.high ?? null;
+    const fresh = !state.loadFailed && !state.feedStale && quote
+      && validTimestamp(quote.highTime) && validTimestamp(quote.lowTime)
+      && Date.now() / 1000 - Math.min(quote.highTime, quote.lowTime) <= 300;
+    const liveBuy = fresh ? quote.low : null, liveSell = fresh ? quote.high : null;
     const targetLive = liveSell != null && liveSell >= x.sell;
     const status = liveSell == null ? "No fresh live price"
       : targetLive ? "Target price is live now"
@@ -3789,6 +3923,7 @@ async function loadAndRender() {
     const [items, quotes, act5m, act1h] = await Promise.all([
       fetchMapping(), fetchLatest(), fetchInterval("5m"), fetchInterval("1h"),
     ]);
+    if (gen !== state.gen) return;
     // The nature rune is the cost side of the high-alchemy floor, so it is
     // read live rather than hardcoded.
     const rune = quotes[NATURE_RUNE_ID];
@@ -3836,6 +3971,7 @@ async function loadAndRender() {
     if (gen !== state.gen) return;
     state.loadFailed = true;
     tickClock();
+    renderExecutions();
     status.className = "small err";
     status.textContent = "Could not load prices: " + err.message +
       ". The wiki API may be busy — try Refresh in a moment.";
@@ -3844,6 +3980,7 @@ async function loadAndRender() {
 
 /* Apply the display filters, allocate capital across the slots, render. */
 function show(allRows, config, statusText) {
+  state.feedStale = [...memo.values()].some((entry) => entry.stale);
   const { kept: eligible, hidden } = applyPreferences(allRows, config);
   // Allocation changes quantity-dependent scores. Work on disposable copies so
   // a later history result or price refresh always starts from pristine rows.
@@ -3862,7 +3999,8 @@ function show(allRows, config, statusText) {
   kept.forEach((row) => {
     row.allocated = 0; row.allocatedQty = 0; row.allocatedExpected = 0;
   });
-  const candidates = kept.filter((row) => !lockedIds.has(row.id) &&
+  const candidates = kept.filter((row) => !invalidStorageKeys.has(LOCK_KEY)
+    && !invalidStorageKeys.has(EXEC_KEY) && !lockedIds.has(row.id) &&
     isAutomaticPlanCandidate(row));
   candidates.sort((a, b) => quickPlanRiskTier(a) - quickPlanRiskTier(b) ||
     b.rankingValue - a.rankingValue);
@@ -4053,7 +4191,7 @@ function renderPlan(config) {
           <div class="plan-actions">${savedIds.has(lock.id)
             ? `<button class="save-flip-btn" disabled>SAVED &amp; MONITORED ✓</button>`
             : `<button class="save-flip-btn" data-track-lock="${entry.slot}">SAVE &amp; MONITOR</button>`}
-            <button class="unlock-btn" data-unlock="${entry.slot}">Release slot</button></div>
+            <button class="unlock-btn" data-unlock="${entry.slot}">Release &amp; stop monitoring</button></div>
         </div>`;
     }
     const r = entry.row;
@@ -4273,7 +4411,10 @@ function merchSortValue(view, key) {
 function selectTab(tab) {
   state.tab = tab;
   document.querySelectorAll("#tabs .tab")
-    .forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
+    .forEach((b) => {
+      b.classList.toggle("on", b.dataset.tab === tab);
+      b.setAttribute("aria-selected", String(b.dataset.tab === tab));
+    });
   $("#tab-blurb").textContent = (tab === "flip" && state.config?.strategy === "overnight")
     ? `Buy offers rest for ${state.config.horizonHours}h; liquidation begins only after you return.`
     : TAB_BLURB[tab];
@@ -4421,10 +4562,8 @@ function renderMerchTable() {
 const HOLDINGS_KEY = "osrs-flipper.holdings.v1";
 
 function loadHoldings() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(HOLDINGS_KEY) || "[]");
-    return Array.isArray(raw) ? raw : [];
-  } catch { return []; }
+  return loadStoredArray(HOLDINGS_KEY, (h) => isRecord(h)
+    && typeof h.name === "string" && [h.id, h.qty, h.buy, h.at].every(positiveInteger));
 }
 
 function saveHoldings(list) {
@@ -4440,10 +4579,10 @@ function addHolding(id) {
   if (price == null) return;
   let parsedQty, parsedPrice;
   try {
-    parsedQty = Math.max(1, Math.round(Number(qty.replace(/[,\s]/g, ""))));
+    parsedQty = Number(qty.replace(/[,\s]/g, ""));
     parsedPrice = parseGp(price);
   } catch { return; }
-  if (!Number.isFinite(parsedQty) || !Number.isFinite(parsedPrice)) return;
+  if (!positiveInteger(parsedQty) || !positiveInteger(parsedPrice)) return;
   const list = loadHoldings();
   list.push({ id, name: view.name, qty: parsedQty, buy: parsedPrice,
               at: Date.now() });
@@ -4461,33 +4600,33 @@ function renderPortfolio() {
     return;
   }
   const quotes = state.quotes || {};
-  let total = 0;
+  let total = 0, missing = 0;
   body.innerHTML = list.map((h, index) => {
     const quote = quotes[h.id];
     // Value at what a sale nets: what buyers are bidding, minus GE tax.
-    const current = quote && quote.low ? quote.low : h.buy;
+    const current = quote && quote.low ? quote.low : null;
     const exempt = state.exemptIds ? state.exemptIds.has(h.id) : false;
-    const net = netRevenue(current, exempt);
-    const pnl = (net - h.buy) * h.qty;
-    total += pnl;
+    const net = current == null ? null : netRevenue(current, exempt);
+    const pnl = net == null ? null : (net - h.buy) * h.qty;
+    if (pnl == null) missing++; else total += pnl;
     const days = (Date.now() - h.at) / 86400000;
     return `<tr>
       <td>${escapeHtml(h.name)}</td>
       <td>${num(h.qty)}</td>
       <td>${num(h.buy)}</td>
-      <td>${num(net)}</td>
-      <td class="${pnl >= 0 ? "pos" : "bad"}">${pnl >= 0 ? "+" : "−"}${formatGp(Math.abs(Math.round(pnl)))}</td>
+      <td>${net == null ? "No quote" : num(net)}</td>
+      <td class="${pnl == null ? "dim" : pnl >= 0 ? "pos" : "bad"}">${pnl == null ? "—" : `${pnl >= 0 ? "+" : "−"}${formatGp(Math.abs(Math.round(pnl)))}`}</td>
       <td>${days < 1 ? "today" : Math.round(days) + "d"}</td>
       <td><button class="hold-btn" data-drop="${index}">sold</button></td>
     </tr>`;
-  }).join("") + `<tr><td colspan="4"><strong>Total</strong></td>
+  }).join("") + `<tr><td colspan="4"><strong>${missing ? "Partial total (missing quotes excluded)" : "Total"}</strong></td>
       <td class="${total >= 0 ? "pos" : "bad"}"><strong>${total >= 0 ? "+" : "−"}${
         formatGp(Math.abs(Math.round(total)))}</strong></td><td colspan="2"></td></tr>`;
   const sign = total >= 0 ? "+" : "−";
   $("#holdings-figure").innerHTML =
     `${list.length} POSITION${list.length === 1 ? "" : "S"} · ` +
     `<b class="${total >= 0 ? "tick-up" : "tick-down"}">${sign}${
-      formatGp(Math.abs(Math.round(total)))}</b> UNREALISED`;
+      formatGp(Math.abs(Math.round(total)))}</b> UNREALISED${missing ? " · PARTIAL" : ""}`;
 }
 
 function showDetail(id) {
@@ -4564,14 +4703,18 @@ function showDetail(id) {
   loadChart();
 }
 
+let chartGeneration = 0;
 async function loadChart() {
+  const generation = ++chartGeneration;
+  const selected = state.selected, timestep = state.timestep;
   const chart = $("#chart");
   // The tooltip belongs to the chart that is being replaced; leaving it up
   // pins a reading from a timeframe that is no longer on screen.
   $("#tip").style.opacity = 0;
   chart.innerHTML = `<p class="small dim">Loading price history…</p>`;
   try {
-    const data = await fetchTimeseries(state.selected, state.timestep);
+    const data = await fetchTimeseries(selected, timestep);
+    if (generation !== chartGeneration || state.selected !== selected || state.timestep !== timestep) return;
     const points = data.filter((d) => d && d.timestamp != null);
     if (!points.length) {
       chart.innerHTML = `<p class="small dim">The wiki has no ${state.timestep}
@@ -4586,6 +4729,7 @@ async function loadChart() {
     wireChartHover(points, refLine ? refLine.value : null,
                    row ? [row.buy, row.listAt] : []);
   } catch (err) {
+    if (generation !== chartGeneration || state.selected !== selected || state.timestep !== timestep) return;
     chart.innerHTML = `<p class="small err">Could not load history: ${
       escapeHtml(err.message)}</p>`;
   }
@@ -5022,7 +5166,11 @@ $("#reset-preferences").addEventListener("click", () => {
   loadAndRender();
 });
 
-document.querySelectorAll("#flips thead th").forEach((th) => {
+document.querySelectorAll("#flips thead th[data-sort]").forEach((th) => {
+  th.tabIndex = 0;
+  th.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); th.click(); }
+  });
   th.addEventListener("click", () => {
     const key = th.dataset.sort;
     if (state.sortKey === key) state.sortDesc = !state.sortDesc;
@@ -5042,6 +5190,7 @@ $("#flips tbody").addEventListener("click", (event) => {
   if (tr) showDetail(Number(tr.dataset.id));
 });
 $("#flips tbody").addEventListener("keydown", (event) => {
+  if (event.target.closest("button")) return; // preserve native Save button activation
   const tr = event.target.closest("tr[data-id]");
   if (tr && (event.key === "Enter" || event.key === " ")) {
     event.preventDefault(); showDetail(Number(tr.dataset.id));
@@ -5092,6 +5241,16 @@ $("#execution-body").addEventListener("click", (event) => {
 $("#tabs").addEventListener("click", (event) => {
   const btn = event.target.closest("button[data-tab]");
   if (btn) selectTab(btn.dataset.tab);
+});
+$("#tabs").addEventListener("keydown", (event) => {
+  const tabs = Array.from(document.querySelectorAll("#tabs .tab"));
+  const index = tabs.indexOf(event.target);
+  if (index < 0 || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+    : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[next].focus();
+  selectTab(tabs[next].dataset.tab);
 });
 
 $("#merch thead").addEventListener("click", (event) => {

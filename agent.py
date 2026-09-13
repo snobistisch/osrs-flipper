@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -42,6 +43,7 @@ import engine
 import exemptions
 import filters
 import merch
+from storage import state_lock, write_json
 
 # State lives outside the repo so a git pull cannot wipe your positions, and
 # defaults to a plain dotfile directory rather than anything Hermes-specific —
@@ -80,18 +82,17 @@ HYSTERESIS = 0.5
 def _read_json(path: Path, fallback):
     try:
         with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
+            value = json.load(handle)
+        if not isinstance(value, type(fallback)):
+            raise ValueError("{}: invalid state format; original file preserved".format(path))
+        return value
+    except FileNotFoundError:
         return fallback
 
 
 def _write_json(path: Path, payload) -> None:
     """Atomic write: a killed cron job must not leave half a state file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-    temporary.replace(path)
+    write_json(path, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +159,7 @@ def signals_from_view(item_id: int, name: str,
 
 
 def new_signals(found: Sequence[Signal],
-                state: dict) -> Tuple[List[Signal], dict]:
+                state: dict, observed_ids=None) -> Tuple[List[Signal], dict]:
     """Filter to what has not already been reported, and update the state.
 
     Tiering rather than a cooldown: time-based re-alerts would fire on the same
@@ -182,6 +183,8 @@ def new_signals(found: Sequence[Signal],
     # Anything that fell back below the hysteresis band is cleared, so the same
     # item may alert again if it comes back later.
     for key in list(tiers):
+        if observed_ids is not None and int(key.split(":", 1)[0]) not in observed_ids:
+            continue  # an unavailable item has not recovered
         signal = by_key.get(key)
         scale = ALERT_SCALE.get(key.split(":", 1)[1])
         if not scale:
@@ -203,7 +206,7 @@ def trend_changes(views: Dict[int, merch.DailyView], names: Dict[int, str],
     a trend flips once, and that single event is the whole message.
     """
     previous = dict(state.get("directions", {}))
-    fired, current = [], {}
+    fired, current = [], dict(previous)
 
     for item_id, view in views.items():
         if view.trend is None:
@@ -448,6 +451,8 @@ def cmd_merch(opts) -> int:
     client = api.WikiClient()
     try:
         views, names, problems = load_watchlist(client, merch.WATCHLIST_IDS)
+        if not views:
+            raise api.ApiError("no watchlist history available")
     except api.ApiError as exc:
         print("API error: {}".format(exc), file=sys.stderr)
         return 1
@@ -505,6 +510,8 @@ def cmd_watch(opts) -> int:
 
     try:
         views, names, problems = load_watchlist(client, merch.WATCHLIST_IDS)
+        if not views:
+            raise api.ApiError("no watchlist history available")
         failures = 0
     except api.ApiError as exc:
         failures = state.get("consecutive_failures", 0) + 1
@@ -519,7 +526,7 @@ def cmd_watch(opts) -> int:
     for item_id, view in views.items():
         found.extend(signals_from_view(item_id, names.get(item_id, ""), view))
 
-    fired, state = new_signals(found, state)
+    fired, state = new_signals(found, state, observed_ids=set(views))
     changed, state = trend_changes(views, names, state)
     fired.extend(changed)
 
@@ -553,6 +560,9 @@ def cmd_watch(opts) -> int:
 
 
 def cmd_portfolio(opts) -> int:
+    if opts.action == "add" and (not isinstance(opts.qty, int) or opts.qty <= 0):
+        print("Quantity must be a positive integer.", file=sys.stderr)
+        return 1
     path = opts.state_dir / PORTFOLIO_FILE
     positions = _read_json(path, [])
     client = api.WikiClient()
@@ -581,9 +591,13 @@ def cmd_portfolio(opts) -> int:
         if not 1 <= opts.index <= len(positions):
             print("No position {}".format(opts.index), file=sys.stderr)
             return 1
+        try:
+            exempt = exemptions.resolve(client.mapping())
+        except api.ApiError as exc:
+            print("API error: {}".format(exc), file=sys.stderr)
+            return 1
         closed = positions.pop(opts.index - 1)
         _write_json(path, positions)
-        exempt = exemptions.resolve(client.mapping())
         net = engine.net_revenue(opts.price, closed["item_id"] in exempt)
         profit = (net - closed["buy_price"]) * closed["qty"]
         held = (time.time() - closed["opened_at"]) / 86400
@@ -612,21 +626,22 @@ def cmd_portfolio(opts) -> int:
         # Value the position at what a sale would actually net: the price a
         # buyer is bidding, minus GE tax. Marking to the instant-buy price and
         # ignoring tax is how a losing position reads as a winning one.
-        current = quote.low if quote and quote.low else position["buy_price"]
-        net = engine.net_revenue(current, position["item_id"] in exempt)
-        pnl = (net - position["buy_price"]) * position["qty"]
-        total += pnl
+        current = quote.low if quote and quote.low else None
+        net = engine.net_revenue(current, position["item_id"] in exempt) if current else None
+        pnl = (net - position["buy_price"]) * position["qty"] if net is not None else None
+        total += pnl or 0
         enriched.append({
             "index": index, "item_id": position["item_id"],
             "name": position["name"], "qty": position["qty"],
             "buy_price": position["buy_price"], "current_price": current,
-            "net_of_tax": net, "pnl": int(pnl),
-            "pnl_pct": round((net / position["buy_price"] - 1) * 100, 1),
+            "net_of_tax": net, "pnl": int(pnl) if pnl is not None else None,
+            "pnl_pct": round((net / position["buy_price"] - 1) * 100, 1) if net is not None else None,
             "held_days": round((time.time() - position["opened_at"]) / 86400, 1),
         })
 
     if opts.json:
-        print(json.dumps({"positions": enriched, "total_pnl": int(total)},
+        print(json.dumps({"positions": enriched, "total_pnl": int(total),
+                          "total_pnl_partial": any(r["pnl"] is None for r in enriched)},
                          indent=2))
         return 0
 
@@ -635,9 +650,12 @@ def cmd_portfolio(opts) -> int:
     for row in enriched:
         print("{:>2} {:<24.24} {:>8,} {:>10} {:>10} {:>12} {:>7.0f}".format(
             row["index"], row["name"], row["qty"],
-            engine.format_gp(row["buy_price"]), engine.format_gp(row["net_of_tax"]),
-            engine.format_gp(row["pnl"]), row["held_days"]))
+            engine.format_gp(row["buy_price"]),
+            engine.format_gp(row["net_of_tax"]) if row["net_of_tax"] is not None else "unknown",
+            engine.format_gp(row["pnl"]) if row["pnl"] is not None else "unknown", row["held_days"]))
     print("\nTotal: {} gp".format(engine.format_gp(int(total))))
+    if any(r["pnl"] is None for r in enriched):
+        print("Partial total: positions without a quote are excluded.")
     return 0
 
 
@@ -795,7 +813,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     opts = parser.parse_args(argv if argv is not None else sys.argv[1:])
-    return opts.func(opts)
+    try:
+        if opts.func is cmd_watch or (opts.func is cmd_portfolio and opts.action != "list"):
+            with state_lock(opts.state_dir):
+                return opts.func(opts)
+        return opts.func(opts)
+    except (ValueError, OSError, sqlite3.Error, api.ApiError) as exc:
+        print("OSRS Flipper: {}".format(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -1,0 +1,146 @@
+# Repositoryaudit — 13 september 2026
+
+Uitgevoerd op `main`, met een schone werkboom als uitgangspunt. Geen bestaande
+gebruikersposities of archiefbestanden zijn verwijderd. Wijzigingen zijn lokaal;
+de hosted versie is niet gepubliceerd. Dit is een code- en runtime-audit, geen
+bewijs dat het statistische model winstgevend is.
+
+## Product en architectuur
+
+| Onderdeel | Stroom en verantwoordelijkheid |
+|---|---|
+| Marktdata | `api.py`: Wiki `/mapping`, `/latest`, `/5m`, `/1h`, beperkte `/timeseries`-shortlists; geheugen- en schijfcaches |
+| Handelsbeslissing | `filters.py` → `engine.py` / `stats.py`: conservatieve prijzen, tax, hoeveelheid, gedeeltelijke fills, risico, shrinkage, geschiedenis, portfolioallocatie |
+| Lange horizon | `merch.py`: trends, crashes en relatieve volumeveranderingen; aparte score-eenheid |
+| Pythoninterfaces | `cli.py`, `agent.py`, `app.py`; expliciete dashboarddependencies: Streamlit, Altair en pandas |
+| Historie en uitkomsten | `collect.py` → `archive.py` (SQLite); `journal.py` (SQLite); agentposities/watchstatus in JSON buiten de repo |
+| Browser | `docs/index.html`: zelfstandige JavaScriptimplementatie; directe Wiki-requests; localStorage voor offers/instellingen, IndexedDB voor lange historie |
+
+De kernstromen zijn budget/account/strategie → rangschikking → gefinancierde
+slots; opslaan/bewerken/afronden van offers; detailgrafieken; merch/holdings;
+CLI/watch en archiefverzameling. Nergens worden in-game orders geplaatst.
+
+## Gevonden en opgelost, op impact
+
+1. **Blokkerende dashboardcrash.** De sidebar stond binnen `st.fragment`.
+   Een daadwerkelijke Streamlit-run reproduceerde de fout na budgetinvoer.
+   Controls staan nu buiten het fragment; de marktweergave ververst nog steeds.
+   De gedeelde SQLite-verbinding is bovendien vervangen door gecachte gewone
+   data, zodat sessies geen verbinding van een andere thread gebruiken.
+2. **Dubbele inzet van bank/slots.** Browserlocks waren aan een strategieprofiel
+   gekoppeld. Omschakelen kon bestaande verplichtingen verbergen. Alle actieve
+   reserveringen blijven nu meetellen. Oude gemonitorde offers zonder lock
+   worden ook meegenomen. Handmatige selectie respecteert vrije bank, vrije
+   slots en verbonden potionlimieten. Reeds te grote posities blijven behouden
+   en blokkeren extra financiering. Release stopt nu ook de monitoring.
+3. **Verlies of overschrijven van gebruikersgegevens.** Portfolio sluiten
+   verwijderde de positie voordat de benodigde API-aanroep was geslaagd.
+   Die volgorde is hersteld. JSON-writes gebruiken unieke tijdelijke bestanden
+   en atomaire vervanging; een lokale SQLite-lock serialiseert agentmutaties.
+   Onleesbare agentstate wordt niet meer stil vervangen. Beschadigde browserdata
+   blijft bewaard en blokkeert wijzigingen aan de betrokken lijst. Journal-
+   transities hebben nu een voorwaardelijke database-update tegen concurrerende
+   close/cancel-acties.
+4. **Onjuiste handelsgetallen.** `break_even_sell(1_000_000_000)` gaf ongeveer
+   1.0204 miljard in plaats van de minimale 1.005.000.001 gp. Een binaire zoekactie
+   behandelt nu ook de tax-cap correct. Tax gebruikt gehele prijsstappen. De
+   uitleg over gratis undercutting is gecorrigeerd: slechts één tick aan de
+   belastinggrens is gratis. Ongeldige, fractionele en niet-eindige invoer wordt
+   afgewezen. Ontbrekende portfolioquotes worden onbekende waarden, geen
+   fictieve aankoopprijs met een kunstmatig taxverlies.
+5. **Onbetrouwbare API-/cachegrenzen.** NaN, Infinity, negatieve prijzen/volumes,
+   foute JSON-vormen en ongeldige/toekomstige tijdstempels worden gesaneerd of
+   afgewezen. Historie wordt gesorteerd en ontdubbeld. Corrupte vervangbare
+   caches leiden tot een nieuwe fetch. Fallbackdata verloopt maximaal vijf
+   minuten na de normale geheugencache-TTL. Gelijktijdige requests worden
+   samengevoegd; permanente browser-HTTP-fouten worden niet herhaald.
+6. **Vertekend archief en watchgedrag.** De collector gebruikte de polltijd als
+   buckettijd en kon oude fallbackdata opnieuw archiveren. Hij gebruikt nu de
+   API-tijdstempel, weigert stale snapshots en geeft bij een mislukte eenmalige
+   poll exitcode 1. Expliciete nulvolumes tellen mee in het gemiddelde.
+   Ongeldige retentie-invoer wordt afgewezen. Ontbrekende watchlist-items
+   worden niet meer als hersteld beschouwd; volledig ontbrekende historie
+   telt als mislukte run.
+7. **Browserraces en bediening.** Een achterhaalde refresh kan nieuwe state niet
+   meer overschrijven; late grafiekantwoorden kunnen een ander item/tijdvak
+   niet vervangen. Verouderde quotes verliezen hun live-status in monitoring.
+   Toegevoegd: geselecteerde ARIA-tabs, statusaankondigingen, toetsenbordbediening
+   voor sortering/tabs en minder animatie bij reduced-motion. Enter op een
+   Save-knop wordt niet meer onderschept door de tabelrij.
+8. **Ontbrekende regressiebewaking.** Toegevoegd: uitvoerbare JavaScripttests,
+   Streamlit-smoketest, regressietests voor data/rekensommen/persistentie,
+   expliciete Ruff-configuratie en CI op Python 3.9/3.13 met Node 22.
+
+De gecontroleerde taxbasis is 2%, naar beneden afgerond, maximaal 5 miljoen gp
+per item; de bestaande tarief- en vrijstellingsconfiguratie is niet gewijzigd.
+Bron: [OSRS Wiki — Grand Exchange](https://oldschool.runescape.wiki/w/Grand_Exchange).
+De volledige vrijstellingslijst is tijdens deze audit niet opnieuw extern
+gecertificeerd; de Python/JavaScript-lijsten worden wel op gelijkheid getest.
+
+## Verificatie
+
+- Volledige Python-suite inclusief dashboard: **364 tests geslaagd**.
+- Node: **9 gedragstests geslaagd**, plus compilatie van het volledige inline script.
+- `ruff check .`: geslaagd, met expliciete correctness-regels E4/E7/E9/F.
+- Python-compilatie en `pip check`: geslaagd.
+- Browser: live marktweergave op desktop en 390 × 844; geen waargenomen
+  JavaScript-consolefouten of horizontale pagina-overloop. ARIA-selectiestatus
+  gecontroleerd. De desktop- en mobiele screenshots zijn visueel bekeken.
+- Diff gecontroleerd op whitespacefouten, onbedoelde wijzigingen en zichtbare
+  secrets. Alleen vaste CSS gebruikt `unsafe_allow_html` in Streamlit.
+- Geen afzonderlijke build nodig voor de statische browserapp. Er is geen
+  geconfigureerde statische typechecker; typeconsistentie is niet integraal
+  bewezen. De nieuwe CI-configuratie is lokaal beoordeeld, niet op GitHub gedraaid.
+
+## Bewuste grenzen en resterende risico's
+
+- **Modelkalibratie:** fills, queuepositie, adverse selection en updatevensters
+  blijven priors. Werkelijke eigen fills zijn nodig voor kalibratie. De audit
+  verandert geen strategieparameters op basis van intuïtie.
+- **Twee implementaties:** gedeelde constanten en kritieke functies zijn
+  beschermd, maar niet elke formule heeft uitvoerbare numerieke pariteitstests.
+  Browserselectie heeft aanvullende automatische gates. De README benoemt nu
+  dat gedeelde rekenlogica niet overal dezelfde geselecteerde portefeuille betekent.
+- **Browseropslag:** origin-gebonden, zonder cloudbackup of volledig atomische
+  transacties over meerdere sleutels/tabs. De herstelde reserveringslogica
+  voorkomt bekende ongedekte offers bij een gedeeltelijke write. Gelijktijdig
+  bewerken in meerdere tabbladen kan nog conflicteren; een transactionele
+  opslagmigratie vereist expliciet ontwerp en migratietests.
+- **Eerdere archiefdata:** fout gelabelde oude buckets/niet opgeslagen nulvolumes
+  zijn niet betrouwbaar achteraf te reconstrueren. Bestaande data is behouden.
+  Langdurige databasegroei en queryprestaties zijn niet met maanden productiedata
+  belastingsgetest.
+- **Operationeel:** afhankelijk van Wiki-beschikbaarheid, handmatige tax-exempt-
+  metadata en lokale backups. Geen volledige screenreader-/browsermatrixtest,
+  langdurige soaktest of onafhankelijke securitycertificering.
+- **Compatibiliteit:** bestaande opslagkeys en databaseschema's blijven bruikbaar.
+  Striktere invoer kan voorheen geaccepteerde ongeldige waarden weigeren.
+  Portfolio-JSON heeft bewust `null` voor ontbrekende marktwaarden en een extra
+  `total_pnl_partial`-veld; consumers moeten onbekende waarden ondersteunen.
+
+## Aangepaste bestanden
+
+| Bestand | Reden |
+|---|---|
+| `app.py` | Fragment/sidebarcrash, veilige archiefcache, stale-waarschuwing |
+| `docs/index.html` | Validatie, reserveringen, opslagbescherming, races, P&L en toegankelijkheid |
+| `engine.py` | Minimale winstgevende verkoopprijs, gehele tax, exacte GP-invoer en juiste uitleg |
+| `filters.py` | Integraal kapitaal en geldige quoteprijzen/tijden |
+| `api.py` | Datavalidatie, begrensde fallback, coalescing, cachewrites en buckettijd |
+| `storage.py` | Gedeelde atomaire JSON-writer en proceslock |
+| `agent.py` | Veilige state/portfolioacties, watchuitval, onbekende waardering |
+| `journal.py` | Integer-/tijdvalidatie en concurrerende statuswijzigingen |
+| `archive.py` | Nulvolumes, buckettijdcontract en retentievalidatie |
+| `collect.py` | Brontijdstempels, stale-weigering, exitcode en invoervalidatie |
+| `test_audit.py` | Regressies voor berekeningen, API, archief en databehoud |
+| `test_app.py` | Werkelijke Streamlit landing- en dashboardsmoketest |
+| `tests/browser.test.cjs` | Uitvoerbare browserlogica en syntaxcontrole |
+| `test_api.py` | Fallbacktest aangepast aan expliciet korte stale-grace |
+| `test_agent.py` | Corrupte state moet behouden blijven en een fout geven |
+| `requirements.txt` | Geteste Streamlit-ondergrens en expliciete, begrensde Altair-/pandas-dependencies |
+| `requirements-dev.txt` | Reproduceerbare linttool en dashboardtestdependencies |
+| `ruff.toml` | Lokale, beperkte correctness-lintregels |
+| `.github/workflows/checks.yml` | Geautomatiseerde Python-/Node-/lintcontroles |
+| `README.md` | Correcte taxuitleg, controlecommando's en gewijzigde datacontracten |
+| `skills/osrs-flipper/SKILL.md` | Agentcontract voor onbekende portfolio-P&L |
+| `AUDIT.md` | Bevindingen, onderbouwing, verificatie en resterende risico's |

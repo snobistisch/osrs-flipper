@@ -75,7 +75,8 @@ class FilterConfig:
                            engine.TradeMode(self.trade_mode))
         if not 1.0 <= float(self.overnight_hours) <= 24.0:
             raise ValueError("overnight horizon must be between 1 and 24 hours")
-        if not 0 < int(self.capital) <= engine.MAX_CASH_STACK:
+        if (isinstance(self.capital, bool) or not isinstance(self.capital, int)
+                or not 0 < self.capital <= engine.MAX_CASH_STACK):
             raise ValueError("capital must fit in the OSRS cash stack")
 
     @property
@@ -406,7 +407,9 @@ def _evaluate(
         return "members-only"
     if (quote.high is None or quote.low is None
             or quote.high_time is None or quote.low_time is None
-            or quote.low <= 0):
+            or quote.low <= 0 or quote.high <= 0
+            or quote.high_time <= 0 or quote.low_time <= 0
+            or max(quote.high_time, quote.low_time) > now + 60):
         return "null price side"
 
     age = max(0, int(now - min(quote.high_time, quote.low_time)))

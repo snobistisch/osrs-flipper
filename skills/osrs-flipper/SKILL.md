@@ -63,6 +63,11 @@ market-adjusted figure says anything about one item's supply.
 **`warnings` are not decoration.** If a row carries warnings, they go in the
 answer next to the number.
 
+**Portfolio values can be unknown.** A missing quote produces `null` for
+`current_price`, `net_of_tax`, `pnl` and `pnl_pct`. If `total_pnl_partial` is
+true, the total excludes these positions. Never treat an unknown value as zero
+or replace it with the purchase price.
+
 ## Reporting
 
 Lead with the answer. One or two lines when nothing much happened; never a

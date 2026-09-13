@@ -7,6 +7,7 @@ Grand Exchange look on top of them.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import altair as alt
 import pandas as pd
@@ -70,7 +71,7 @@ def wiki_client() -> api.WikiClient:
     return api.WikiClient()
 
 
-@st.cache_resource
+@st.cache_data(ttl=60)
 def tick_archive():
     """The tick archive, if collect.py has been building one.
 
@@ -79,26 +80,28 @@ def tick_archive():
     time of day. With it, throughput is averaged over days.
     """
     try:
-        store = archive.Archive()
-        if store.summary()["buckets"] == 0:
-            store.close()
-            return None
-        return store
+        # Cache plain data, never a SQLite connection owned by another
+        # Streamlit session's thread. Close the connection after each refresh.
+        with archive.Archive() as store:
+            if store.summary()["buckets"] == 0:
+                return None
+            ids = store.conn.execute(
+                "SELECT DISTINCT item_id FROM bucket_activity WHERE timestep = '1h'")
+            estimates = {}
+            for (item_id,) in ids.fetchall():
+                estimate = store.volume_ewma(item_id)
+                if estimate is not None and estimate.usable:
+                    estimates[item_id] = (estimate.high_per_hour, estimate.low_per_hour)
+            return estimates
     except Exception:
         return None
 
 
 def volume_lookup():
-    store = tick_archive()
-    if store is None:
+    estimates = tick_archive()
+    if estimates is None:
         return None
-
-    def lookup(item_id):
-        estimate = store.volume_ewma(item_id)
-        if estimate is None or not estimate.usable:
-            return None
-        return estimate.high_per_hour, estimate.low_per_hour
-    return lookup
+    return estimates.get
 
 
 @st.cache_data(ttl=120, show_spinner="Fetching price history…")
@@ -577,12 +580,21 @@ def detail_view(row):
                "single near-zero-volume bucket.")
 
 
-@st.fragment(run_every="60s")
 def main():
     st.markdown(RUNESCAPE_CSS, unsafe_allow_html=True)
     if "capital" not in st.session_state:
         landing()
         st.stop()
+
+    # Streamlit fragments cannot write into st.sidebar. Build controls in the
+    # full app run, then refresh only the market view with those settings.
+    config, top_n = sidebar_config(st.session_state.capital,
+                                   exemptions.NATURE_RUNE_FALLBACK)
+    render_market(config, top_n)
+
+
+@st.fragment(run_every="60s")
+def render_market(config, top_n):
 
     client = wiki_client()
     try:
@@ -596,7 +608,7 @@ def main():
 
     exempt = exemptions.resolve(items)
     nature_cost = exemptions.nature_rune_cost(quotes)
-    config, top_n = sidebar_config(st.session_state.capital, nature_cost)
+    config = replace(config, nature_rune_cost=nature_cost)
 
     def fetch_history(item_id):
         try:
@@ -620,6 +632,10 @@ def main():
     st.title("🪙 Grand Exchange Flipper")
     st.caption("Live snapshot refreshed automatically every 60 seconds · {}"
                .format(time.strftime("%H:%M:%S")))
+    if client.stale_keys:
+        st.warning("Cached data after an API failure: {}. Verify live prices "
+                   "before placing an offer.".format(
+                       ", ".join(sorted(client.stale_keys))))
     funnel = dict(result.funnel)
     funnel["deep-checked vs 14d history"] = result.deep_checked
     st.caption("  →  ".join("{:,} {}".format(v, k)

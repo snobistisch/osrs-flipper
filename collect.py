@@ -15,6 +15,7 @@ buckets.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 
@@ -28,7 +29,10 @@ def poll_once(client: api.WikiClient, store: archive.Archive,
     written = {"latest": 0, "5m": 0, "1h": 0, "errors": []}
     now = time.time()
     try:
-        written["latest"] = store.record_latest(client.latest(), int(now))
+        quotes = client.latest()
+        if "latest" in client.stale_keys:
+            raise api.ApiError("stale snapshot; not archived")
+        written["latest"] = store.record_latest(quotes, int(now))
     except api.ApiError as exc:
         written["errors"].append("latest: {}".format(exc))
 
@@ -36,8 +40,14 @@ def poll_once(client: api.WikiClient, store: archive.Archive,
         if now - last_interval.get(timestep, 0) < period:
             continue
         try:
+            activity = client.interval(timestep)
+            if timestep in client.stale_keys:
+                raise api.ApiError("stale snapshot; not archived")
+            timestamp = client.interval_timestamps.get(timestep)
+            if timestamp is None:
+                raise api.ApiError("missing bucket timestamp; not archived")
             written[timestep] = store.record_buckets(
-                timestep, client.interval(timestep))
+                timestep, activity, bucket_start=timestamp)
             last_interval[timestep] = now
         except api.ApiError as exc:
             written["errors"].append("{}: {}".format(timestep, exc))
@@ -59,6 +69,10 @@ def main(argv=None) -> int:
                         help="drop data older than this many days, then exit")
     parser.add_argument("--quiet", action="store_true")
     opts = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    if not math.isfinite(opts.interval) or opts.interval <= 0:
+        parser.error("--interval must be a finite positive number")
+    if opts.prune_days is not None and opts.prune_days <= 0:
+        parser.error("--prune-days must be positive")
 
     store = archive.Archive(opts.db)
     try:
@@ -92,7 +106,7 @@ def main(argv=None) -> int:
                 print("{}  {}".format(time.strftime("%H:%M:%S"),
                                       ", ".join(parts)), flush=True)
             if opts.once:
-                return 0
+                return 1 if written["errors"] else 0
             time.sleep(max(0.0, interval - (time.time() - started)))
     except KeyboardInterrupt:
         print("\nStopped.")

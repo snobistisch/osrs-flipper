@@ -143,8 +143,8 @@ class Archive:
                        bucket_start: Optional[int] = None) -> int:
         """Store one /5m or /1h snapshot.
 
-        bucket_start defaults to the current wall clock floored to the bucket
-        size, which is what the endpoint is reporting on.
+        Pass the endpoint's timestamp, which identifies the reported bucket.
+        The wall-clock default is retained only for legacy/manual callers.
         """
         size = {"5m": 300, "1h": 3600}.get(timestep)
         if size is None:
@@ -155,8 +155,8 @@ class Archive:
         for item_id, entry in activity.items():
             high_volume = getattr(entry, "high_volume", 0) or 0
             low_volume = getattr(entry, "low_volume", 0) or 0
-            if high_volume <= 0 and low_volume <= 0:
-                continue          # empty buckets are the overwhelming majority
+            # Explicit zero-volume buckets are observations too. Omitting them
+            # biases the smoothed volume toward hours in which a trade occurred.
             rows.append((int(item_id), timestep, int(bucket_start),
                          getattr(entry, "avg_high", None), high_volume,
                          getattr(entry, "avg_low", None), low_volume))
@@ -174,6 +174,8 @@ class Archive:
 
     def prune(self, keep_days: int = 120) -> int:
         """Drop data older than keep_days. Returns rows removed."""
+        if isinstance(keep_days, bool) or not isinstance(keep_days, int) or keep_days <= 0:
+            raise ValueError("keep_days must be a positive integer")
         cutoff = int(time.time()) - keep_days * 86400
         removed = self.conn.execute(
             "DELETE FROM ticks WHERE timestamp < ?", (cutoff,)).rowcount

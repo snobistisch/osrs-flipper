@@ -33,8 +33,10 @@ Conventions:
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
@@ -44,8 +46,8 @@ TAX_RATE = 0.02
 TAX_CAP = 5_000_000
 
 # The GE tax rounds down, so every 50 gp of sell price is one more gp of tax.
-# Between two multiples of 50 the seller's net revenue is flat, which makes
-# undercutting inside that band free. See tax_boundary_undercut.
+# At a tax step only, the preceding price nets the same revenue. Other
+# one-gp cuts lose one gp of revenue. See tax_boundary_undercut.
 TAX_STEP = int(round(1 / TAX_RATE))    # 50 gp per 1 gp of tax — DERIVED
 
 WINDOW_HOURS = 4                  # the buy-limit window
@@ -400,12 +402,11 @@ def parse_gp(text: str) -> int:
     if cleaned[-1] in _GP_SUFFIXES:
         multiplier = _GP_SUFFIXES[cleaned[-1]]
         cleaned = cleaned[:-1]
-    try:
-        # decimals ('1.5') only make sense together with a k/m/b suffix
-        value = float(cleaned) if multiplier > 1 else int(cleaned)
-    except ValueError:
+    pattern = r"\d+(\.\d+)?" if multiplier > 1 else r"\d+"
+    if not re.fullmatch(pattern, cleaned, flags=re.ASCII):
         raise ValueError("not a gp amount: {!r}".format(text)) from None
-    amount = int(round(value * multiplier))
+    amount = int((Decimal(cleaned) * multiplier).to_integral_value(
+        rounding=ROUND_HALF_UP))
     if amount <= 0:
         raise ValueError("amount must be positive")
     return amount
@@ -540,7 +541,7 @@ def ge_tax(sell_price: int, tax_exempt: bool = False) -> int:
     """Tax the seller pays on one item."""
     if tax_exempt:
         return 0
-    return min(TAX_CAP, math.floor(sell_price * TAX_RATE))
+    return min(TAX_CAP, sell_price // TAX_STEP)
 
 
 def net_revenue(sell_price: int, tax_exempt: bool = False) -> int:
@@ -563,11 +564,10 @@ def roi(buy_price: int, sell_price: int, tax_exempt: bool = False) -> float:
 def tax_boundary_undercut(sell_price: int, tax_exempt: bool = False) -> int:
     """Lowest sell price with the same net revenue as `sell_price`.
 
-    Because the tax rounds down, net revenue is a staircase: selling at 100
-    nets 98, and so does 99. Every gp between two multiples of 50 is priced
-    identically to the seller, so undercutting inside that band buys queue
-    priority for nothing. A flipper listing at exactly 1,000 when 999 nets the
-    same is giving away position for free.
+    At a tax step, two adjacent prices net the same: 100 and 99 both net
+    98. Other one-gp reductions lose one gp of proceeds. Thus 1,000 can be
+    undercut to 999 for free, but not to 998. Above the cap even this single
+    free tick disappears.
 
     Returns the price unchanged when it is already at the bottom of its band,
     when it is exempt, or when it is below the taxable threshold.
@@ -587,11 +587,15 @@ def break_even_sell(buy_price: int, tax_exempt: bool = False) -> int:
     """Cheapest sell price that clears a profit of at least 1 gp per item."""
     if tax_exempt:
         return buy_price + 1
-    # net(p) ~ 0.98p, so start just above the analytic solution and walk up.
-    candidate = max(buy_price + 1, int(buy_price / (1 - TAX_RATE)))
-    while net_margin(buy_price, candidate, tax_exempt) <= 0:
-        candidate += 1
-    return candidate
+    # Search the monotone net proceeds, including the capped-tax region.
+    low, high = buy_price + 1, buy_price + TAX_CAP + 1
+    while low < high:
+        middle = (low + high) // 2
+        if net_revenue(middle) > buy_price:
+            high = middle
+        else:
+            low = middle + 1
+    return low
 
 
 # ---------------------------------------------------------------------------

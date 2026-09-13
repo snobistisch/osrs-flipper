@@ -45,7 +45,7 @@ class StaleFallbackTests(unittest.TestCase):
     def test_expired_complete_snapshot_survives_a_brief_outage(self):
         client = api.WikiClient(cache_dir="/tmp/osrs-api-test")
         client._memory["latest"] = (0.0, {1: "complete"})
-        with mock.patch("api.time.monotonic", return_value=999.0):
+        with mock.patch("api.time.monotonic", return_value=60.0):
             value = client._cached(
                 "latest", 30, lambda: (_ for _ in ()).throw(api.ApiError("down")))
         self.assertEqual(value, {1: "complete"})

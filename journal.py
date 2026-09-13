@@ -144,8 +144,9 @@ class Journal:
         than just its headline margin. Everything else stays optional so the
         terminal interface remains a three-flag command.
         """
-        if quantity <= 0 or buy_price <= 0:
-            raise ValueError("quantity and buy_price must be positive")
+        if any(isinstance(v, bool) or not isinstance(v, int) or v <= 0
+               for v in (quantity, buy_price)):
+            raise ValueError("quantity and buy_price must be positive integers")
         now = int(time.time())
         bought_at = bought_at if bought_at is not None else now
 
@@ -200,18 +201,23 @@ class Journal:
 
     def close_flip(self, flip_id: int, sell_price: int,
                    sold_at: Optional[int] = None) -> None:
-        if sell_price <= 0:
-            raise ValueError("sell_price must be positive")
+        if isinstance(sell_price, bool) or not isinstance(sell_price, int) or sell_price <= 0:
+            raise ValueError("sell_price must be a positive integer")
         row = self._row(flip_id)
         if row["sell_price"] is not None:
             raise ValueError("flip {} is already closed".format(flip_id))
         if row["outcome"] == "cancelled":
             raise ValueError("flip {} was cancelled".format(flip_id))
-        self.conn.execute(
+        sold_at = sold_at if sold_at is not None else int(time.time())
+        if sold_at < row["bought_at"]:
+            raise ValueError("sale cannot precede the purchase")
+        cursor = self.conn.execute(
             "UPDATE flips SET sell_price = ?, sold_at = ?, outcome = 'filled'"
-            " WHERE id = ?",
-            (sell_price, sold_at if sold_at is not None else int(time.time()),
-             flip_id))
+            " WHERE id = ? AND outcome = 'open' AND sell_price IS NULL",
+            (sell_price, sold_at, flip_id))
+        if cursor.rowcount != 1:
+            self.conn.rollback()
+            raise ValueError("flip was changed by another writer; reload it")
         self.conn.commit()
 
     def cancel_flip(self, flip_id: int, reason: str = "",
@@ -224,12 +230,17 @@ class Journal:
         row = self._row(flip_id)
         if row["sell_price"] is not None:
             raise ValueError("flip {} already sold".format(flip_id))
-        self.conn.execute(
+        if row["outcome"] == "cancelled":
+            raise ValueError("flip {} was already cancelled".format(flip_id))
+        cursor = self.conn.execute(
             "UPDATE flips SET outcome = 'cancelled', cancelled_at = ?,"
             " cancel_reason = ?, cancel_count = COALESCE(cancel_count, 0) + 1"
-            " WHERE id = ?",
+            " WHERE id = ? AND outcome = 'open' AND sell_price IS NULL",
             (cancelled_at if cancelled_at is not None else int(time.time()),
              reason, flip_id))
+        if cursor.rowcount != 1:
+            self.conn.rollback()
+            raise ValueError("flip was changed by another writer; reload it")
         self.conn.commit()
 
     def _row(self, flip_id: int):

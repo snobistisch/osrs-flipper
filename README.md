@@ -6,7 +6,7 @@ executable slot plan: item, buy, quantity, sell, committed bank, expected
 profit, fill chance, ETA, risk and confidence.
 
 **[▶ Open the flipper](https://snobistisch.github.io/osrs-flipper/)** — runs in
-your browser, nothing to install. Same model as the Python tools; see
+your browser, nothing to install. Shared core model with the Python tools; see
 [Two implementations](#two-implementations) for how they are kept in step.
 
 ## The strategy
@@ -223,10 +223,10 @@ instead of ranking anyway.
   trading *below* it are flagged — alching is capped at roughly 1,200 casts an
   hour, so this caps downside rather than being scalable free money. The
   previous version loaded `highalch` from the API and never used it.
-- **The tax rounds down**, so net revenue is a staircase with 50 gp treads.
-  Every price inside a band nets the seller the same, which makes undercutting
-  inside it free. **List at** is the bottom of the band — listing at exactly
-  1,000 when 999 nets identically is giving away queue position for nothing.
+- **The tax rounds down.** At each 50 gp tax step, the preceding price nets
+  the seller the same: 1,000 and 999 both net 980 gp. **List at** takes that
+  single free tick when available. Cutting to 998 loses a gp; above the tax
+  cap there is no free tick.
 - **~57 items pay no tax at all** (`tax_exempt.json`). The previous version
   exempted one: the bond. Everything else — cooked food, low-level ammo, tools,
   teleport tablets — was charged 2% it does not owe, which is most of the
@@ -355,7 +355,9 @@ narrowing the view never reorders what is left.
 
 Nothing to install: the [hosted
 version](https://snobistisch.github.io/osrs-flipper/) is one self-contained
-HTML file and runs the same ranking. Enter a budget, choose Active or Overnight,
+HTML file with the shared scoring model and additional automatic selection
+gates. Python's display filters are permissive by default, so the selected
+portfolios can differ. Enter a budget, choose Active or Overnight,
 and the first thing it shows is the best defensible use of up to eight member
 slots. Preferences are stored locally and can be reset in one click.
 
@@ -571,10 +573,40 @@ data could say which factor was wrong.
 
 ```bash
 python3 -m unittest -v
+node --test tests/browser.test.cjs
 ```
 
 `engine.py` and `stats.py` deliberately import nothing outside the standard
 library, so the terminal tool and the whole test suite run without the venv.
+
+The Streamlit smoke test skips when the dashboard dependency is absent. For
+the complete checks, including the dashboard (Python 3.9+ and Node 22+):
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/ruff check .
+.venv/bin/python -m unittest -q
+node --test tests/browser.test.cjs
+```
+
+GitHub Actions runs these checks on Python 3.9 and 3.13. The browser is a
+static HTML file, so there is no npm install or build step. Node tests compile
+the complete inline script and execute the actual functions for API failures,
+tax boundaries, reservations, storage recovery and chart races. There is no
+configured static type checker; Ruff checks syntax and undefined names.
+
+Saved browser offers reserve bank across account/strategy changes, including
+legacy monitored offers without a slot lock. An overcommitted saved portfolio
+is preserved and blocks new funding. Corrupt durable data is never silently
+replaced with an empty list; affected edits are blocked for recovery. Agent
+state updates are serialized across processes using a local SQLite lock.
+
+Portfolio JSON uses `null` for unavailable current prices and P&L, and adds
+`total_pnl_partial: true` when unquoted positions are excluded from the total.
+Consumers must handle those unknown values rather than assuming a number.
+
+See [the repository audit](AUDIT.md) for findings, verification and remaining
+operational/model limitations.
 
 ### Two implementations
 
@@ -593,10 +625,10 @@ sets a `User-Agent` header: browsers forbid scripts from setting one, and the
 custom header trips a CORS preflight the wiki answers with 400, so "add a
 descriptive User-Agent like the Python client does" takes the whole page down.
 
-A syntax check (`node --check` on the embedded script) accompanies the parity
-tests. Formula changes still have to be made in both implementations, but the
-suite now locks the mode-specific functions and members-first state as well as
-the shared constants.
+The executable Node suite also syntax-checks the whole embedded script.
+Formula changes still have to be made in both implementations; the suites
+cover shared constants and critical behavior, not complete numerical parity
+of every statistical model.
 
 Checked against live data, the two agree to within a fraction of a percent on
 the pre-shrinkage score, the remaining gap being that they poll `/latest`
@@ -639,8 +671,10 @@ TTLs, which is what `collect.py` respects too.
 
 Both clients retry transient rate-limit/server/transport failures with bounded
 exponential backoff. The Python client and the current browser session may use
-a complete stale snapshot during a short outage and mark the feed stale; a cold
-start still fails clearly instead of rendering a partial market as current.
+a cached endpoint during a short outage and mark the feed stale, for at most
+five extra minutes after its memory TTL. A cold start fails clearly. Concurrent
+requests are coalesced. The collector never archives stale fallbacks, records
+the API's bucket timestamp and exits nonzero when a one-shot poll fails.
 
 v1 and v2 of the API return byte-identical payloads on every route used here,
 so the client stays on v1 with the base URL configurable.
