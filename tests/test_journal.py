@@ -1,4 +1,4 @@
-"""Unit tests for journal.py — run with: python3 -m unittest test_journal -v"""
+"""Unit tests for journal.py — run with: python3 -m unittest tests.test_journal -v"""
 import unittest
 from types import SimpleNamespace
 

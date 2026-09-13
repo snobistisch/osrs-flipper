@@ -1,4 +1,4 @@
-"""Unit tests for filters.py — run with: python3 -m unittest test_filters -v"""
+"""Unit tests for filters.py — run with: python3 -m unittest tests.test_filters -v"""
 import dataclasses
 from datetime import date
 import math

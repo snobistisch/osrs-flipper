@@ -1,4 +1,4 @@
-"""Unit tests for engine.py — run with: python3 -m unittest test_engine -v"""
+"""Unit tests for engine.py — run with: python3 -m unittest tests.test_engine -v"""
 import calendar
 import math
 import unittest

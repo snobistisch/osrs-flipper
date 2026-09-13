@@ -1,4 +1,4 @@
-"""Unit tests for stats.py — run with: python3 -m unittest test_stats -v"""
+"""Unit tests for stats.py — run with: python3 -m unittest tests.test_stats -v"""
 import math
 import random
 import unittest

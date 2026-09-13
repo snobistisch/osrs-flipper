@@ -5,13 +5,13 @@ it runs with no Python available. That duplication is deliberate but it is also
 exactly how the port went stale last time: the instruction was "change it in
 both", enforced by nothing.
 
-These tests do not check the JS arithmetic — a Python test cannot run it. They
-check the things that silently rot: the tax-exempt list and the calibration
+These static guards complement the executable tests in browser.test.cjs. They
+check shared definitions: the tax-exempt list and the calibration
 constants, which are the two places where a divergence produces plausible
 numbers that are simply wrong. If a formula changes, the port still has to be
 updated by hand.
 
-Run with: python3 -m unittest test_docs_port -v
+Run with: python3 -m unittest tests.test_docs_port -v
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ import engine
 import exemptions
 import merch
 
-DOCS = Path(__file__).parent / "docs" / "index.html"
+DOCS = Path(__file__).resolve().parents[1] / "docs" / "index.html"
 
 
 def js_block(source: str, opener: str, closer: str) -> str:

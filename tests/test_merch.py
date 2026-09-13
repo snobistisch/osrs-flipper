@@ -1,6 +1,6 @@
 """Tests for the long-horizon signals in merch.py.
 
-Run with: python3 -m unittest test_merch -v
+Run with: python3 -m unittest tests.test_merch -v
 
 The interesting tests here are not the arithmetic ones. They are:
 
@@ -535,7 +535,7 @@ class WatchlistTests(unittest.TestCase):
 
     def test_no_names_or_prices_are_hardcoded(self):
         """Names come from /mapping and prices from /latest. Both rot in a day."""
-        source = (Path(__file__).parent / "merch.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / "merch.py").read_text(encoding="utf-8")
         watchlist = source[source.index("WATCHLIST = ("):
                            source.index("WATCHLIST_IDS")]
         self.assertNotIn("gp", watchlist.replace("gp,", ""))

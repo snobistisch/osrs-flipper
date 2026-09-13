@@ -20,7 +20,7 @@ class DashboardTests(unittest.TestCase):
         client.timeseries.return_value = []
         with patch("api.WikiClient", return_value=client), patch("archive.Archive") as archive:
             archive.return_value.__enter__.return_value.summary.return_value = {"buckets": 0}
-            app = AppTest.from_file(str(Path(__file__).with_name("app.py"))).run(timeout=20)
+            app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run(timeout=20)
             self.assertEqual(list(app.exception), [])
             app.session_state["capital"] = 1_000_000
             app.run(timeout=20)

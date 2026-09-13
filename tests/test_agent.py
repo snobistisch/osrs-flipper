@@ -1,6 +1,6 @@
 """Tests for the agent layer, with no network access.
 
-Run with: python3 -m unittest test_agent -v
+Run with: python3 -m unittest tests.test_agent -v
 
 What matters here is the state machine. An agent that re-reports the same
 crash every fifteen minutes is worse than no agent, and that failure is
