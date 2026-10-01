@@ -216,3 +216,37 @@ test('an expired mapping serves an outage and exemptions are applied on read', a
   const items = await run('fetchMapping()');
   assert.equal(items[379].exempt, true);
 });
+
+test('saved Active offers get a reprice reminder, then a cancel deadline', () => {
+  const { run } = setup();
+  const offer = '({ mode: "active", createdAt: 0, qty: 100, bought: 0, sold: 0,' +
+    ' repriceCheckSeconds: 900, cancelBySeconds: 7200 })';
+  assert.equal(run(`executionTimingNote(${offer}, 600 * 1000)`), null);
+  assert.match(run(`executionTimingNote(${offer}, 1000 * 1000)`), /not one unit has bought/);
+  assert.equal(run(`executionTimingNote({ ...${offer}, bought: 5 }, 1000 * 1000)`), null);
+  assert.match(run(`executionTimingNote({ ...${offer}, bought: 5 }, 7300 * 1000)`),
+    /cancel what is left/);
+  assert.equal(run(`executionTimingNote({ ...${offer}, mode: "overnight" }, 9e9)`), null);
+  // Offers saved before the band existed still get the 45-minute rule.
+  assert.match(run('executionTimingNote({ mode: "active", createdAt: 0, qty: 1 }, 2800 * 1000)'),
+    /check at 45m/);
+});
+
+test('the ETA is shown as a band and Active funding meets the completion target', () => {
+  const { run } = setup();
+  const b = run(`scoreFlip({ buy: 1000, sell: 1080, margin: 58, qty: 200, depth: 0,
+    buyVolume1h: 2000, sellVolume1h: 2000, quoteAge: 60, ofi: 0, drift: 0,
+    now: 1785000000, buyShare: 0.125, sellShare: 0.125 })`);
+  assert.ok(b.roundTripP50Seconds < b.roundTripP80Seconds);
+  assert.ok(b.roundTripP80Seconds < b.roundTripP90Seconds);
+  assert.equal(b.totalSeconds, b.roundTripP50Seconds);
+  const band = run(`etaBand(${JSON.stringify(b)})`);
+  assert.match(band, /TYPICAL .* 80% BY .* 90% BY /);
+  const choice = run(`optimiseExecution({ baseBuy: 1000, baseSell: 1100, exempt: false,
+    bond: false, limit: 10000, config: { capital: 5000000, maxPositionCapital: 5000000,
+    strategy: "active", horizonHours: 4 }, buyVolume1h: 3000, sellVolume1h: 2500,
+    quoteAge: 60, ofi: 0, drift: 0, now: 1785000000, competitors: 9,
+    highalch: null, natureCost: 100 })`);
+  assert.ok(choice.breakdown.pFill >= run('CAL.active_target_completion') - 1e-9);
+  assert.ok(choice.meanCapacityQty > choice.qty);
+});

@@ -40,6 +40,15 @@ That statement applies to `strategy: active`. For `strategy: overnight`, read
 report `p_fill`, `p_stranded` and `downside_risk_gp` with an overnight pick;
 fast recycling after completion is not available while the player is offline.
 
+**Never quote one ETA for an active pick.** Report the band
+`round_trip_p50_seconds` (typical) to `round_trip_p90_seconds` (one trip in
+ten takes longer), plus `p_fill`: the chance the whole quantity is bought and
+sold within `horizon_hours`. All three come from one distribution. Tell the
+player to re-check the live margin and reprice or cancel if nothing has bought
+after `reprice_check_seconds`, and to cancel what is left at
+`cancel_by_seconds`. `round_trip_seconds` equals the median and is kept only
+for older consumers.
+
 **`gp_per_slot_hour_before_shrinkage` is the raw estimate.** When the two are
 far apart, the raw number was mostly the thinness of the data. Say so rather
 than quoting the bigger one.

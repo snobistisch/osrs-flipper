@@ -165,25 +165,35 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
         return
 
     metric = "EV/SLOT/H" if config.trade_mode is engine.TradeMode.ACTIVE else "HORIZON EV"
-    header = ("{:<24} {:>8} {:>8} {:>7} {:>6} {:>7} {:>8} {:>10} {:>7} {:>11}")
-    timing = "ROUND TRIP" if config.trade_mode is engine.TradeMode.ACTIVE else "RETURN+SELL"
+    header = ("{:<24} {:>8} {:>8} {:>7} {:>6} {:>7} {:>8} {:>13} {:>7} {:>11}")
+    timing = "TRIP P50-P90" if config.trade_mode is engine.TradeMode.ACTIVE else "RETURN+SELL"
     probability = "P(TRIP)" if config.trade_mode is engine.TradeMode.ACTIVE else "P(BUY)"
     print(header.format("ITEM", "BUY", "SELL", "MARGIN", "ROI", "QTY",
                         "COMMIT", timing, probability, metric))
     for row in result.rows[:opts.top]:
         value = (row.gp_per_slot_hour if config.trade_mode is
                  engine.TradeMode.ACTIVE else row.ranking_value)
-        timing_value = (engine.format_duration(row.expected_total_seconds)
+        timing_value = ("{}-{}".format(
+                            engine.format_duration(row.round_trip_p50_seconds
+                                                   or row.expected_total_seconds),
+                            engine.format_duration(row.round_trip_p90_seconds))
                         if config.trade_mode is engine.TradeMode.ACTIVE else
                         "{:.0f}h+{:.0f}h".format(
                             row.horizon_hours, row.liquidation_hours))
         print("{:<24.24} {:>8,} {:>8,} {:>7,} {:>5.1f}% {:>7,} {:>8} "
-              "{:>10} {:>6.0f}% {:>11,.0f}".format(
+              "{:>13} {:>6.0f}% {:>11,.0f}".format(
                   row.name, row.buy, row.sell, row.margin,
                   row.roi * 100, row.allocated_quantity or 0,
                   engine.format_gp(row.allocated_capital or 0),
                   timing_value,
                   row.p_fill * 100, value))
+        if (config.trade_mode is engine.TradeMode.ACTIVE
+                and (row.allocated_quantity or 0) > 0):
+            print("{:<24} · 80% done by {}; nothing bought after {}? re-check "
+                  "the margin and reprice. Not sold by {}? cancel the rest"
+                  .format("", engine.format_duration(row.round_trip_p80_seconds),
+                          engine.format_duration(row.reprice_check_seconds),
+                          engine.format_duration(row.cancel_by_seconds)))
         if config.trade_mode is engine.TradeMode.OVERNIGHT:
             print("{:<24} · {:,.0f} expected bought by return; {:.0%} may remain "
                   "after {:.0f}h liquidation; {:,.0f} gp stress downside".format(
@@ -194,10 +204,13 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
             print("{:<24} · {}".format("", note))
     print()
     if config.trade_mode is engine.TradeMode.ACTIVE:
-        print("ROUND TRIP = expected time for both legs, from the traded volume "
-              "you can reach at your queue position. It is the denominator of "
-              "EV/SLOT/H — a slot freed in 20 minutes is worth more than one "
-              "held for four hours at twice the margin.")
+        print("TRIP P50-P90 = both sequential legs: the median and the time "
+              "one trip in ten still exceeds. P(TRIP) is the chance the whole "
+              "quantity is bought AND sold within {:.0f}h, from the same "
+              "distribution. An ETA is a band, not a promise. EV/SLOT/H divides "
+              "expected completed profit by expected slot occupancy — a slot "
+              "freed in 20 minutes is worth more than one held for four hours "
+              "at twice the margin.".format(config.horizon_hours))
         ranking_explanation = "EV/SLOT/H"
     else:
         print("RETURN+SELL = unattended buy horizon followed by a separate "

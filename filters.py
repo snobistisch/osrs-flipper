@@ -120,7 +120,10 @@ class FlipRow:
     bond_fee: int
     sell_listed_at: int      # where to actually list: free undercut at tax steps
 
-    # fill model
+    # fill model. The three *_seconds are MEDIANS of the fill-time
+    # distribution; the round-trip band and the occupancy below come from the
+    # same distribution, and p_fill is its probability of finishing the whole
+    # quantity before the deadline.
     expected_buy_seconds: float
     expected_sell_seconds: float
     expected_total_seconds: float
@@ -145,6 +148,13 @@ class FlipRow:
     fill_low_qty: float = 0.0
     fill_high_qty: float = 0.0
     liquidation_hours: float = 0.0
+    fill_log_sigma: float = 0.0
+    round_trip_p50_seconds: float = 0.0
+    round_trip_p80_seconds: float = 0.0
+    round_trip_p90_seconds: float = 0.0
+    expected_occupancy_seconds: float = 0.0
+    reprice_check_seconds: float = 0.0
+    cancel_by_seconds: float = 0.0
 
     # Concrete execution and inputs retained for quantity-aware allocation.
     base_buy: Optional[int] = None
@@ -325,14 +335,22 @@ def _optimise_execution(
     quote_age: int, ofi: float, drift: float, now: float,
     highalch: Optional[int], competitors: float, config: FilterConfig,
     sigma_daily: Optional[float] = None, ou_fit: Optional[object] = None,
-    regime_score: float = 0.0,
+    regime_score: float = 0.0, fill_log_sigma: Optional[float] = None,
 ) -> Optional[Tuple[int, int, int, int, int, engine.ScoreBreakdown]]:
     """Choose concrete order prices and quantity as one decision.
 
     Every queue-share benefit is paid for in ``buy``/``sell`` first. This
     closes the old loophole where maximum affordable priority supplied the fill
     probability while untouched prices supplied the profit.
+
+    Active quantity is the largest whose whole round trip completes before the
+    deadline with ``active_target_completion`` probability. It used to fill
+    each half of the window at the mean rate, so every candidate was ranked,
+    and its prices chosen, at a size that completed about one time in eight.
     """
+    if fill_log_sigma is None:
+        fill_log_sigma = engine.fill_log_sigma(config.calibration)
+    calibration = config.calibration
     free_sell = engine.tax_boundary_undercut(base_sell, tax_exempt, bond)
     max_total = max(0, base_sell - base_buy - 1)
     buy_points = _concession_points(max_total)
@@ -365,11 +383,14 @@ def _optimise_execution(
                 capacity = engine.fillable_quantity(
                     buy_volume_1h, buy_share, config.horizon_hours)
             else:
-                capacity = min(
-                    engine.fillable_quantity(buy_volume_1h, buy_share,
-                                             config.horizon_hours / 2),
-                    engine.fillable_quantity(sell_volume_1h, sell_share,
-                                             config.horizon_hours / 2))
+                capacity = engine.target_quantity(
+                    engine.round_trip_rate(
+                        engine.fill_rate(buy_volume_1h, buy_share),
+                        engine.fill_rate(sell_volume_1h, sell_share)),
+                    config.horizon_hours * engine.SECONDS_PER_HOUR
+                    - engine.LEGS_PER_ROUND_TRIP * calibration.min_leg_seconds,
+                    calibration.active_target_completion, fill_log_sigma,
+                    engine.fill_log_mu(calibration))
             qty = engine.flippable_qty(effective_limit, capacity, affordable)
             qty = max(1, qty)
             breakdown = engine.score_flip(
@@ -385,6 +406,7 @@ def _optimise_execution(
                 buy_share=buy_share, sell_share=sell_share,
                 mode=config.trade_mode, horizon_hours=config.horizon_hours,
                 capital_per_unit=unit_capital,
+                fill_log_sigma=fill_log_sigma,
                 calibration=config.calibration)
             if breakdown.ranking_value > best_value:
                 best_value = breakdown.ranking_value
@@ -468,7 +490,9 @@ def _evaluate(
         limit=item.limit, available_capital=available_capital,
         buy_volume_1h=low_vol_1h, sell_volume_1h=high_vol_1h,
         quote_age=age, ofi=ofi, drift=drift, now=now,
-        highalch=item.highalch, competitors=crowd, config=config)
+        highalch=item.highalch, competitors=crowd, config=config,
+        fill_log_sigma=engine.fill_log_sigma(config.calibration,
+                                             verified=False))
     if choice is None:
         return "margin not positive"
     buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice
@@ -501,6 +525,7 @@ def _evaluate(
         fill_low_qty=breakdown.fill_low_qty,
         fill_high_qty=breakdown.fill_high_qty,
         liquidation_hours=breakdown.liquidation_hours,
+        **_timing_fields(breakdown),
         expected_gp=breakdown.expected_profit,
         raw_gp_per_slot_hour=breakdown.gp_per_slot_hour,
         gp_per_slot_hour=breakdown.gp_per_slot_hour,
@@ -526,7 +551,8 @@ def _evaluate(
         alch_arbitrage_gp=breakdown.alch_arbitrage_gp,
         warnings=_warnings(depth, drift, ofi, affordable, qty, item.limit,
                            priced.from_reference,
-                           breakdown, priced.sell, tax_exempt),
+                           breakdown, priced.sell, tax_exempt,
+                           config.calibration),
     )
 
 
@@ -695,7 +721,9 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         buy_volume_1h=reachable_buy, sell_volume_1h=reachable_sell,
         quote_age=row.quote_age, ofi=row.ofi, drift=row.drift, now=now,
         highalch=highalch, competitors=crowd, config=config,
-        sigma_daily=sigma, ou_fit=view.ou, regime_score=view.regime_score)
+        sigma_daily=sigma, ou_fit=view.ou, regime_score=view.regime_score,
+        fill_log_sigma=engine.fill_log_sigma(config.calibration,
+                                             verified=True))
     if choice is None:
         return replace(row, deep_checked=True, warnings=row.warnings + (
             "history left no positive concrete execution price",))
@@ -721,6 +749,7 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         fill_low_qty=breakdown.fill_low_qty,
         fill_high_qty=breakdown.fill_high_qty,
         liquidation_hours=breakdown.liquidation_hours,
+        **_timing_fields(breakdown),
         expected_gp=breakdown.expected_profit,
         raw_gp_per_slot_hour=breakdown.gp_per_slot_hour,
         gp_per_slot_hour=breakdown.gp_per_slot_hour,
@@ -745,7 +774,9 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         regime_score=view.regime_score,
         volume_1h_total=row.volume_1h_total,
         history_mean_volume=view.mean_volume,
-        warnings=row.warnings + _history_warnings(view),
+        warnings=_refresh_timing_warnings(row.warnings, breakdown,
+                                          config.calibration)
+        + _history_warnings(view),
     )
 
 
@@ -809,7 +840,8 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
         if len(selected) >= config.slots:
             break
         if (row.ranking_value <= 0 or row.expected_gp <= 0
-                or _unit_capital(row) > remaining_seed):
+                or _unit_capital(row) > remaining_seed
+                or not meets_completion_target(row, config)):
             continue
         # Three related slots is diversification, four is a concentrated bet.
         if category_count.get(row.category, 0) >= 3:
@@ -818,15 +850,16 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
         category_count[row.category] = category_count.get(row.category, 0) + 1
         remaining_seed -= _unit_capital(row)
 
-    # Active sizing uses the lower 80% completed-quantity bound. Using the
-    # optimistic bound let a large bank turn a fast small flip into a long
-    # queue. Overnight intentionally waits and keeps the upper bound.
+    # Active quantity was already sized so the whole round trip completes
+    # before the deadline with the target probability; funding more would
+    # trade that guarantee away, funding less only idles the bank. Overnight
+    # intentionally waits and keeps the upper bound.
     capital_caps = []
     for row in selected:
-        fill_bound = (row.fill_low_qty
-                      if config.trade_mode is engine.TradeMode.ACTIVE
-                      else row.fill_high_qty)
-        reachable = max(1, int(fill_bound))
+        if config.trade_mode is engine.TradeMode.ACTIVE:
+            capital_caps.append(row.capital_needed)
+            continue
+        reachable = max(1, int(row.fill_high_qty))
         capital_caps.append(min(row.capital_needed,
                                 reachable * _unit_capital(row)))
     amounts = engine.allocate_portfolio(
@@ -866,6 +899,31 @@ def _unit_capital(row: FlipRow) -> int:
     return row.buy + row.bond_fee
 
 
+def _timing_fields(breakdown: engine.ScoreBreakdown) -> Dict[str, float]:
+    """The fill-time distribution, copied together so it cannot go stale."""
+    return {
+        "fill_log_sigma": breakdown.fill_log_sigma,
+        "round_trip_p50_seconds": breakdown.round_trip_p50_seconds,
+        "round_trip_p80_seconds": breakdown.round_trip_p80_seconds,
+        "round_trip_p90_seconds": breakdown.round_trip_p90_seconds,
+        "expected_occupancy_seconds": breakdown.expected_occupancy_seconds,
+        "reprice_check_seconds": breakdown.reprice_check_seconds,
+        "cancel_by_seconds": breakdown.cancel_by_seconds,
+    }
+
+
+def meets_completion_target(row: FlipRow, config: FilterConfig) -> bool:
+    """Whether an Active flip may be funded automatically.
+
+    Quantity is already sized to the target, so a row below it is one where
+    even a single unit is unlikely to make the round trip before the deadline.
+    Such a row stays listed, with a warning, but never receives bank.
+    """
+    if config.trade_mode is not engine.TradeMode.ACTIVE:
+        return True
+    return row.p_fill + 1e-9 >= config.calibration.active_target_completion
+
+
 def _rescore_quantity(row: FlipRow, quantity: int,
                       config: FilterConfig) -> FlipRow:
     """Re-evaluate fill uncertainty and EV for the funded integer quantity."""
@@ -885,6 +943,7 @@ def _rescore_quantity(row: FlipRow, quantity: int,
         buy_share=row.buy_share, sell_share=row.sell_share,
         mode=config.trade_mode, horizon_hours=config.horizon_hours,
         capital_per_unit=_unit_capital(row),
+        fill_log_sigma=row.fill_log_sigma or None,
         calibration=config.calibration)
     retained = (row.ranking_value / row.raw_ranking_value
                 if row.raw_ranking_value > 0 else 1.0)
@@ -903,6 +962,7 @@ def _rescore_quantity(row: FlipRow, quantity: int,
         fill_low_qty=breakdown.fill_low_qty,
         fill_high_qty=breakdown.fill_high_qty,
         liquidation_hours=breakdown.liquidation_hours,
+        **_timing_fields(breakdown),
         expected_gp=breakdown.expected_profit,
         raw_gp_per_slot_hour=breakdown.gp_per_slot_hour,
         gp_per_slot_hour=(ranking if config.trade_mode is engine.TradeMode.ACTIVE
@@ -911,7 +971,9 @@ def _rescore_quantity(row: FlipRow, quantity: int,
         ranking_value=ranking,
         downside_risk_gp=breakdown.downside_risk_gp,
         factors=breakdown.factors(),
-        alch_arbitrage_gp=breakdown.alch_arbitrage_gp)
+        alch_arbitrage_gp=breakdown.alch_arbitrage_gp,
+        warnings=_refresh_timing_warnings(row.warnings, breakdown,
+                                          config.calibration))
 
 
 def rank_flips(
@@ -974,10 +1036,67 @@ def _history_warnings(view: engine.HistoryView) -> Tuple[str, ...]:
     return tuple(notes)
 
 
+# Every note _timing_warnings can produce starts with one of these, so a
+# re-score can replace them instead of stacking a stale probability.
+_TIMING_NOTE_PREFIXES = (
+    "no realistic fill on one side", "estimated buy plus post-return",
+    "fill odds:", "inventory risk:",
+)
+
+
+def _timing_warnings(breakdown: engine.ScoreBreakdown,
+                     calibration: engine.Calibration
+                     ) -> Tuple[str, ...]:
+    """Notes that depend on the fill-time distribution at this quantity."""
+    notes = []
+    if breakdown.total_seconds == float("inf"):
+        notes.append("no realistic fill on one side — the book is one-sided")
+    elif (breakdown.mode is engine.TradeMode.OVERNIGHT
+          and breakdown.total_seconds > 8 * engine.SECONDS_PER_HOUR):
+        notes.append("estimated buy plus post-return liquidation time {} — "
+                     "plan for inventory management after login"
+                     .format(engine.format_duration(breakdown.total_seconds)))
+    # Active needs no separate "slow" note: quantity is sized so the P80 meets
+    # the deadline, the band is shown on every row, and a row that cannot meet
+    # the target even at one unit gets the fill-odds note below.
+    if breakdown.mode is engine.TradeMode.OVERNIGHT:
+        if breakdown.p_fill_both < 0.25:
+            notes.append("fill odds: only {:.0%} chance the full buy order "
+                         "fills before you return in {:.0f}h"
+                         .format(breakdown.p_fill_both,
+                                 breakdown.horizon_hours))
+    elif (breakdown.p_fill_both + 1e-9
+          < calibration.active_target_completion):
+        notes.append("fill odds: only {:.0%} chance the whole round trip "
+                     "completes within {:.0f}h even at this size — below the "
+                     "{:.0%} needed for automatic funding".format(
+                         breakdown.p_fill_both, breakdown.horizon_hours,
+                         calibration.active_target_completion))
+    if (breakdown.mode is engine.TradeMode.OVERNIGHT
+            and breakdown.p_stranded >= 0.20):
+        notes.append("inventory risk: about {:.0%} of the planned quantity "
+                     "may remain after the post-return sell window; stress "
+                     "downside is {:,.0f} gp"
+                     .format(breakdown.p_stranded,
+                             breakdown.downside_risk_gp))
+    return tuple(notes)
+
+
+def _refresh_timing_warnings(warnings: Tuple[str, ...],
+                             breakdown: engine.ScoreBreakdown,
+                             calibration: engine.Calibration
+                             ) -> Tuple[str, ...]:
+    kept = tuple(note for note in warnings
+                 if not note.startswith(_TIMING_NOTE_PREFIXES))
+    return kept + _timing_warnings(breakdown, calibration)
+
+
 def _warnings(depth: int, drift: float, ofi: float, affordable: int, qty: int,
               limit: Optional[int], from_reference: bool,
               breakdown: engine.ScoreBreakdown,
-              sell: int, tax_exempt: bool) -> Tuple[str, ...]:
+              sell: int, tax_exempt: bool,
+              calibration: engine.Calibration = engine.DEFAULT_CALIBRATION
+              ) -> Tuple[str, ...]:
     """Plain-language reasons this flip might not pay what it quotes."""
     notes = []
     if from_reference:
@@ -999,35 +1118,7 @@ def _warnings(depth: int, drift: float, ofi: float, affordable: int, qty: int,
                      "the fill estimate assumes you are one of several offers")
     elif depth <= 2:
         notes.append("only {} gp of undercut room".format(depth))
-    if breakdown.total_seconds == float("inf"):
-        notes.append("no realistic fill on one side — the book is one-sided")
-    elif breakdown.total_seconds > 8 * engine.SECONDS_PER_HOUR:
-        if breakdown.mode is engine.TradeMode.OVERNIGHT:
-            notes.append("estimated buy plus post-return liquidation time {} — "
-                         "plan for inventory management after login"
-                         .format(engine.format_duration(
-                             breakdown.total_seconds)))
-        else:
-            notes.append("expected round trip {} — the slot is the cost, not the gp"
-                         .format(engine.format_duration(
-                             breakdown.total_seconds)))
-    if breakdown.p_fill_both < 0.25:
-        if breakdown.mode is engine.TradeMode.OVERNIGHT:
-            notes.append("only {:.0%} chance the full buy order fills before "
-                         "you return in {:.0f}h"
-                         .format(breakdown.p_fill_both,
-                                 breakdown.horizon_hours))
-        else:
-            notes.append("only {:.0%} chance both planned quantities clear "
-                         "inside {:.0f}h"
-                         .format(breakdown.p_fill_both,
-                                 breakdown.horizon_hours))
-    if (breakdown.mode is engine.TradeMode.OVERNIGHT
-            and breakdown.p_stranded >= 0.20):
-        notes.append("about {:.0%} of the planned quantity may remain after "
-                     "the post-return sell window; stress downside is {:,.0f} gp"
-                     .format(breakdown.p_stranded,
-                             breakdown.downside_risk_gp))
+    notes.extend(_timing_warnings(breakdown, calibration))
     if drift <= -0.02:
         notes.append("price falling {:.1%} — your buy fills, your sell may not"
                      .format(abs(drift)))

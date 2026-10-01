@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -352,6 +353,11 @@ def _open_archive() -> Optional["archive.Archive"]:
     return None
 
 
+def _seconds(value: float) -> Optional[int]:
+    """Whole seconds, or None where the model says the leg never completes."""
+    return round(value) if math.isfinite(value) else None
+
+
 def flip_to_dict(row: filters.FlipRow) -> dict:
     """The fields an agent can act on. Not every field — a wall of floats is
     harder to reason about than a short list of the ones that decide."""
@@ -368,7 +374,16 @@ def flip_to_dict(row: filters.FlipRow) -> dict:
         "ranking_value": round(row.ranking_value),
         "gp_per_slot_hour": round(row.gp_per_slot_hour),
         "gp_per_slot_hour_before_shrinkage": round(row.raw_gp_per_slot_hour),
-        "round_trip_seconds": round(row.expected_total_seconds),
+        # A band, not one number: median, plan-for and slow case of the same
+        # distribution p_fill is computed from. round_trip_seconds is kept as
+        # the median for older consumers.
+        "round_trip_seconds": _seconds(row.expected_total_seconds),
+        "round_trip_p50_seconds": _seconds(row.round_trip_p50_seconds),
+        "round_trip_p80_seconds": _seconds(row.round_trip_p80_seconds),
+        "round_trip_p90_seconds": _seconds(row.round_trip_p90_seconds),
+        "expected_occupancy_seconds": _seconds(row.expected_occupancy_seconds),
+        "reprice_check_seconds": _seconds(row.reprice_check_seconds),
+        "cancel_by_seconds": _seconds(row.cancel_by_seconds),
         "p_fill": round(row.p_fill, 3),
         "p_stranded": round(row.p_stranded, 3),
         "downside_risk_gp": round(row.downside_risk_gp),

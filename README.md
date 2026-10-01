@@ -24,7 +24,10 @@ inventory bought while away and a separate selling phase after you return.
 dislocations. The app provides guidance; all in-game orders are manual.
 
 Prices come from reported trades, not a public order book. Fill times,
-probabilities, and profits are estimates. The model includes integer GP
+probabilities, and profits are estimates. An Active flip shows a time band —
+typical (median), 80% and 90% — with the chance the whole quantity is bought
+and sold within the window, and a time after which an untouched offer should
+be re-checked and repriced. None of these is a guarantee. The model includes integer GP
 rounding, a capped GE tax, exemptions, and shared buy limits. See the
 [model notes](docs/model.md) for assumptions and calibration limits.
 

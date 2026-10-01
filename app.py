@@ -233,6 +233,23 @@ def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
         tax_free_only=tax_free, hide_botted=hide_botted), top_n
 
 
+def eta_band(row) -> str:
+    """Median, plan-for and slow-case round-trip times, never one number."""
+    return "{} typical · 80% {} · 90% {}".format(
+        engine.format_duration(row.round_trip_p50_seconds
+                               or row.expected_total_seconds),
+        engine.format_duration(row.round_trip_p80_seconds),
+        engine.format_duration(row.round_trip_p90_seconds))
+
+
+def reprice_note(row) -> str:
+    return ("Nothing bought after {}? The forecast has failed — re-check the "
+            "live margin, then reprice or cancel. Not sold by {}? Cancel what "
+            "is left and re-plan.".format(
+                engine.format_duration(row.reprice_check_seconds),
+                engine.format_duration(row.cancel_by_seconds)))
+
+
 def ranked_table(rows, top_n, config):
     overnight = config.trade_mode is engine.TradeMode.OVERNIGHT
     time_heading = "Buy by return" if overnight else "Round trip"
@@ -246,7 +263,7 @@ def ranked_table(rows, top_n, config):
         "ROI %": r.roi * 100,
         time_heading: ("{:.0f}h away + {:.0f}h sell window".format(
             r.horizon_hours, r.liquidation_hours) if overnight else
-            engine.format_duration(r.expected_total_seconds)),
+            eta_band(r)),
         probability_heading: r.p_fill * 100,
         "Fill range": "{:,.0f}–{:,.0f}".format(r.fill_low_qty, r.fill_high_qty),
         "Model confidence": filters.confidence_label(r),
@@ -263,11 +280,16 @@ def ranked_table(rows, top_n, config):
         time_heading: st.column_config.TextColumn(
             help=("Buy offer rests while you are away; liquidation starts only "
                   "after you return." if overnight else
-                  "Expected time for both sequential legs at the shown prices.")),
+                  "Both sequential legs at the shown prices: median, 80% and "
+                  "90% completion times from the same distribution as the "
+                  "probability column. A band, not a promise — one trip in "
+                  "ten takes longer than the last figure.")),
         probability_heading: st.column_config.NumberColumn(
             format="%.0f%%", help=("Chance the full buy order fills before return."
                                     if overnight else
-                                    "Chance the full planned quantity clears on both legs.")),
+                                    "Chance the whole quantity is bought AND "
+                                    "sold within {:.0f}h.".format(
+                                        config.horizon_hours))),
         "ROI %": st.column_config.NumberColumn(format="%.1f%%"),
     })
 
@@ -307,13 +329,15 @@ def slot_plan(rows, config):
                                       row.fill_high_qty, row.liquidation_hours))
                     fill_label = "full buy"
                 else:
-                    timing = "{} ETA · {:,.0f}–{:,.0f} completed".format(
-                        engine.format_duration(row.expected_total_seconds),
-                        row.fill_low_qty, row.fill_high_qty)
-                    fill_label = "full trip"
+                    timing = "{} · {:,.0f}–{:,.0f} completed".format(
+                        eta_band(row), row.fill_low_qty, row.fill_high_qty)
+                    fill_label = "full trip within {:.0f}h".format(
+                        row.horizon_hours)
                 st.caption("EV {:,.0f} gp · {} {:.0%} · {} · {} model confidence"
                            .format(expected, fill_label, row.p_fill, timing,
                                    filters.confidence_label(row)))
+                if config.trade_mode is engine.TradeMode.ACTIVE:
+                    st.caption(reprice_note(row))
                 if st.button("Inspect", key="slot-{}-{}".format(slot,
                                                                   row.item_id)):
                     st.session_state.selected_item_id = row.item_id
@@ -325,8 +349,10 @@ def slot_plan(rows, config):
     st.caption(("Horizon EV ranks expected post-return liquidation profit and "
                 "inventory downside; no sell is assumed while you are offline. "
                 if config.trade_mode is engine.TradeMode.OVERNIGHT else
-                "EV/slot/h ranks expected completed profit divided by occupied "
-                "slot time. ") +
+                "EV/slot/h ranks expected completed profit divided by expected "
+                "slot occupancy, with an unfinished trip cancelled at the "
+                "deadline. Times are a band from the same model as the "
+                "completion odds, not a promise. ") +
                "Scores are shrunk toward the market average; confidence is "
                "model evidence, not an execution guarantee.")
 
@@ -475,12 +501,17 @@ def detail_view(row):
                    " (GE-tax-exempt item)" if row.tax_exempt else ""))
     active = row.trade_mode is engine.TradeMode.ACTIVE
     if active:
-        right.metric("Round trip",
-                     engine.format_duration(row.expected_total_seconds),
-                     delta="{:.0%} full quantity clears".format(row.p_fill),
+        right.metric("Round trip (typical)",
+                     engine.format_duration(row.round_trip_p50_seconds
+                                            or row.expected_total_seconds),
+                     delta="{:.0%} complete within {:.0f}h".format(
+                         row.p_fill, row.horizon_hours),
                      delta_color="off",
-                     help="Buy leg {}, sell leg {}; expected completed range "
-                          "{:,.0f}–{:,.0f}.".format(
+                     help="80% by {}, 90% by {}. Median buy leg {}, sell leg "
+                          "{}; expected completed range {:,.0f}–{:,.0f}. An "
+                          "ETA is not a guarantee.".format(
+                              engine.format_duration(row.round_trip_p80_seconds),
+                              engine.format_duration(row.round_trip_p90_seconds),
                               engine.format_duration(row.expected_buy_seconds),
                               engine.format_duration(row.expected_sell_seconds),
                               row.fill_low_qty, row.fill_high_qty))
@@ -505,6 +536,8 @@ def detail_view(row):
                help="{:,} units, {:,} gp tied up.".format(
                    row.qty_per_window, row.capital_needed))
 
+    if active:
+        st.info(reprice_note(row), icon="⏱")
     if not active:
         st.warning("About {:.0%} of planned quantity may remain after the "
                    "post-return sell window; the model subtracts {:,.0f} gp "

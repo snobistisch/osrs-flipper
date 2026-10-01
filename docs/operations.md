@@ -30,21 +30,29 @@ between extrapolating a bucket sampled at peak and one sampled at 4am.
 The point of predictions is checking them.
 
 ```bash
-python3 journal.py open --name "Steel bar" --qty 1000 --buy 558 --predicted 6
-python3 journal.py open --name "Lobster" --qty 5000 --buy 120   # tax exemption looked up
-python3 journal.py close 1 --sell 575
-python3 journal.py cancel 2 --reason "never filled"
+python3 journal.py place --name "Steel bar" --qty 1000 --buy 558   # offer goes in
+python3 journal.py bought 1                  # it filled (--qty 800 if cut short)
+python3 journal.py close 1 --sell 575        # the sell filled
+python3 journal.py place --name "Lobster" --qty 5000 --buy 120
+python3 journal.py cancel 2 --reason "never filled"   # a censored buy leg
+python3 journal.py open --name "Coal" --qty 500 --buy 150   # buy already filled
 python3 journal.py stats
 python3 journal.py calibration
 ```
 
 Record the offers that **never filled**, not only the ones that worked. Keeping
 only completed flips is the textbook way to conclude that every flip works, and
-the fill-time model needs the censored observations.
+the fill-time model needs the censored observations. `place` is what makes
+that possible for the buy leg: `open` records a buy that already filled, so an
+offer that sat for three hours and was pulled could not be written down
+before. Cancelling a `place`d row censors the buy leg; cancelling an `open`
+row censors the sell leg; a row still waiting is censored at "now".
 
 Rows opened from a recommendation also preserve its strategy, horizon,
-round-trip probability, stranded-inventory probability, downside stress,
-ranking value, individual factors and timestamps. That makes future Active and
+round-trip probability, the fill-time band (leg medians, round-trip
+P50/P80/P90 and the log-width they came from), the reprice-check time, the
+liquidity at entry, stranded-inventory probability, downside stress, ranking
+value, individual factors and timestamps. That makes future Active and
 Overnight calibration possible without pretending public market prints reveal
 private player fills.
 
@@ -52,8 +60,15 @@ private player fills.
 
 - **Capture by predicted rank.** If capture falls as you go up the ranking, the
   top is still mostly estimation error and the shrinkage is too weak.
-- **Fill time, predicted against actual.** The old ranking assumed four hours
-  for every flip. This says by how much it was wrong.
+- **Fill time, predicted against realised — buy leg, sell leg and round trip,
+  per liquidity tier (thin / liquid / busy).** Cancelled and still-waiting
+  offers count as "took at least this long", so the realised median is a
+  Kaplan-Meier median and cannot be flattered by dropping the slow ones. It
+  reports predicted/realised, how often a trip ran past its own predicted
+  P80 and P90 (a calibrated model shows about 20% and 10%), how many offers
+  were pulled, and — from 20 observations — a censored fit of the log error
+  (bias and width) to compare with `Calibration.fill_rate_log_sigma`,
+  `volume_forecast_log_sigma` and `unverified_fill_log_sigma`.
 - **Factor values on flips that beat versus missed their prediction.** A factor
   that differs sharply between the two columns is the one carrying the error.
 

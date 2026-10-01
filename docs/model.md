@@ -51,13 +51,92 @@ occupied a slot for exactly that long. A flip that clears in twelve minutes for
 four hours to make 40,000 earns 10,000. The old metric ranked the second one
 four times higher.
 
-Fill throughput is now a distribution rather than one all-or-nothing batch
-event. Traded volume on each side gives an arrival rate, but the public feed
-contains executions—not queue depth, offer position or transaction batch
-sizes. A mean-one lognormal rate prior therefore produces expected partial
-quantity, an 80% quantity range and a capped full-completion probability.
-**Round trip** in Active is the sequential estimate and the denominator of the
-ranking; Overnight reports the buy fill by return separately from liquidation.
+Fill throughput is a distribution rather than one all-or-nothing batch event.
+Traded volume on each side gives an arrival rate, but the public feed contains
+executions—not queue depth, offer position or transaction batch sizes. The
+realised rate is therefore the forecast rate times an uncertain multiplier
+`M`, and one leg takes `about a minute of your time + quantity / (rate × M)`.
+Everything about timing comes from that one distribution:
+
+- the **time band**: typical (median), 80% and 90% round-trip times;
+- **P(full trip)**: the chance the whole quantity is bought *and* sold before
+  the 4-hour deadline;
+- the expected completed quantity and its 80% range;
+- the ranking denominator: expected slot **occupancy**, with an unfinished
+  trip cancelled at the deadline;
+- the Active **quantity**: the largest whose whole round trip completes before
+  the deadline with 80% probability;
+- the **re-check time**: if not one unit has bought by then, the forecast has
+  failed — re-check the live margin and reprice or cancel.
+
+Overnight reports the buy fill by return separately from liquidation.
+
+### 1b. Why the ETA used to be too optimistic
+
+Investigated on 2026-10-01 after the complaint that a flip "predicted to fill
+quickly" regularly sat for hours. The causes, in order of size:
+
+1. **The ETA was the time at the mean rate, not a median.** It was
+   `quantity / rate`. Time is quantity *divided* by an uncertain rate, so even
+   with an unbiased rate the time is skewed upward: within the model's own
+   distribution only about 35% of trips finished by the displayed ETA, and
+   the 90th percentile was about 3.5× it. A "69 minute" flip had a four-hour
+   P90 — exactly the experience reported.
+2. **ETA, P(fill) and ranking came from three different calculations.** The
+   ETA was the mean-rate time; P(fill) gave each leg a fixed half of the
+   window and multiplied two independent completion odds; the ranking divided
+   by the mean-rate time. None was the distribution of a sequential round
+   trip, so they could disagree with each other.
+3. **Candidates were priced and ranked at a size that rarely completed.** The
+   optimiser filled each half-window at the mean rate — about a 12% chance of
+   finishing — and only the later allocation cut the quantity, using a
+   different bound. The rows shortlisted and ordered were not the trades
+   funded.
+4. **The rate uncertainty ignored the volume forecast.** The prior width
+   covered queue position only. On cached `/timeseries` data, the error of
+   forecasting the next two hours' volume from the last hour alone has a
+   log standard deviation of 0.46–0.81 per series — as large as the whole
+   prior — and it was not in the model.
+5. **The journal could not see the offers that failed.** `open` recorded a
+   buy that had already filled, and the fill-time diagnostic used only flips
+   that sold. An offer that sat for hours and was pulled simply vanished, so
+   any calibration from it would have been optimistic.
+6. **The 45-minute reprice rule existed only as a sentence** in the browser
+   plan note — not per offer, not in the Python app, CLI or agent output.
+
+The 1-hour volume, queue share and multi-day fill share were checked too. They
+are reasonable *rates*; the problem was presenting a rate-derived point as a
+deadline and ignoring how wrong the rate can be for one offer.
+
+What changed:
+
+- **One distribution, both legs.** The legs share the multiplier: a quiet
+  evening or an under-counted crowd slows the buy and the sell of the same
+  item together. Treating them as independent would average the error away
+  and shorten the tail — the optimistic direction for a deadline. With one
+  multiplier every number above is a closed form that the Python engine and
+  the browser compute identically.
+- **The width now includes the volume forecast** (`volume_forecast_log_sigma
+  = 0.6`, in quadrature with the queue term), and a row whose reach was never
+  checked against 14-day history gets a further `unverified_fill_log_sigma`.
+  Thin evidence therefore widens the band and — through the 80% sizing —
+  shrinks the quantity and the score, instead of being taken at face value.
+- **Only the queue term is centred to mean one.** The measured volume error
+  is median-unbiased (log median −0.07 to +0.16 across tiers), so the extra
+  width lengthens the tails without inflating the typical time.
+- **Active sizing targets an 80% complete round trip by the deadline**
+  (`active_target_completion`). A flip that cannot reach it even at one unit
+  is still listed, with a "fill odds" warning and a worse score, but is never
+  funded automatically.
+- **Every Active flip carries a re-check time**: the buy leg's own P90, capped
+  at 45 minutes. A buy cannot complete before it starts, so if not one unit
+  has filled by its P90, the forecast has failed whatever the hidden queue
+  looks like. Cards also give a cancel-by time (the round trip's P90, at most
+  the deadline). Saved browser flips show both as timers.
+
+Fast flips stay recognisably fast: a small order on a deep book shows a band
+of minutes, not hours. What disappears is a point estimate that the model's
+own uncertainty contradicted.
 
 ### 2. You have to get to the front of the queue, and you are not alone in it
 
@@ -248,17 +327,19 @@ how much of the total bank one new recommendation may commit, from 10% to 100%
 (25% by default). Raising it can put more cash behind the strongest opportunity,
 but also concentrates more of the bank in one item; the total plan can never
 commit more than the available bank. Above the default, quantity sizing also
-moves gradually from the conservative 80% fill lower bound toward the full
-modelled capacity. The Active plan uses only direct live quotes: rows
-reconstructed from hourly averages stay searchable, but cannot receive bank
-automatically. At the default risk setting it funds quantity to the lower 80%
-throughput bound, rejects a market where even one unit has a modelled round trip
-over two hours, and no longer assumes that moving one tick captures most of all
-traded volume. Known sharp falls,
+moves gradually from the 80%-completion size toward the size that only clears
+at the average rate; the card then shows the lower completion odds. The Active
+plan uses only direct live quotes: rows reconstructed from hourly averages stay
+searchable, but cannot receive bank automatically. At the default risk setting
+it funds the 80%-completion size, rejects a market where even one unit fails to
+round-trip within two hours in one case out of five, rejects a row that misses
+the completion target, and no longer assumes that moving one tick captures most
+of all traded volume. Known sharp falls,
 dumping, regime shifts, volatility spikes and poor fills are rejected too. The
 planner may leave a slot or part of the bank unused when market volume or buy
-limits cannot absorb more cash safely. An Active offer that has not started
-filling after 45 minutes should be margin-checked and re-priced, not left parked.
+limits cannot absorb more cash safely. Each Active card states when to re-check
+an untouched offer (its buy leg's P90, at most 45 minutes) and when to cancel
+what is left; a saved flip shows these as reminders.
 
 That strict plan is not the whole market. **All flip options** keeps every
 candidate that passed the automatic freshness, liquidity, ROI, queue-room and
@@ -366,10 +447,25 @@ The ones most worth fitting first, because they do the most work:
 |---|---|---|
 | `competitors_at_touch` | Quiet-market floor: you are one of ~8 offers at the touch price | Journal: observed fill rate over volume at the touch |
 | `aggressiveness_scale` | How quickly price improvement reaches its capture ceiling | Journal: fill rate against distance from the touch |
+| `fill_rate_log_sigma` | Queue-position uncertainty in the fill rate, centred to mean one | `journal.py calibration`: censored fit of the log error |
+| `volume_forecast_log_sigma` | Error of forecasting the next hours' volume (0.6; measured 0.46–0.81 on cached series) | Tick archive, once it holds weeks |
+| `unverified_fill_log_sigma` | Extra width before the 14-day reach check (a prior) | Spread of `log(fill_share)` across deep checks |
+| `active_target_completion` | Active sizing/funding policy: 80% complete round trip by the deadline | Journal: P80 exceedance should come out near 20% |
+| `reprice_check_max_minutes` | Latest "nothing filled — re-check" time (45) | Journal: time to first fill, once recorded |
 | `priority_capture_ceiling` | In crowded items, re-pricing captures at most 3% of total side volume; a higher quiet-market touch share is preserved | Journal: realised share after improving the price |
 | `score_noise_scale`, `score_noise_floor` | How much of a score is noise — this sets how hard shrinkage bites | Archive: how far an item's score moves between polls |
 | `adverse_selection_gamma` | Sensitivity to order flow running against you | Journal: holding-period return against OFI at entry |
 | `risk_aversion_eta` | Price risk between the legs | Journal, against a target Sharpe |
+
+There is **no journal outcome data yet** (no `journal.db` existed when the
+fill-time model was revised), so none of these widths is fitted to real fills.
+The fallback is deliberately conservative: the volume term is measured from
+public series, the unverified term widens rather than narrows, and the sizing
+policy keeps a fifth of trips as the expected miss rather than four fifths.
+What would turn the priors into measurements: roughly 20+ Active offers per
+liquidity tier logged with `place` / `bought` / `close` / `cancel` (including
+the ones pulled unfilled), and a few weeks of tick archive for the volume term
+and for time-to-first-fill.
 
 Until then the model's *structure* is defensible and its *constants* are
 beliefs. That distinction is the point of the rebuild: the old nine-factor

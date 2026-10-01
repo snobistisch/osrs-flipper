@@ -193,7 +193,9 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("row.pricedFromReference", self.source)
         self.assertIn("config.maxPositionCapital", self.source)
         self.assertIn("function positionCapitalCeiling(", self.source)
-        self.assertIn('row.mode === "active" ? row.fillLowQty : row.fillHighQty',
+        # Active is funded to the size sized for the completion target, not
+        # to a second, more optimistic or pessimistic bound.
+        self.assertIn('row.mode === "active" ? row.qty : row.fillHighQty',
                       self.source)
         self.assertIn("reachableQty * rowUnitCapital(row)", self.source)
         self.assertIn("o.config.maxPositionCapital ?? o.config.capital", self.source)

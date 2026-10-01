@@ -138,7 +138,9 @@ HOURS_PER_DAY = 24.0
 # A flip is two sequential legs sharing one window: you cannot list the sell
 # until the buy has filled. Sizing an offer against the whole window therefore
 # guarantees the sell leg has no time left in it — the buy consumes the horizon
-# and the round trip never completes. Each leg gets half. DERIVED.
+# and the round trip never completes. Active scoring models the legs in
+# sequence (see score_flip): a quick buy leaves the sell more time, rather than
+# each leg receiving a fixed half. DERIVED.
 LEGS_PER_ROUND_TRIP = 2
 
 # /timeseries at 6h buckets, two weeks back. Kept as the default lookback, but
@@ -213,6 +215,36 @@ class Calibration:
     fill_rate_log_sigma: float = 0.75
     max_completion_probability: float = 0.99
 
+    # fill_rate_log_sigma prices queue position. It never covered the error in
+    # forecasting the next hours' side volume from the volume the model was
+    # handed, and that error is measurable from data already on disk. On
+    # 2026-10-01, cached /timeseries gave log(next-2h rate / last-1h volume) a
+    # per-series standard deviation of median 0.46 (22 items, 5m buckets over
+    # ~30h) and 0.81 (5 items, 1h buckets over 15 days — the only sample that
+    # spans the whole daily cycle); a 24h EWMA, the archive path, measured
+    # 0.50-0.58 on the same 15 days. The two errors are independent, so they
+    # add in quadrature. CALIBRATE: refit on the tick archive once it holds
+    # weeks rather than hours, and split by liquidity if the tiers separate.
+    volume_forecast_log_sigma: float = 0.6
+    # Extra width for a rate that was never checked against 14-day history.
+    # Until the deep check measures reach, every unit of side volume is assumed
+    # to trade at our price, which is the optimistic case. A prior, not a
+    # measurement. CALIBRATE: dispersion of log(fill_share) across deep checks.
+    unverified_fill_log_sigma: float = 0.5
+    # Active sizing policy. The quantity is the largest whose FULL round trip
+    # completes before the deadline with this probability, and an Active flip
+    # that cannot reach it even at one unit is not funded automatically. A
+    # decision threshold, not a market fact. CALIBRATE: journal exceedance of
+    # the predicted P80 should come out near 1 - this value.
+    active_target_completion: float = 0.80
+    # Latest "nothing has filled yet — re-check the margin" time. The model's
+    # own trigger is the buy leg's P90: if not one unit has filled by then, the
+    # forecast is wrong whatever the hidden queue discipline is, because an
+    # offer cannot complete before it starts. Long legs are capped here, the
+    # 45-minute operational rule the docs already gave. CALIBRATE: journal
+    # time-to-first-fill once offers record it.
+    reprice_check_max_minutes: float = 45.0
+
     # An unattended buy cannot create its own sell offer. Overnight therefore
     # ends with collection on return, followed by a separate liquidation
     # window. This is a workflow prior, exposed in the output rather than
@@ -231,10 +263,11 @@ class Calibration:
     # CALIBRATE: from the journal, as the fill rate of flips admitted this way.
     reference_fallback_max_divergence: float = 0.25
 
-    # Floor on how long one leg can take. Not a market property: placing an
-    # offer, returning to the GE and collecting takes a human about a minute,
-    # so no flip cycles faster than this however thick the book is. DERIVED
-    # from the interaction, not from prices.
+    # Human time per leg. Not a market property: placing an offer, returning to
+    # the GE and collecting takes a human about a minute, so no flip cycles
+    # faster than this however thick the book is. It floors the mean-rate point
+    # estimate and is added to the market time in the fill-time distribution.
+    # DERIVED from the interaction, not from prices.
     min_leg_seconds: float = 60.0
 
     # -- adverse selection --------------------------------------------------
@@ -749,7 +782,15 @@ def fill_rate(volume_per_hour: float, share: float) -> float:
 
 def expected_fill_seconds(qty: int, rate: float,
                           calibration: Calibration = DEFAULT_CALIBRATION) -> float:
-    """Mean time for one leg of `qty` units at `rate` units/second.
+    """Time for one leg of `qty` units if the rate came in exactly at `rate`.
+
+    This is the market time at the MEAN rate, not an ETA. The realised rate is
+    uncertain (see fill_estimate), and because time is quantity divided by
+    rate, a mean-one rate multiplier gives a time whose median is longer than
+    this number: with the default width only about a third of offers finish
+    by it. It was shown as the ETA and used as the ranking denominator, which
+    is how a "69 minute" flip could have a four-hour P90. Use
+    fill_time_quantile for anything shown to a player.
 
     Floored at min_leg_seconds: on a very liquid item the arithmetic says a
     small offer clears in under a second, but you still have to walk to the
@@ -792,7 +833,9 @@ def _normal_cdf(value: float) -> float:
 
 
 def fill_estimate(qty: float, rate: float, horizon_seconds: float,
-                  calibration: Calibration = DEFAULT_CALIBRATION) -> FillEstimate:
+                  calibration: Calibration = DEFAULT_CALIBRATION,
+                  sigma: Optional[float] = None,
+                  mu: Optional[float] = None) -> FillEstimate:
     """Expected partial fill and an 80% interval for a timed offer.
 
     The Wiki/RuneLite feed measures completed trades but exposes neither the
@@ -801,13 +844,21 @@ def fill_estimate(qty: float, rate: float, horizon_seconds: float,
     fills. Instead, realised throughput is ``rate * M`` where ``M`` is a
     mean-one lognormal multiplier. The integral of ``min(qty, capacity*M)``
     has a closed form, so this stays fast enough for the full item universe.
+
+    ``sigma`` is the log-width of M and ``mu`` its log-median; by default the
+    queue-position term alone, centred to mean one. score_flip passes the
+    row's full width from fill_log_sigma and the centre from fill_log_mu, and
+    the time percentiles below use the same M, so p_complete here is exactly
+    the probability that fill_time_quantile's distribution finishes in time.
     """
     requested = max(0.0, float(qty))
     if requested <= 0 or rate <= 0 or horizon_seconds <= 0:
         return FillEstimate(requested, 0.0, 0.0, 0.0, 0.0)
     capacity = rate * horizon_seconds
-    sigma = max(1e-6, float(calibration.fill_rate_log_sigma))
-    mu = -0.5 * sigma * sigma                 # E[M] = 1
+    sigma = max(1e-6, float(calibration.fill_rate_log_sigma
+                            if sigma is None else sigma))
+    if mu is None:
+        mu = -0.5 * sigma * sigma             # E[M] = 1
     threshold = requested / capacity
     log_threshold = math.log(max(threshold, 1e-300))
     z = (log_threshold - mu) / sigma
@@ -821,6 +872,192 @@ def fill_estimate(qty: float, rate: float, horizon_seconds: float,
     return FillEstimate(requested, min(requested, expected),
                         max(0.0, min(calibration.max_completion_probability,
                                      p_complete)), low, high)
+
+
+# ---------------------------------------------------------------------------
+# Fill-time distribution
+# ---------------------------------------------------------------------------
+# One leg takes   overhead + work / M,   where work = qty / rate is the market
+# time at the mean rate and M is fill_estimate's mean-one lognormal multiplier.
+# The two legs of a flip share one M. That is a modelling choice, stated: the
+# multiplier stands for how wrong the volume forecast and the queue share are,
+# and a quiet evening or a crowd we under-counted slows the buy and the sell of
+# the same item together. With one M, round-trip percentiles are the sums of
+# leg percentiles and every number below is a closed form both ports compute
+# identically. Treating the legs as independent would average the two errors
+# away and shorten the tail — the optimistic direction for a deadline.
+
+ETA_PERCENTILES = (0.50, 0.80, 0.90)
+
+
+def normal_quantile(probability: float) -> float:
+    """Inverse standard normal CDF (Acklam; relative error below 1.2e-9).
+
+    A rational approximation rather than a solver so that the browser port
+    evaluates the same arithmetic and the two cannot drift apart.
+    """
+    p = min(max(float(probability), 1e-12), 1.0 - 1e-12)
+    a = (-3.969683028665376e+01, 2.209460984245205e+02,
+         -2.759285104469687e+02, 1.383577518672690e+02,
+         -3.066479806614716e+01, 2.506628277459239e+00)
+    b = (-5.447609879822406e+01, 1.615858368580409e+02,
+         -1.556989798598866e+02, 6.680131188771972e+01,
+         -1.328068155288572e+01)
+    c = (-7.784894002430293e-03, -3.223964580411365e-01,
+         -2.400758277161838e+00, -2.549732539343734e+00,
+         4.374664141464968e+00, 2.938163982698783e+00)
+    d = (7.784695709041462e-03, 3.224671290700398e-01,
+         2.445134137142996e+00, 3.754408661907416e+00)
+    low = 0.02425
+    if p < low or p > 1.0 - low:
+        q = math.sqrt(-2.0 * math.log(p if p < low else 1.0 - p))
+        value = ((((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q
+                  + c[5])
+                 / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0))
+        return value if p < low else -value
+    q = p - 0.5
+    r = q * q
+    return ((((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r
+             + a[5]) * q
+            / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r
+               + 1.0))
+
+
+def fill_log_sigma(calibration: Calibration = DEFAULT_CALIBRATION,
+                   verified: bool = False) -> float:
+    """Total log-width of the fill-rate multiplier for one row.
+
+    Queue position and the volume forecast are separate errors and both are
+    always present. A row whose reach was not checked against 14-day history
+    carries a third term, so thin evidence widens the time band — and through
+    the target-completion sizing, shrinks the quantity and the score — instead
+    of being taken at face value.
+    """
+    parts = [calibration.fill_rate_log_sigma,
+             calibration.volume_forecast_log_sigma]
+    if not verified:
+        parts.append(calibration.unverified_fill_log_sigma)
+    return math.sqrt(sum(max(0.0, float(part)) ** 2 for part in parts))
+
+
+# score_flip takes a keyword of the same name; keep a handle on the function.
+_row_fill_log_sigma = fill_log_sigma
+
+
+def fill_log_mu(calibration: Calibration = DEFAULT_CALIBRATION) -> float:
+    """Log-median of the rate multiplier.
+
+    Only the queue-position prior is centred to mean one, as it always was.
+    The volume-forecast error is centred where it was measured: the log ratio
+    of next-hours to last-hour volume had a median of -0.07 to +0.16 across
+    the liquidity tiers, so its median is one, not its mean. Centring the
+    whole width to mean one would push every median ETA out by the evidence
+    term even though the data shows no such bias — wider tails, same middle.
+    """
+    s = max(0.0, float(calibration.fill_rate_log_sigma))
+    return -0.5 * s * s
+
+
+def leg_work_seconds(qty: float, rate: float) -> float:
+    """Market time at the mean rate, without the human overhead."""
+    if qty <= 0:
+        return 0.0
+    if rate <= 0:
+        return float("inf")
+    return float(qty) / rate
+
+
+def fill_time_quantile(work_seconds: float, probability: float, sigma: float,
+                       overhead_seconds: float = 0.0,
+                       mu: Optional[float] = None) -> float:
+    """Time by which overhead + work/M has finished with ``probability``.
+
+    With the queue term centred to mean one the median is work *
+    exp(queue_sigma^2 / 2), longer than ``work`` itself: time is quantity over
+    rate, and dividing by an uncertain rate skews the time upward even though
+    the rate is unbiased. ``mu`` defaults to mean-one for the whole width.
+    """
+    if work_seconds <= 0:
+        return float(overhead_seconds)
+    if not math.isfinite(work_seconds):
+        return float("inf")
+    s = max(1e-6, float(sigma))
+    centre = -0.5 * s * s if mu is None else float(mu)
+    return (overhead_seconds + work_seconds
+            * math.exp(-centre + s * normal_quantile(probability)))
+
+
+def expected_occupancy_seconds(work_seconds: float, deadline_seconds: float,
+                               sigma: float,
+                               overhead_seconds: float = 0.0,
+                               mu: Optional[float] = None) -> float:
+    """E[min(overhead + work/M, deadline)]: how long the slot is really held.
+
+    An offer that has not completed by the deadline is cancelled, so the slot
+    is occupied until completion or the deadline, whichever comes first. This
+    is the ranking denominator, and expected profit (fill_estimate over the
+    same deadline) is its numerator: the two expectations are taken over the
+    same M, which the old mean-rate denominator was not.
+    """
+    deadline = max(0.0, float(deadline_seconds))
+    if deadline <= overhead_seconds:
+        return deadline
+    if work_seconds <= 0:
+        return float(overhead_seconds)
+    if not math.isfinite(work_seconds):
+        return deadline
+    s = max(1e-6, float(sigma))
+    centre = -0.5 * s * s if mu is None else float(mu)
+    room = deadline - overhead_seconds
+    log_mean = math.log(work_seconds) - centre          # of X = work / M
+    log_room = math.log(room)
+    within = (math.exp(log_mean + 0.5 * s * s)
+              * _normal_cdf((log_room - log_mean - s * s) / s))
+    beyond = room * (1.0 - _normal_cdf((log_room - log_mean) / s))
+    return overhead_seconds + within + beyond
+
+
+def round_trip_rate(buy_rate: float, sell_rate: float) -> float:
+    """Units per second through both legs in sequence: 1/(1/buy + 1/sell)."""
+    if buy_rate <= 0 or sell_rate <= 0:
+        return 0.0
+    return 1.0 / (1.0 / buy_rate + 1.0 / sell_rate)
+
+
+def target_quantity(rate: float, usable_seconds: float, target: float,
+                    sigma: float, mu: Optional[float] = None) -> int:
+    """Largest quantity that completes inside ``usable_seconds`` with
+    probability ``target`` at ``rate`` under the shared multiplier.
+
+    The old sizing filled the horizon at the MEAN rate, which within the
+    model's own distribution completes about a third of the time.
+    """
+    if rate <= 0 or usable_seconds <= 0:
+        return 0
+    s = max(1e-6, float(sigma))
+    centre = -0.5 * s * s if mu is None else float(mu)
+    capacity = rate * usable_seconds
+    return max(0, int(capacity * math.exp(centre
+                                          - s * normal_quantile(target))))
+
+
+def reprice_check_seconds(buy_work_seconds: float, sigma: float,
+                          calibration: Calibration = DEFAULT_CALIBRATION
+                          ) -> float:
+    """When an untouched buy offer stops being evidence of a slow fill and
+    becomes evidence that the forecast is wrong.
+
+    The public feed shows neither the queue nor our place in it, so a model
+    of when the first unit fills would be invented. What can be said without
+    one: a buy cannot complete before it starts, so if not one unit has
+    filled by the buy leg's P90, the 90% forecast has already failed under any
+    queue discipline. Long legs are capped by the operational rule.
+    """
+    cap = calibration.reprice_check_max_minutes * 60.0
+    p90 = fill_time_quantile(buy_work_seconds, 0.90, sigma,
+                             calibration.min_leg_seconds,
+                             fill_log_mu(calibration))
+    return max(calibration.min_leg_seconds, min(cap, p90))
 
 
 def buy_limit_windows(horizon_hours: float) -> int:
@@ -1249,6 +1486,18 @@ class ScoreBreakdown:
 
     alch_arbitrage_gp: Optional[int] = None   # per item, if below the floor
 
+    # Fill-time distribution. buy_seconds, sell_seconds and total_seconds above
+    # are the MEDIANS of the same distribution; the ETA band and the
+    # occupancy are taken from it too, so what is shown, what p_fill measures
+    # and what the ranking divides by can no longer disagree.
+    fill_log_sigma: float = 0.0
+    round_trip_p50_seconds: float = 0.0
+    round_trip_p80_seconds: float = 0.0
+    round_trip_p90_seconds: float = 0.0
+    expected_occupancy_seconds: float = 0.0
+    reprice_check_seconds: float = 0.0     # nothing bought by then: re-check
+    cancel_by_seconds: float = 0.0         # round trip not done: cancel rest
+
     def factors(self) -> Dict[str, float]:
         """Flat name -> value map, for journal recording and error attribution."""
         values = {
@@ -1290,6 +1539,7 @@ def score_flip(
     mode: TradeMode = DEFAULT_TRADE_MODE,
     horizon_hours: Optional[float] = None,
     capital_per_unit: Optional[int] = None,
+    fill_log_sigma: Optional[float] = None,
     calibration: Calibration = DEFAULT_CALIBRATION,
 ) -> ScoreBreakdown:
     """Expected gp per slot-hour for one flip, with its decomposition.
@@ -1301,6 +1551,11 @@ def score_flip(
     item's real traded volume: the deep check passes REACHABLE volume for the
     two legs, and deriving the crowd from that would let a low fill share make
     the queue look shorter, which is exactly backwards.
+
+    `fill_log_sigma` is the width of the shared rate multiplier for this row;
+    by default the unverified width, the conservative case. Active completion,
+    expected quantities, ETA percentiles and the ranking's occupancy all come
+    from that one distribution of the sequential round trip.
     """
     mid = (buy + sell) / 2.0
     # New callers pass the ACTUAL price improvements represented by ``buy``
@@ -1321,9 +1576,24 @@ def score_flip(
 
     buy_rate = fill_rate(buy_volume_1h, buy_share)
     sell_rate = fill_rate(sell_volume_1h, sell_share)
-    buy_seconds = expected_fill_seconds(qty, buy_rate, calibration)
-    sell_seconds = expected_fill_seconds(qty, sell_rate, calibration)
+    sigma_fill = (_row_fill_log_sigma(calibration) if fill_log_sigma is None
+                  else max(1e-6, float(fill_log_sigma)))
+    mu_fill = fill_log_mu(calibration)
+    overhead = calibration.min_leg_seconds
+    buy_work = leg_work_seconds(qty, buy_rate)
+    sell_work = leg_work_seconds(qty, sell_rate)
+    trip_work = buy_work + sell_work
+    # Medians, not mean-rate times: see expected_fill_seconds for why the
+    # latter finished only a third of the time.
+    buy_seconds = fill_time_quantile(buy_work, 0.50, sigma_fill, overhead,
+                                     mu_fill)
+    sell_seconds = fill_time_quantile(sell_work, 0.50, sigma_fill, overhead,
+                                      mu_fill)
     total_seconds = buy_seconds + sell_seconds
+    trip_p80 = fill_time_quantile(trip_work, 0.80, sigma_fill, 2 * overhead,
+                                  mu_fill)
+    trip_p90 = fill_time_quantile(trip_work, 0.90, sigma_fill, 2 * overhead,
+                                  mu_fill)
 
     mode = TradeMode(mode)
     effective_horizon = (float(horizon_hours) if horizon_hours is not None
@@ -1335,11 +1605,12 @@ def score_flip(
     horizon_seconds = effective_horizon * SECONDS_PER_HOUR
     liquidation_hours = 0.0
     if mode is TradeMode.OVERNIGHT:
-        buy_fill = fill_estimate(qty, buy_rate, horizon_seconds, calibration)
+        buy_fill = fill_estimate(qty, buy_rate, horizon_seconds, calibration,
+                                 sigma_fill, mu_fill)
         liquidation_hours = calibration.overnight_liquidation_hours
         sell_fill = fill_estimate(buy_fill.expected, sell_rate,
                                   liquidation_hours * SECONDS_PER_HOUR,
-                                  calibration)
+                                  calibration, sigma_fill, mu_fill)
         expected_buy_qty = buy_fill.expected
         expected_sell_qty = sell_fill.expected
         p_buy = buy_fill.p_complete
@@ -1350,20 +1621,39 @@ def score_flip(
         p_stranded = ((expected_buy_qty - expected_sell_qty) / qty
                       if qty > 0 else 0.0)
         fill_low, fill_high = buy_fill.low, buy_fill.high
+        occupancy_deadline = (horizon_seconds
+                              + liquidation_hours * SECONDS_PER_HOUR)
     else:
-        leg_seconds = horizon_seconds / LEGS_PER_ROUND_TRIP
-        buy_fill = fill_estimate(qty, buy_rate, leg_seconds, calibration)
-        sell_fill = fill_estimate(buy_fill.expected, sell_rate, leg_seconds,
-                                  calibration)
-        sell_full = fill_estimate(qty, sell_rate, leg_seconds, calibration)
+        # The legs are sequential: the sell starts when the buy is done, so a
+        # quick buy leaves the sell more time. The old version gave each leg a
+        # fixed half of the window and multiplied two independent completion
+        # odds, while the shown ETA came from a third, mean-rate calculation.
+        # Now there is one event — the whole quantity bought AND sold by the
+        # deadline — and one distribution behind it. Buying q then selling q
+        # takes q/rate_rt of market time, so the existing closed form gives the
+        # completed round-trip quantity directly.
+        usable = max(0.0, horizon_seconds - LEGS_PER_ROUND_TRIP * overhead)
+        trip_fill = fill_estimate(qty, round_trip_rate(buy_rate, sell_rate),
+                                  usable, calibration, sigma_fill, mu_fill)
+        buy_fill = fill_estimate(qty, buy_rate,
+                                 max(0.0, horizon_seconds - overhead),
+                                 calibration, sigma_fill, mu_fill)
+        sell_alone = fill_estimate(qty, sell_rate,
+                                   max(0.0, horizon_seconds - overhead),
+                                   calibration, sigma_fill, mu_fill)
+        sell_fill = trip_fill
         expected_buy_qty = buy_fill.expected
-        expected_sell_qty = sell_fill.expected
+        expected_sell_qty = trip_fill.expected
         p_buy = buy_fill.p_complete
-        p_sell = sell_full.p_complete
-        p_both = p_buy * p_sell
-        p_stranded = ((expected_buy_qty - expected_sell_qty) / qty
+        p_sell = sell_alone.p_complete
+        p_both = trip_fill.p_complete
+        # Bought by the deadline but not yet sold: inventory to carry or dump.
+        p_stranded = (max(0.0, expected_buy_qty - expected_sell_qty) / qty
                       if qty > 0 else 0.0)
-        fill_low, fill_high = sell_fill.low, sell_fill.high
+        fill_low, fill_high = trip_fill.low, trip_fill.high
+        occupancy_deadline = horizon_seconds
+    occupancy = expected_occupancy_seconds(
+        trip_work, occupancy_deadline, sigma_fill, 2 * overhead, mu_fill)
 
     sigma = sigma_daily if sigma_daily is not None else (
         ou_fit.sigma if ou_fit is not None else calibration.default_sigma_daily)
@@ -1378,7 +1668,9 @@ def score_flip(
     floor = alch_floor(highalch, nature_rune_cost)
     distance = alch_distance(buy, floor)
     alch = alch_bonus(distance, calibration)
-    update = update_risk_factor(now, total_seconds, calibration)
+    # Exposure to the weekly update is the time a slow trip may still be open,
+    # so the P80 rather than the median.
+    update = update_risk_factor(now, trip_p80, calibration)
 
     raw_profit = margin * qty
     completed_profit = margin * expected_sell_qty
@@ -1405,7 +1697,10 @@ def score_flip(
                            * alch * update)
         expected = completed_value - downside_risk
 
-    hours = total_seconds / SECONDS_PER_HOUR
+    # Active: renewal reward. Expected completed profit over expected slot
+    # occupancy, both taken over the same multiplier and the same deadline.
+    hours = ((occupancy if mode is TradeMode.ACTIVE else total_seconds)
+             / SECONDS_PER_HOUR)
     per_slot_hour = expected / hours if hours > 0 and hours != float("inf") else 0.0
     ranking_value = (per_slot_hour if mode is TradeMode.ACTIVE else expected)
 
@@ -1431,7 +1726,15 @@ def score_flip(
         expected_profit=expected, gp_per_slot_hour=per_slot_hour,
         ranking_value=ranking_value, downside_risk_gp=downside_risk,
         mode=mode, horizon_hours=effective_horizon,
-        alch_arbitrage_gp=arbitrage)
+        alch_arbitrage_gp=arbitrage,
+        fill_log_sigma=sigma_fill,
+        round_trip_p50_seconds=total_seconds,
+        round_trip_p80_seconds=trip_p80,
+        round_trip_p90_seconds=trip_p90,
+        expected_occupancy_seconds=occupancy,
+        reprice_check_seconds=reprice_check_seconds(buy_work, sigma_fill,
+                                                    calibration),
+        cancel_by_seconds=min(trip_p90, horizon_seconds))
 
 
 # ---------------------------------------------------------------------------

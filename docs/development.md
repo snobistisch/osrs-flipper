@@ -38,6 +38,7 @@ working from the repository root. To run one module:
 | Tests | Coverage |
 |---|---|
 | `test_engine.py`, `test_stats.py`, `test_filters.py`, `test_merch.py` | Pricing, tax, statistics, limits, selection, and signals |
+| `test_fill_time.py` | Fill-time distribution: P50/P80/P90 bands, completion odds, sequential legs, sizing, consistency, and the censored journal backtest |
 | `test_api.py`, `test_agent.py`, `test_journal.py` | API behavior, agent output/state, and trade outcomes |
 | `test_audit.py` | Regression cases for invalid data, arithmetic, archive integrity, and persistence |
 | `test_app.py` | Streamlit landing page and dashboard smoke tests |

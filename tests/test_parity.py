@@ -144,6 +144,36 @@ class ParityTests(unittest.TestCase):
                 self.assertClose(getattr(python, field), browser[key],
                                  "{} {}".format(case, field))
 
+    def test_fill_time_distribution_matches(self):
+        sigma = engine.fill_log_sigma(verified=True)
+        mu = engine.fill_log_mu()
+        cases = []
+        for p in (0.02, 0.1, 0.5, 0.8, 0.9, 0.975, 0.999):
+            cases.append(("normalQuantile({})".format(p),
+                          engine.normal_quantile(p)))
+        for verified in (False, True):
+            cases.append(("fillLogSigma({})".format(str(verified).lower()),
+                          engine.fill_log_sigma(verified=verified)))
+        for work in (0.0, 30.0, 1_800.0, 20_000.0):
+            for p in engine.ETA_PERCENTILES:
+                cases.append(("fillTimeQuantile({}, {}, {}, 120, {})".format(
+                    work, p, sigma, mu),
+                    engine.fill_time_quantile(work, p, sigma, 120, mu)))
+            cases.append(("expectedOccupancySeconds({}, 14400, {}, 120, {})"
+                          .format(work, sigma, mu),
+                          engine.expected_occupancy_seconds(
+                              work, 14_400, sigma, 120, mu)))
+            cases.append(("repriceCheckSeconds({}, {})".format(work, sigma),
+                          engine.reprice_check_seconds(work, sigma)))
+        for rate in (0.0, 0.01, 0.4, 25.0):
+            cases.append(("targetQuantity({}, 14280, 0.8, {}, {})".format(
+                rate, sigma, mu),
+                engine.target_quantity(rate, 14_280, 0.8, sigma, mu)))
+        cases.append(("roundTripRate(0.5, 2)", engine.round_trip_rate(0.5, 2)))
+        results = js(*(expression for expression, _ in cases))
+        for (expression, python), browser in zip(cases, results):
+            self.assertClose(python, browser, expression)
+
     def test_score_flip_matches_in_both_strategies(self):
         mids = [p for p in (engine._bucket_vwap([point]) for point in history(3))
                 if p is not None]
@@ -191,7 +221,14 @@ class ParityTests(unittest.TestCase):
                     ("expected_profit", "expected"),
                     ("gp_per_slot_hour", "perSlotHour"),
                     ("ranking_value", "rankingValue"),
-                    ("downside_risk_gp", "downsideRisk")):
+                    ("downside_risk_gp", "downsideRisk"),
+                    ("total_seconds", "totalSeconds"),
+                    ("fill_log_sigma", "fillLogSigma"),
+                    ("round_trip_p80_seconds", "roundTripP80Seconds"),
+                    ("round_trip_p90_seconds", "roundTripP90Seconds"),
+                    ("expected_occupancy_seconds", "expectedOccupancySeconds"),
+                    ("reprice_check_seconds", "repriceCheckSeconds"),
+                    ("cancel_by_seconds", "cancelBySeconds")):
                 # A hundredth of a gp: a difference of two near-equal fill
                 # quantities magnifies the CDF approximation, never a real gp.
                 self.assertClose(getattr(python, field), browser[key],

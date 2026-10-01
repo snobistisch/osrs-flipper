@@ -528,26 +528,45 @@ class AllocationStageTests(unittest.TestCase):
         acts1 = {i: act_1h(avg_low=100, avg_high=q.high,
                            high_volume=500, low_volume=500)
                  for i, q in quotes.items()}
-        cfg = filters.FilterConfig(capital=20_000)
+        # Small enough that the bank, not the market, binds the funded size.
+        cfg = filters.FilterConfig(capital=5_000)
         screened = filters.screen(items, quotes, acts5, acts1, cfg, NOW,
                                   NO_EXEMPTIONS)
         before = {r.item_id: r for r in screened.rows}
         allocated = filters.allocate(screened, cfg)
-        row = next(r for r in allocated.rows if (r.allocated_quantity or 0) > 0)
+        row = next(r for r in allocated.rows
+                   if 0 < (r.allocated_quantity or 0)
+                   < before[r.item_id].qty_per_window)
         old = before[row.item_id]
         linear = old.expected_gp * row.allocated_quantity / old.qty_per_window
         self.assertNotAlmostEqual(row.allocated_expected_gp, linear, places=4)
 
-    def test_active_allocation_uses_the_conservative_fill_bound(self):
+    def test_active_allocation_funds_the_target_completion_size(self):
+        # Active quantity is sized so the whole round trip completes by the
+        # deadline with the target probability. Funding it must not quietly
+        # re-size against a different bound, and the funded row must still
+        # meet the target it was sized for.
         cfg = filters.FilterConfig(capital=10_000_000,
                                    trade_mode=engine.TradeMode.ACTIVE)
         row = one(capital=cfg.capital).rows[0]
-        row = dataclasses.replace(
-            row, fill_low_qty=3.9, fill_high_qty=100.0,
-            capital_needed=100 * row.buy)
         result = filters.allocate(
             filters.ScreenResult(rows=[row], funnel={}), cfg)
-        self.assertEqual(result.rows[0].allocated_quantity, 3)
+        funded = result.rows[0]
+        self.assertEqual(funded.allocated_quantity, row.qty_per_window)
+        self.assertGreaterEqual(funded.p_fill + 1e-9,
+                                cfg.calibration.active_target_completion)
+
+    def test_active_flip_below_the_completion_target_is_not_funded(self):
+        cfg = filters.FilterConfig(capital=10_000_000,
+                                   trade_mode=engine.TradeMode.ACTIVE)
+        slow = one(capital=cfg.capital, acts_1h={1: act_1h(
+            high_volume=2, low_volume=2)}).rows[0]
+        self.assertLess(slow.p_fill, cfg.calibration.active_target_completion)
+        self.assertTrue(any(note.startswith("fill odds:")
+                            for note in slow.warnings))
+        result = filters.allocate(
+            filters.ScreenResult(rows=[slow], funnel={}), cfg)
+        self.assertIsNone(result.rows[0].allocated_quantity)
 
     def test_overnight_allocation_can_use_the_upper_fill_bound(self):
         cfg = filters.FilterConfig(capital=10_000_000,
@@ -607,8 +626,10 @@ class VolumeLookupTests(unittest.TestCase):
                                   volume_lookup=lambda _: (200.0, 200.0))
         self.assertEqual(live.rows[0].thin_volume_1h, 4_800)
         self.assertEqual(smoothed.rows[0].thin_volume_1h, 200)
-        self.assertGreater(smoothed.rows[0].expected_total_seconds,
-                           live.rows[0].expected_total_seconds)
+        # Less volume, same completion target: a smaller order, not a
+        # longer one that misses the deadline.
+        self.assertLess(smoothed.rows[0].qty_per_window,
+                        live.rows[0].qty_per_window)
 
     def test_a_lookup_that_knows_nothing_falls_back(self):
         cfg = filters.FilterConfig(capital=10_000_000)
