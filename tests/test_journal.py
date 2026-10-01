@@ -24,11 +24,11 @@ class JournalTests(unittest.TestCase):
         self.j.open_flip("Lobster", quantity=50, buy_price=88)
         self.assertIsNone(journal.realised_profit(self.j.rows()[0]))
 
-    def test_bond_flip_is_tax_free(self):
+    def test_bond_flip_includes_conversion_fee(self):
         flip_id = self.j.open_flip("Old school bond", quantity=1,
                                    buy_price=4_800_000, item_id=13190)
         self.j.close_flip(flip_id, sell_price=5_000_000)
-        self.assertEqual(journal.realised_profit(self.j.rows()[0]), 200_000)
+        self.assertEqual(journal.realised_profit(self.j.rows()[0]), -300_000)
 
     def test_closing_twice_fails(self):
         flip_id = self.j.open_flip("Coal", quantity=10, buy_price=150)

@@ -116,6 +116,8 @@ class FlipRow:
     ofi: float               # order-flow imbalance over the last hour
     quote_age: int
     tax_exempt: bool
+    bond: bool
+    bond_fee: int
     sell_listed_at: int      # where to actually list: free undercut at tax steps
 
     # fill model
@@ -317,7 +319,7 @@ def _concession_points(maximum: int) -> List[int]:
 
 
 def _optimise_execution(
-    *, base_buy: int, base_sell: int, tax_exempt: bool,
+    *, base_buy: int, base_sell: int, tax_exempt: bool, bond: bool = False,
     limit: Optional[int], available_capital: int,
     buy_volume_1h: float, sell_volume_1h: float,
     quote_age: int, ofi: float, drift: float, now: float,
@@ -331,7 +333,7 @@ def _optimise_execution(
     closes the old loophole where maximum affordable priority supplied the fill
     probability while untouched prices supplied the profit.
     """
-    free_sell = engine.tax_boundary_undercut(base_sell, tax_exempt)
+    free_sell = engine.tax_boundary_undercut(base_sell, tax_exempt, bond)
     max_total = max(0, base_sell - base_buy - 1)
     buy_points = _concession_points(max_total)
     sell_points = _concession_points(max(0, max_total - (base_sell - free_sell)))
@@ -342,12 +344,14 @@ def _optimise_execution(
     original_spread = max(1, base_sell - base_buy)
     for buy_improvement in buy_points:
         buy = base_buy + buy_improvement
-        affordable = available_capital // buy if buy > 0 else 0
-        if affordable <= 0:
-            continue
         for extra_sell in sell_points:
             sell = free_sell - extra_sell
-            margin = engine.net_margin(buy, sell, tax_exempt)
+            unit_capital = buy + engine.bond_conversion_fee(sell, bond)
+            affordable = (available_capital // unit_capital
+                          if unit_capital > 0 else 0)
+            if affordable <= 0:
+                continue
+            margin = engine.net_margin(buy, sell, tax_exempt, bond)
             if margin <= 0:
                 continue
             sell_improvement = base_sell - sell
@@ -380,6 +384,7 @@ def _optimise_execution(
                 sell_improvement=sell_improvement,
                 buy_share=buy_share, sell_share=sell_share,
                 mode=config.trade_mode, horizon_hours=config.horizon_hours,
+                capital_per_unit=buy + engine.bond_conversion_fee(sell, bond),
                 calibration=config.calibration)
             if breakdown.ranking_value > best_value:
                 best_value = breakdown.ranking_value
@@ -443,21 +448,23 @@ def _evaluate(
     buy, sell = priced.buy, priced.sell
 
     tax_exempt = item_id in exempt
-    margin = engine.net_margin(buy, sell, tax_exempt)
+    bond = item_id == exemptions.BOND_ID
+    margin = engine.net_margin(buy, sell, tax_exempt, bond)
     if margin <= 0:
         return "margin not positive"
 
-    affordable = available_capital // buy if buy > 0 else 0
+    affordable = available_capital // (
+        buy + engine.bond_conversion_fee(sell, bond)) if buy > 0 else 0
     if affordable == 0:
         return "cannot afford one"
 
-    depth = engine.undercut_depth(buy, sell, tax_exempt)
+    depth = engine.undercut_depth(buy, sell, tax_exempt, bond)
     crowd = engine.touch_competitors(thin_volume, item.limit,
                                      config.calibration)
     drift = engine.price_drift(_mid(act_5m), _mid(act_1h))
     ofi = engine.order_flow_imbalance(high_vol_1h, low_vol_1h)
     choice = _optimise_execution(
-        base_buy=buy, base_sell=sell, tax_exempt=tax_exempt,
+        base_buy=buy, base_sell=sell, tax_exempt=tax_exempt, bond=bond,
         limit=item.limit, available_capital=available_capital,
         buy_volume_1h=low_vol_1h, sell_volume_1h=high_vol_1h,
         quote_age=age, ofi=ofi, drift=drift, now=now,
@@ -465,21 +472,24 @@ def _evaluate(
     if choice is None:
         return "margin not positive"
     buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice
-    margin = engine.net_margin(buy, sell, tax_exempt)
-    affordable = available_capital // buy
+    margin = engine.net_margin(buy, sell, tax_exempt, bond)
+    affordable = available_capital // (
+        buy + engine.bond_conversion_fee(sell, bond))
 
     floor = engine.alch_floor(item.highalch, config.nature_rune_cost)
     return FlipRow(
         item_id=item_id, name=item.name, buy=buy, sell=sell,
         latest_low=quote.low, latest_high=quote.high,
         tax=engine.ge_tax(sell, tax_exempt), margin=margin,
-        roi=engine.roi(buy, sell, tax_exempt),
+        roi=engine.roi(buy, sell, tax_exempt, bond),
         limit=item.limit, members=bool(item.members),
         thin_volume_1h=thin_volume, qty_per_window=qty,
         volume_1h_total=int(high_vol_1h + low_vol_1h),
         capital_needed=breakdown.capital_needed,
         gross_profit=breakdown.raw_profit, undercut_depth=depth,
         drift=drift, ofi=ofi, quote_age=age, tax_exempt=tax_exempt,
+        bond=bond,
+        bond_fee=engine.bond_conversion_fee(sell, bond),
         sell_listed_at=sell,
         expected_buy_seconds=breakdown.buy_seconds,
         expected_sell_seconds=breakdown.sell_seconds,
@@ -612,7 +622,8 @@ def refine_with_history(
         long_execution = engine.execution_evidence_view(
             points, rescored.tax_exempt, rescored.margin,
             engine.HISTORY_BUCKET_HOURS,
-            engine.HISTORY_WINDOW_BUCKETS * engine.HISTORY_BUCKET_HOURS)
+            engine.HISTORY_WINDOW_BUCKETS * engine.HISTORY_BUCKET_HOURS,
+            rescored.bond)
         rows[index] = replace(rescored, long_execution=long_execution)
 
     if fetch_recent is not None:
@@ -627,7 +638,7 @@ def refine_with_history(
                 continue
             recent = engine.execution_evidence_view(
                 points, row.tax_exempt, row.margin, 5 / 60,
-                engine.RECENT_EXECUTION_HOURS)
+                engine.RECENT_EXECUTION_HOURS, row.bond)
             rows[by_id[row.item_id]] = replace(row, recent_execution=recent)
 
     rows, shrinkage = _apply_shrinkage(rows, config)
@@ -680,7 +691,7 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
                 else row.alch_floor + config.nature_rune_cost)
     choice = _optimise_execution(
         base_buy=row.base_buy or row.buy, base_sell=row.base_sell or row.sell,
-        tax_exempt=row.tax_exempt, limit=row.limit,
+        tax_exempt=row.tax_exempt, bond=row.bond, limit=row.limit,
         available_capital=config.capital,
         buy_volume_1h=reachable_buy, sell_volume_1h=reachable_sell,
         quote_age=row.quote_age, ofi=row.ofi, drift=row.drift, now=now,
@@ -690,13 +701,14 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         return replace(row, deep_checked=True, warnings=row.warnings + (
             "history left no positive concrete execution price",))
     buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice
-    margin = engine.net_margin(buy, sell, row.tax_exempt)
+    margin = engine.net_margin(buy, sell, row.tax_exempt, row.bond)
 
     return replace(
         row,
         buy=buy, sell=sell, sell_listed_at=sell,
-        tax=engine.ge_tax(sell, row.tax_exempt), margin=margin,
-        roi=engine.roi(buy, sell, row.tax_exempt),
+        tax=engine.ge_tax(sell, row.tax_exempt),
+        bond_fee=engine.bond_conversion_fee(sell, row.bond), margin=margin,
+        roi=engine.roi(buy, sell, row.tax_exempt, row.bond),
         qty_per_window=qty, capital_needed=breakdown.capital_needed,
         gross_profit=breakdown.raw_profit,
         expected_buy_seconds=breakdown.buy_seconds,

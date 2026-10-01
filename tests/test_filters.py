@@ -351,6 +351,17 @@ class PreferenceTests(unittest.TestCase):
 
 
 class ExemptionTests(unittest.TestCase):
+    def test_bond_conversion_fee_can_reject_an_apparent_spread(self):
+        result = screen(
+            {exemptions.BOND_ID: item(exemptions.BOND_ID,
+                                      name="Old school bond")},
+            {exemptions.BOND_ID: quote(high=5_000_000, low=4_800_000)},
+            {exemptions.BOND_ID: act_5m(avg_high=5_000_000,
+                                        avg_low=4_800_000)},
+            {exemptions.BOND_ID: act_1h(avg_high=5_000_000,
+                                        avg_low=4_800_000)})
+        self.assertEqual(result.funnel["margin not positive"], 1)
+
     def test_an_exempt_item_keeps_the_whole_spread(self):
         exempt = exemptions.ExemptionSet((1,))
         cfg = filters.FilterConfig(capital=10_000_000)

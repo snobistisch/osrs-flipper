@@ -379,7 +379,10 @@ def realised_profit(row) -> Optional[int]:
     if row["sell_price"] is None:
         return None
     exempt = _row_is_exempt(row)
-    margin = engine.net_margin(row["buy_price"], row["sell_price"], exempt)
+    bond = (row["item_id"] == exemptions.BOND_ID
+            or str(row["item_name"]).strip().lower() == "old school bond")
+    margin = engine.net_margin(row["buy_price"], row["sell_price"], exempt,
+                               bond)
     return margin * row["quantity"]
 
 

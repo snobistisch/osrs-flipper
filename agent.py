@@ -361,6 +361,7 @@ def flip_to_dict(row: filters.FlipRow) -> dict:
         "edge_probability": round(row.edge_probability, 3),
         "buy_limit": row.limit, "volume_1h": row.thin_volume_1h,
         "tax_exempt": row.tax_exempt,
+        "bond_fee": row.bond_fee,
         "deep_checked": row.deep_checked,
         "allocated_capital": row.allocated_capital,
         "warnings": list(row.warnings),

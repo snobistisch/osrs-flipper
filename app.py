@@ -467,8 +467,9 @@ def detail_view(row):
                                     row.sell_listed_at))
     mid.metric("Margin after tax", "{:,} gp".format(row.margin),
                delta="{:.1%} ROI".format(row.roi), delta_color="off",
-               help="Tax on this sell price: {:,} gp{}".format(
-                   row.tax, " (tax-exempt item)" if row.tax_exempt else ""))
+               help="GE tax: {:,} gp; bond conversion fee: {:,} gp{}".format(
+                   row.tax, row.bond_fee,
+                   " (GE-tax-exempt item)" if row.tax_exempt else ""))
     active = row.trade_mode is engine.TradeMode.ACTIVE
     if active:
         right.metric("Round trip",

@@ -29,6 +29,8 @@ Conventions:
   side fills near the instant-buy price ("high").
 - Tax as of 29 May 2025: seller pays 2% rounded down, capped at 5m per item.
   Sub-50 gp sells are untaxed because floor(price * 0.02) is 0 there.
+- OSRS bonds pay no GE tax, but converting one back to tradeable status costs
+  10% of its current sale value.
 """
 from __future__ import annotations
 
@@ -44,6 +46,7 @@ import stats
 
 TAX_RATE = 0.02
 TAX_CAP = 5_000_000
+BOND_FEE_RATE = 0.10
 
 # The GE tax rounds down, so every 50 gp of sell price is one more gp of tax.
 # At a tax step only, the preceding price nets the same revenue. Other
@@ -537,6 +540,11 @@ def executable_prices(
     return Executable(reference_buy, reference_sell, True)
 
 
+def bond_conversion_fee(sell_price: int, bond: bool = False) -> int:
+    """Fee to convert an OSRS bond back to tradeable status."""
+    return int(sell_price * BOND_FEE_RATE) if bond else 0
+
+
 def ge_tax(sell_price: int, tax_exempt: bool = False) -> int:
     """Tax the seller pays on one item."""
     if tax_exempt:
@@ -544,24 +552,29 @@ def ge_tax(sell_price: int, tax_exempt: bool = False) -> int:
     return min(TAX_CAP, sell_price // TAX_STEP)
 
 
-def net_revenue(sell_price: int, tax_exempt: bool = False) -> int:
-    """What the seller actually receives."""
-    return sell_price - ge_tax(sell_price, tax_exempt)
+def net_revenue(sell_price: int, tax_exempt: bool = False,
+                bond: bool = False) -> int:
+    """What the seller actually receives after GE costs."""
+    return (sell_price - ge_tax(sell_price, tax_exempt)
+            - bond_conversion_fee(sell_price, bond))
 
 
-def net_margin(buy_price: int, sell_price: int, tax_exempt: bool = False) -> int:
-    """Profit on one item after tax. Negative when the spread can't cover tax."""
-    return net_revenue(sell_price, tax_exempt) - buy_price
+def net_margin(buy_price: int, sell_price: int, tax_exempt: bool = False,
+               bond: bool = False) -> int:
+    """Profit after GE tax and any bond conversion fee."""
+    return net_revenue(sell_price, tax_exempt, bond) - buy_price
 
 
-def roi(buy_price: int, sell_price: int, tax_exempt: bool = False) -> float:
+def roi(buy_price: int, sell_price: int, tax_exempt: bool = False,
+        bond: bool = False) -> float:
     """Net margin as a fraction of capital tied up per item."""
     if buy_price <= 0:
         return 0.0
-    return net_margin(buy_price, sell_price, tax_exempt) / buy_price
+    return net_margin(buy_price, sell_price, tax_exempt, bond) / buy_price
 
 
-def tax_boundary_undercut(sell_price: int, tax_exempt: bool = False) -> int:
+def tax_boundary_undercut(sell_price: int, tax_exempt: bool = False,
+                          bond: bool = False) -> int:
     """Lowest sell price with the same net revenue as `sell_price`.
 
     At a tax step, two adjacent prices net the same: 100 and 99 both net
@@ -572,26 +585,28 @@ def tax_boundary_undercut(sell_price: int, tax_exempt: bool = False) -> int:
     Returns the price unchanged when it is already at the bottom of its band,
     when it is exempt, or when it is below the taxable threshold.
     """
-    if tax_exempt or sell_price <= 0:
+    if (tax_exempt and not bond) or sell_price <= 0:
         return sell_price
-    target = net_revenue(sell_price, tax_exempt)
+    target = net_revenue(sell_price, tax_exempt, bond)
     # The band cannot be wider than one tax step, so this walks at most TAX_STEP
     # prices even at the 5m cap.
     candidate = sell_price
-    while candidate > 1 and net_revenue(candidate - 1, tax_exempt) >= target:
+    while (candidate > 1
+           and net_revenue(candidate - 1, tax_exempt, bond) >= target):
         candidate -= 1
     return candidate
 
 
-def break_even_sell(buy_price: int, tax_exempt: bool = False) -> int:
+def break_even_sell(buy_price: int, tax_exempt: bool = False,
+                    bond: bool = False) -> int:
     """Cheapest sell price that clears a profit of at least 1 gp per item."""
-    if tax_exempt:
+    if tax_exempt and not bond:
         return buy_price + 1
     # Search the monotone net proceeds, including the capped-tax region.
     low, high = buy_price + 1, buy_price + TAX_CAP + 1
     while low < high:
         middle = (low + high) // 2
-        if net_revenue(middle) > buy_price:
+        if net_revenue(middle, tax_exempt, bond) > buy_price:
             high = middle
         else:
             low = middle + 1
@@ -602,7 +617,8 @@ def break_even_sell(buy_price: int, tax_exempt: bool = False) -> int:
 # Queue position
 # ---------------------------------------------------------------------------
 
-def undercut_depth(buy: int, sell: int, tax_exempt: bool = False) -> int:
+def undercut_depth(buy: int, sell: int, tax_exempt: bool = False,
+                   bond: bool = False) -> int:
     """How many gp of price improvement you can afford on each side at once
     while the flip still profits.
 
@@ -623,12 +639,12 @@ def undercut_depth(buy: int, sell: int, tax_exempt: bool = False) -> int:
     fill rate — how far ahead of the queue you can buy your way is precisely
     what determines how fast you fill.
     """
-    if net_margin(buy, sell, tax_exempt) <= 0:
+    if net_margin(buy, sell, tax_exempt, bond) <= 0:
         return 0
     lo, hi = 0, max(0, (sell - buy) // 2 + 1)
     while lo < hi:                      # binary search: margin falls with k
         mid = (lo + hi + 1) // 2
-        if net_margin(buy + mid, sell - mid, tax_exempt) > 0:
+        if net_margin(buy + mid, sell - mid, tax_exempt, bond) > 0:
             lo = mid
         else:
             hi = mid - 1
@@ -1259,6 +1275,7 @@ def score_flip(
     sell_share: Optional[float] = None,
     mode: TradeMode = DEFAULT_TRADE_MODE,
     horizon_hours: Optional[float] = None,
+    capital_per_unit: Optional[int] = None,
     calibration: Calibration = DEFAULT_CALIBRATION,
 ) -> ScoreBreakdown:
     """Expected gp per slot-hour for one flip, with its decomposition.
@@ -1383,7 +1400,8 @@ def score_flip(
         arbitrage = floor - buy
 
     return ScoreBreakdown(
-        qty=qty, margin=margin, raw_profit=raw_profit, capital_needed=qty * buy,
+        qty=qty, margin=margin, raw_profit=raw_profit,
+        capital_needed=qty * (capital_per_unit or buy),
         buy_share=buy_share, sell_share=sell_share,
         buy_rate=buy_rate, sell_rate=sell_rate,
         buy_seconds=buy_seconds, sell_seconds=sell_seconds,
@@ -1760,7 +1778,7 @@ class ExecutionEvidenceView:
 
 def execution_evidence_view(
     points: List[dict], tax_exempt: bool, live_margin: int,
-    bucket_hours: float, window_hours: float,
+    bucket_hours: float, window_hours: float, bond: bool = False,
 ) -> Optional[ExecutionEvidenceView]:
     """Measure repeatable edge without treating market volume as our fills."""
     valid = [point for point in points if isinstance(point, dict)]
@@ -1785,7 +1803,7 @@ def execution_evidence_view(
         return None
 
     margins = [net_margin(int(round(point["avgLowPrice"])),
-                          int(round(point["avgHighPrice"])), tax_exempt)
+                          int(round(point["avgHighPrice"])), tax_exempt, bond)
                for point in traded]
     profitable = sum(margin > 0 for margin in margins)
     positive_share = (profitable + 2) / (len(traded) + 4)

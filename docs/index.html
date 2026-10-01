@@ -1025,6 +1025,8 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
 
 const TAX_RATE = 0.02;
 const TAX_CAP = 5_000_000;
+const BOND_FEE_RATE = 0.10;
+const BOND_ID = 13190;
 const WINDOW_HOURS = 4;                    // the buy-limit window
 const F2P_SLOTS = 3;
 const MEMBER_SLOTS = 8;
@@ -1153,23 +1155,28 @@ const legHorizonHours = (horizonHours = CAL.horizon_hours) =>
 
 /* ---- tax ---- */
 
+const bondConversionFee = (sell, bond = false) =>
+  bond ? Math.floor(sell * BOND_FEE_RATE) : 0;
+
 const geTax = (sell, exempt) =>
   exempt ? 0 : Math.min(TAX_CAP, Math.floor(sell / Math.round(1 / TAX_RATE)));
 
-const netRevenue = (sell, exempt) => sell - geTax(sell, exempt);
+const netRevenue = (sell, exempt, bond = false) =>
+  sell - geTax(sell, exempt) - bondConversionFee(sell, bond);
 
-const netMargin = (buy, sell, exempt) => netRevenue(sell, exempt) - buy;
+const netMargin = (buy, sell, exempt, bond = false) =>
+  netRevenue(sell, exempt, bond) - buy;
 
-const roi = (buy, sell, exempt) =>
-  buy <= 0 ? 0 : netMargin(buy, sell, exempt) / buy;
+const roi = (buy, sell, exempt, bond = false) =>
+  buy <= 0 ? 0 : netMargin(buy, sell, exempt, bond) / buy;
 
 /* Only at a tax step do adjacent prices net the same: 100 and 99 net 98.
    Further cuts lose proceeds, and no free tick exists above the tax cap. */
-function taxBoundaryUndercut(sell, exempt) {
-  if (exempt || sell <= 0) return sell;
-  const target = netRevenue(sell, exempt);
+function taxBoundaryUndercut(sell, exempt, bond = false) {
+  if ((exempt && !bond) || sell <= 0) return sell;
+  const target = netRevenue(sell, exempt, bond);
   let candidate = sell;
-  while (candidate > 1 && netRevenue(candidate - 1, exempt) >= target) candidate--;
+  while (candidate > 1 && netRevenue(candidate - 1, exempt, bond) >= target) candidate--;
   return candidate;
 }
 
@@ -1242,12 +1249,12 @@ function executablePrices(latestLow, latestHigh, refLow, refHigh) {
    Depth is no longer a score multiplier of its own. It is the input to the
    fill rate — how far ahead of the queue you can buy your way is precisely
    what determines how fast you fill. */
-function undercutDepth(buy, sell, exempt) {
-  if (netMargin(buy, sell, exempt) <= 0) return 0;
+function undercutDepth(buy, sell, exempt, bond = false) {
+  if (netMargin(buy, sell, exempt, bond) <= 0) return 0;
   let lo = 0, hi = Math.max(0, Math.floor((sell - buy) / 2) + 1);
   while (lo < hi) {                        // binary search: margin falls with k
     const mid = Math.ceil((lo + hi) / 2);
-    if (netMargin(buy + mid, sell - mid, exempt) > 0) lo = mid;
+    if (netMargin(buy + mid, sell - mid, exempt, bond) > 0) lo = mid;
     else hi = mid - 1;
   }
   return lo;
@@ -1700,7 +1707,8 @@ function scoreFlip(o) {
   const rankingValue = mode === "overnight" ? expected : perSlotHour;
 
   return {
-    qty: o.qty, margin: o.margin, rawProfit, capitalNeeded: o.qty * o.buy,
+    qty: o.qty, margin: o.margin, rawProfit,
+    capitalNeeded: o.qty * (o.capitalPerUnit ?? o.buy),
     buyShare, sellShare, buySeconds, sellSeconds, totalSeconds, pFillBuy: pBuy,
     pFillSell: pSell, pFill: pBoth, pStranded,
     expectedRoundTripQty: sellFill.expected,
@@ -1875,7 +1883,8 @@ function positionCapitalCeiling(row, maxPerPosition, bankRiskPercent) {
   const fillBound = baseQty + (modelledQty - baseQty) * riskBlend;
   const reachableQty = Math.max(1, Math.floor(Number.isFinite(fillBound)
     ? fillBound : (row.qty || 1)));
-  return Math.min(row.capitalNeeded, maxPerPosition, reachableQty * row.buy);
+  return Math.min(row.capitalNeeded, maxPerPosition,
+    reachableQty * (row.buy + (row.bondFee || 0)));
 }
 
 function rescoreAllocated(r) {
@@ -1890,6 +1899,7 @@ function rescoreAllocated(r) {
     buyImprovement: r.buyImprovement, sellImprovement: r.sellImprovement,
     buyShare: r.buyShare, sellShare: r.sellShare,
     mode: r.mode, horizonHours: r.horizonHours,
+    capitalPerUnit: r.buy + (r.bondFee || 0),
   });
   r.qty = r.allocatedQty; r.capitalNeeded = b.capitalNeeded; r.gross = b.rawProfit;
   r.buySeconds = b.buySeconds; r.sellSeconds = b.sellSeconds;
@@ -2081,7 +2091,7 @@ function historyView(rawPoints, buy, sell) {
    This is deliberately evidence about the score, not a second profit model:
    scoreFlip still owns fill time and expected gp/h. */
 function executionEvidenceView(rawPoints, exempt, liveMargin, bucketHours,
-                               windowHours) {
+                               windowHours, bond = false) {
   const valid = rawPoints.filter((p) => p && typeof p === "object");
   if (!valid.length) return null;
   const timestamps = valid.map((p) => Number(p.timestamp)).filter(Number.isFinite);
@@ -2096,7 +2106,7 @@ function executionEvidenceView(rawPoints, exempt, liveMargin, bucketHours,
   if (!traded.length) return null;
 
   const margins = traded.map((p) => netMargin(
-    Math.round(p.avgLowPrice), Math.round(p.avgHighPrice), exempt));
+    Math.round(p.avgLowPrice), Math.round(p.avgHighPrice), exempt, bond));
   const profitableBuckets = margins.filter((margin) => margin > 0).length;
   // A small symmetric prior prevents three lucky buckets from looking like a
   // perfect market. Twelve separate traded buckets are enough for full weight.
@@ -3120,7 +3130,7 @@ function concessionPoints(maximum) {
 }
 
 function optimiseExecution(o) {
-  const freeSell = taxBoundaryUndercut(o.baseSell, o.exempt);
+  const freeSell = taxBoundaryUndercut(o.baseSell, o.exempt, o.bond);
   const maxTotal = Math.max(0, o.baseSell - o.baseBuy - 1);
   const originalSpread = Math.max(1, o.baseSell - o.baseBuy);
   const limit = effectiveBuyLimit(o.limit, o.config.horizonHours, o.config.strategy);
@@ -3129,11 +3139,12 @@ function optimiseExecution(o) {
     const buy = o.baseBuy + buyImprovement;
     const positionBank = Math.min(o.config.capital,
       o.config.maxPositionCapital ?? o.config.capital);
-    const affordable = Math.floor(positionBank / buy);
-    if (affordable <= 0) continue;
     for (const extraSell of concessionPoints(Math.max(0, maxTotal - (o.baseSell - freeSell)))) {
       const sell = freeSell - extraSell;
-      const margin = netMargin(buy, sell, o.exempt);
+      const capitalPerUnit = buy + bondConversionFee(sell, o.bond);
+      const affordable = Math.floor(positionBank / capitalPerUnit);
+      if (affordable <= 0) continue;
+      const margin = netMargin(buy, sell, o.exempt, o.bond);
       if (margin <= 0) continue;
       const sellImprovement = o.baseSell - sell;
       const buyShare = aggressiveness(priceEdge(buyImprovement, originalSpread), o.competitors);
@@ -3145,7 +3156,8 @@ function optimiseExecution(o) {
       const qty = Math.max(1, flippableQty(limit, capacity, affordable));
       const breakdown = scoreFlip({ ...o, buy, sell, margin, qty, depth: 0,
         buyImprovement, sellImprovement, buyShare, sellShare,
-        mode: o.config.strategy, horizonHours: o.config.horizonHours });
+        mode: o.config.strategy, horizonHours: o.config.horizonHours,
+        capitalPerUnit });
       if (best == null || breakdown.rankingValue > best.breakdown.rankingValue) {
         best = { buy, sell, margin, qty, buyImprovement, sellImprovement,
           buyShare, sellShare, breakdown };
@@ -3194,20 +3206,22 @@ function screen(items, quotes, act5m, act1h, config, now) {
       executablePrices(low, high, refLow, refHigh);
 
     const exempt = Boolean(item.exempt);
-    const touchMargin = netMargin(baseBuy, baseSell, exempt);
+    const bond = id === BOND_ID;
+    const touchMargin = netMargin(baseBuy, baseSell, exempt, bond);
     if (touchMargin <= 0) { funnel["margin not positive"]++; continue; }
 
     const positionBank = Math.min(config.capital,
       config.maxPositionCapital ?? config.capital);
-    const affordable = Math.floor(positionBank / baseBuy);
+    const affordable = Math.floor(positionBank /
+      (baseBuy + bondConversionFee(baseSell, bond)));
     if (affordable === 0) { funnel["cannot afford one"]++; continue; }
 
-    const depth = undercutDepth(baseBuy, baseSell, exempt);
+    const depth = undercutDepth(baseBuy, baseSell, exempt, bond);
     const crowd = touchCompetitors(thinVolume, item.limit);
     const drift = priceDrift(bucketMid(a5m), bucketMid(a1h));
     const ofi = orderFlowImbalance(highVol1h, lowVol1h);
     const choice = optimiseExecution({
-      baseBuy, baseSell, exempt, limit: item.limit, config,
+      baseBuy, baseSell, exempt, bond, limit: item.limit, config,
       buyVolume1h: lowVol1h,
       sellVolume1h: highVol1h, quoteAge: age, ofi, drift, now, competitors: crowd,
       highalch: item.highalch, natureCost: config.natureCost,
@@ -3221,7 +3235,8 @@ function screen(items, quotes, act5m, act1h, config, now) {
       id, name: item.name, icon: item.icon, buy, sell, latestLow: low, latestHigh: high,
       listAt: sell, baseBuy, baseSell, buyImprovement, sellImprovement,
       buyShare, sellShare,
-      tax: geTax(sell, exempt), exempt, margin, roi: roi(buy, sell, exempt),
+      tax: geTax(sell, exempt), bondFee: bondConversionFee(sell, bond),
+      exempt, bond, margin, roi: roi(buy, sell, exempt, bond),
       limit: item.limit, volume: thinVolume, qty, drift, ofi, age, depth,
       members: item.members, pricedFromReference,
       // Both sides, so it can be compared against the 14-day average bucket
@@ -3315,6 +3330,7 @@ async function refineTopRows(rows, config, now) {
       const crowd = touchCompetitors(row.volume, row.limit);
       const choice = optimiseExecution({
         baseBuy: row.baseBuy, baseSell: row.baseSell, exempt: row.exempt,
+        bond: row.bond,
         limit: row.limit, config,
         buyVolume1h: reachableBuy, sellVolume1h: reachableSell, competitors: crowd,
         quoteAge: row.age, ofi: row.ofi, drift: row.drift, now,
@@ -3329,7 +3345,9 @@ async function refineTopRows(rows, config, now) {
 
       row.deep = true;
       row.buy = buy; row.sell = sell; row.listAt = sell; row.margin = margin;
-      row.tax = geTax(sell, row.exempt); row.roi = roi(buy, sell, row.exempt);
+      row.tax = geTax(sell, row.exempt);
+      row.bondFee = bondConversionFee(sell, row.bond);
+      row.roi = roi(buy, sell, row.exempt, row.bond);
       row.buyImprovement = buyImprovement; row.sellImprovement = sellImprovement;
       row.buyShare = buyShare; row.sellShare = sellShare;
       row.qty = qty;
@@ -3373,7 +3391,7 @@ async function refineTopRows(rows, config, now) {
       row.regimeScore = view.regimeScore;
       row.longExecution = executionEvidenceView(historyPoints, row.exempt,
         row.margin, HISTORY_BUCKET_HOURS,
-        HISTORY_WINDOW_BUCKETS * HISTORY_BUCKET_HOURS);
+        HISTORY_WINDOW_BUCKETS * HISTORY_BUCKET_HOURS, row.bond);
       // Crash context, from data the deep check already paid for. The baseline
       // is the 14-day average bucket converted to an hourly rate, so both
       // sides of the ratio are units per hour.
@@ -3401,7 +3419,7 @@ async function refineTopRows(rows, config, now) {
       try {
         const points = await fetchTimeseries(row.id, RECENT_EXECUTION_TIMESTEP);
         row.recentExecution = executionEvidenceView(points, row.exempt,
-          row.margin, 5 / 60, RECENT_EXECUTION_HOURS);
+          row.margin, 5 / 60, RECENT_EXECUTION_HOURS, row.bond);
       } catch { /* 14-day execution evidence remains available */ }
     }
   });
@@ -3786,7 +3804,8 @@ function renderExecutions() {
       : targetLive ? "Target price is live now"
         : `${num(x.sell - liveSell)} gp/item below your target`;
     const exempt = state.exemptIds?.has(Number(x.itemId)) || false;
-    const targetProfit = (netRevenue(x.sell, exempt) - x.buy) * x.qty;
+    const bond = Number(x.itemId) === BOND_ID;
+    const targetProfit = (netRevenue(x.sell, exempt, bond) - x.buy) * x.qty;
     return `<article class="active-flip-card" data-execution="${escapeHtml(x.key)}">
       <div class="plan-rank">SAVED FLIP · ${new Date(x.createdAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</div>
       <h3>${escapeHtml(x.name)}</h3>
@@ -4606,7 +4625,8 @@ function renderPortfolio() {
     // Value at what a sale nets: what buyers are bidding, minus GE tax.
     const current = quote && quote.low ? quote.low : null;
     const exempt = state.exemptIds ? state.exemptIds.has(h.id) : false;
-    const net = current == null ? null : netRevenue(current, exempt);
+    const bond = h.id === BOND_ID;
+    const net = current == null ? null : netRevenue(current, exempt, bond);
     const pnl = net == null ? null : (net - h.buy) * h.qty;
     if (pnl == null) missing++; else total += pnl;
     const days = (Date.now() - h.at) / 86400000;
@@ -4645,7 +4665,7 @@ function showDetail(id) {
     `raw quote ${num(row.latestLow)} → ${num(row.latestHigh)} gp · list the sell at ${num(row.listAt)}`;
   $("#d-margin").textContent = num(row.margin) + " gp";
   $("#d-roi").textContent =
-    `${(row.roi * 100).toFixed(1)}% ROI · ${row.exempt ? "tax-exempt item" : num(row.tax) + " gp tax"}`;
+    `${(row.roi * 100).toFixed(1)}% ROI · ${row.bond ? num(row.bondFee) + " gp bond fee" : row.exempt ? "tax-exempt item" : num(row.tax) + " gp tax"}`;
   $("#d-trip").textContent = formatDuration(row.totalSeconds);
   $("#d-trip-sub").textContent = row.mode === "overnight"
     ? `${num(Math.round(row.expectedBuyQty))} expected by return (${num(Math.round(row.fillLowQty))}–${num(Math.round(row.fillHighQty))}); then ${row.liquidationHours}h sell window`

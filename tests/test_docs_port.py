@@ -99,6 +99,7 @@ class PortSyncTests(unittest.TestCase):
     def test_tax_constants_match(self):
         for js_name, expected in (("TAX_RATE", engine.TAX_RATE),
                                   ("TAX_CAP", engine.TAX_CAP),
+                                  ("BOND_FEE_RATE", engine.BOND_FEE_RATE),
                                   ("WINDOW_HOURS", engine.WINDOW_HOURS),
                                   ("LEGS_PER_ROUND_TRIP", engine.LEGS_PER_ROUND_TRIP)):
             match = re.search(
@@ -191,7 +192,7 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("function positionCapitalCeiling(", self.source)
         self.assertIn('row.mode === "active" ? row.fillLowQty : row.fillHighQty',
                       self.source)
-        self.assertIn("reachableQty * row.buy", self.source)
+        self.assertIn("reachableQty * (row.buy", self.source)
         self.assertIn("o.config.maxPositionCapital ?? o.config.capital", self.source)
         self.assertIn("/ ${formatGp(config.capital)} COMMITTED", self.source)
 

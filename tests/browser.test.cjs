@@ -45,6 +45,8 @@ test('tax thresholds, cap and free undercut preserve exact proceeds', () => {
       run(`netRevenue(${sell}, false)`));
   }
   assert.equal(run('geTax(1800000000, true)'), 0);
+  assert.equal(run('bondConversionFee(5000000, true)'), 500000);
+  assert.equal(run('netMargin(4800000, 5000000, true, true)'), -300000);
   assert.throws(() => run('parseGp("999999999999999999999b")'));
   assert.equal(run('parseGp("1.0005k")'), 1001);
 });

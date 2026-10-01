@@ -227,6 +227,10 @@ instead of ranking anyway.
   teleport tablets — was charged 2% it does not owe, which is most of the
   spread on a 200 gp lobster, and biased the ranking against exactly the items
   a capital-constrained free-to-play flipper lives on.
+- **A bond is not free to flip.** Bonds pay no GE tax, but a bond bought from
+  the GE must be converted back to tradeable status before resale. The model
+  deducts the 10% conversion fee from net revenue and reserves that fee in the
+  required capital for the offer.
 - **Updates generally ship Wednesday around 11:30 UTC**, with a recurring
   Tuesday maintenance risk window and announced exceptions. A position still
   open when either prior lands is discounted; the app does not claim this

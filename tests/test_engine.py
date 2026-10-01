@@ -34,6 +34,11 @@ class TaxTests(unittest.TestCase):
     def test_exempt_items_pay_nothing(self):
         self.assertEqual(engine.ge_tax(10_000_000, tax_exempt=True), 0)
 
+    def test_bond_conversion_fee_is_ten_percent_of_sell_value(self):
+        self.assertEqual(engine.bond_conversion_fee(5_000_000, bond=True),
+                         500_000)
+        self.assertEqual(engine.bond_conversion_fee(5_000_000), 0)
+
 
 class MarginTests(unittest.TestCase):
     def test_net_margin_subtracts_tax(self):
@@ -48,6 +53,11 @@ class MarginTests(unittest.TestCase):
 
     def test_roi_of_a_zero_price_does_not_divide_by_zero(self):
         self.assertEqual(engine.roi(0, 100), 0.0)
+
+    def test_bond_margin_includes_conversion_fee(self):
+        self.assertEqual(engine.net_margin(4_800_000, 5_000_000,
+                                          tax_exempt=True, bond=True),
+                         -300_000)
 
 
 class TaxBoundaryTests(unittest.TestCase):

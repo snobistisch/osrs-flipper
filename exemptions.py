@@ -26,6 +26,7 @@ CONFIG_PATH = Path(__file__).parent / "tax_exempt.json"
 # price is the cost side of the alchemy floor (§10.1) — read from /latest
 # rather than hardcoded, because it drifts with the rune market.
 NATURE_RUNE_ID = 561
+BOND_ID = 13190
 
 # Used only when /latest has no nature rune quote. Roughly its long-run level.
 NATURE_RUNE_FALLBACK = 100
