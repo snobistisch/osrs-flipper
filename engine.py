@@ -541,8 +541,18 @@ def executable_prices(
 
 
 def bond_conversion_fee(sell_price: int, bond: bool = False) -> int:
-    """Fee to convert an OSRS bond back to tradeable status."""
-    return int(sell_price * BOND_FEE_RATE) if bond else 0
+    """Fee to convert an OSRS bond back to tradeable status.
+
+    The game charges 10% of the bond's guide price; the sell price is the
+    closest per-offer estimate of it available here. Integer division keeps
+    the result exact at every price, unlike multiplying by a float rate.
+    """
+    return sell_price // int(round(1 / BOND_FEE_RATE)) if bond else 0
+
+
+def unit_capital(buy_price: int, sell_price: int, bond: bool = False) -> int:
+    """Cash one unit ties up: the buy price plus any bond conversion fee."""
+    return buy_price + bond_conversion_fee(sell_price, bond)
 
 
 def ge_tax(sell_price: int, tax_exempt: bool = False) -> int:
@@ -602,8 +612,12 @@ def break_even_sell(buy_price: int, tax_exempt: bool = False,
     """Cheapest sell price that clears a profit of at least 1 gp per item."""
     if tax_exempt and not bond:
         return buy_price + 1
-    # Search the monotone net proceeds, including the capped-tax region.
-    low, high = buy_price + 1, buy_price + TAX_CAP + 1
+    # Net proceeds are monotone, but the gap to the buy price is not bounded by
+    # the tax cap: the bond fee is uncapped. Grow the bracket until it holds a
+    # profitable price, then binary-search inside it.
+    low, high = buy_price + 1, buy_price + 1
+    while net_revenue(high, tax_exempt, bond) <= buy_price:
+        low, high = high + 1, high * 2
     while low < high:
         middle = (low + high) // 2
         if net_revenue(middle, tax_exempt, bond) > buy_price:

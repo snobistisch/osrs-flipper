@@ -22,6 +22,13 @@ import filters
 import merch
 
 
+def _non_negative_int(text):
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be zero or more")
+    return value
+
+
 def parse_args(argv):
     p = argparse.ArgumentParser(
         description="Build an executable GE plan for active or overnight trading")
@@ -41,8 +48,9 @@ def parse_args(argv):
                    default=engine.DEFAULT_OVERNIGHT_HOURS,
                    help="unattended horizon (default: 8; useful presets "
                         "are 6, 8, 10 and 12)")
-    p.add_argument("--top", type=int, default=20, help="rows to show")
-    p.add_argument("--deep", type=int, default=15,
+    p.add_argument("--top", type=_non_negative_int, default=20,
+                   help="rows to show")
+    p.add_argument("--deep", type=_non_negative_int, default=15,
                    help="deep-check this many top candidates against 14 days "
                         "of /timeseries history (0 disables). Three times this "
                         "many are actually fetched, so the deep stage can "
@@ -75,7 +83,8 @@ def parse_args(argv):
     view.add_argument("--max-price", type=engine.parse_gp, default=None,
                       help="max buy price per item, e.g. 10k or 1m")
     view.add_argument("--tax-free", action="store_true",
-                      help="only flips that pay zero GE tax (sell under 50 gp)")
+                      help="only flips that pay zero GE tax: sells under "
+                           "50 gp and items in tax_exempt.json")
     view.add_argument("--no-bots", action="store_true",
                       help="hide bot-supplied f2p staples: free-to-play, buy "
                            "limit over 10,000, under 100 gp")
@@ -205,6 +214,12 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
 
 def main(argv=None):
     opts = parse_args(argv if argv is not None else sys.argv[1:])
+    try:
+        # Validate the profile before spending any API requests on it.
+        config_from(opts, exemptions.NATURE_RUNE_FALLBACK)
+    except ValueError as exc:
+        print("Error: {}".format(exc), file=sys.stderr)
+        return 2
     client = api.WikiClient()
     try:
         items = client.mapping()
@@ -228,7 +243,7 @@ def main(argv=None):
             store = archive.Archive(path)
             summary = store.summary()
             if summary["buckets"]:
-                volume_lookup = _archive_lookup(store)
+                volume_lookup = archive.volume_lookup(store)
                 archive_note = "archive: {:.1f} days, {:,} bucket rows".format(
                     summary["days"], summary["buckets"])
             else:
@@ -265,15 +280,6 @@ def main(argv=None):
             store.close()
     return 0
 
-
-def _archive_lookup(store):
-    """(buyer-initiated, seller-initiated) units/hour, smoothed over days."""
-    def lookup(item_id):
-        estimate = store.volume_ewma(item_id)
-        if estimate is None or not estimate.usable:
-            return None
-        return estimate.high_per_hour, estimate.low_per_hour
-    return lookup
 
 
 if __name__ == "__main__":

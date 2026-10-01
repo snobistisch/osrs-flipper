@@ -346,7 +346,7 @@ def _optimise_execution(
         buy = base_buy + buy_improvement
         for extra_sell in sell_points:
             sell = free_sell - extra_sell
-            unit_capital = buy + engine.bond_conversion_fee(sell, bond)
+            unit_capital = engine.unit_capital(buy, sell, bond)
             affordable = (available_capital // unit_capital
                           if unit_capital > 0 else 0)
             if affordable <= 0:
@@ -384,7 +384,7 @@ def _optimise_execution(
                 sell_improvement=sell_improvement,
                 buy_share=buy_share, sell_share=sell_share,
                 mode=config.trade_mode, horizon_hours=config.horizon_hours,
-                capital_per_unit=buy + engine.bond_conversion_fee(sell, bond),
+                capital_per_unit=unit_capital,
                 calibration=config.calibration)
             if breakdown.ranking_value > best_value:
                 best_value = breakdown.ranking_value
@@ -453,8 +453,8 @@ def _evaluate(
     if margin <= 0:
         return "margin not positive"
 
-    affordable = available_capital // (
-        buy + engine.bond_conversion_fee(sell, bond)) if buy > 0 else 0
+    affordable = available_capital // engine.unit_capital(
+        buy, sell, bond) if buy > 0 else 0
     if affordable == 0:
         return "cannot afford one"
 
@@ -473,8 +473,7 @@ def _evaluate(
         return "margin not positive"
     buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice
     margin = engine.net_margin(buy, sell, tax_exempt, bond)
-    affordable = available_capital // (
-        buy + engine.bond_conversion_fee(sell, bond))
+    affordable = available_capital // engine.unit_capital(buy, sell, bond)
 
     floor = engine.alch_floor(item.highalch, config.nature_rune_cost)
     return FlipRow(
@@ -809,14 +808,15 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
     for row in shortlist:
         if len(selected) >= config.slots:
             break
-        if row.ranking_value <= 0 or row.expected_gp <= 0 or row.buy > remaining_seed:
+        if (row.ranking_value <= 0 or row.expected_gp <= 0
+                or _unit_capital(row) > remaining_seed):
             continue
         # Three related slots is diversification, four is a concentrated bet.
         if category_count.get(row.category, 0) >= 3:
             continue
         selected.append(row)
         category_count[row.category] = category_count.get(row.category, 0) + 1
-        remaining_seed -= row.buy
+        remaining_seed -= _unit_capital(row)
 
     # Active sizing uses the lower 80% completed-quantity bound. Using the
     # optimistic bound let a large bank turn a fast small flip into a long
@@ -827,16 +827,18 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
                       if config.trade_mode is engine.TradeMode.ACTIVE
                       else row.fill_high_qty)
         reachable = max(1, int(fill_bound))
-        capital_caps.append(min(row.capital_needed, reachable * row.buy))
+        capital_caps.append(min(row.capital_needed,
+                                reachable * _unit_capital(row)))
     amounts = engine.allocate_portfolio(
         [row.ranking_value for row in selected], config.capital,
-        [row.buy for row in selected], capital_caps,
+        [_unit_capital(row) for row in selected], capital_caps,
         config.slots)
 
     group_used: Dict[str, int] = {}
     funded: List[FlipRow] = []
     for row, amount in zip(selected, amounts):
-        quantity = amount // row.buy if amount > 0 and row.buy > 0 else 0
+        unit = _unit_capital(row)
+        quantity = amount // unit if amount > 0 and unit > 0 else 0
         if row.limit_group and row.limit is not None:
             group_cap = engine.effective_buy_limit(
                 row.limit, config.horizon_hours, config.trade_mode) or 0
@@ -847,7 +849,7 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
             continue
         rescored = _rescore_quantity(row, quantity, config)
         funded.append(replace(
-            rescored, allocated_capital=quantity * row.buy,
+            rescored, allocated_capital=quantity * unit,
             allocated_quantity=quantity,
             allocated_expected_gp=rescored.expected_gp))
 
@@ -857,6 +859,11 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
     return ScreenResult(rows=ordered, funnel=result.funnel,
                         shrinkage=result.shrinkage,
                         deep_checked=result.deep_checked, hidden=result.hidden)
+
+
+def _unit_capital(row: FlipRow) -> int:
+    """Cash per unit, including the bond conversion fee where it applies."""
+    return row.buy + row.bond_fee
 
 
 def _rescore_quantity(row: FlipRow, quantity: int,
@@ -877,6 +884,7 @@ def _rescore_quantity(row: FlipRow, quantity: int,
         sell_improvement=row.sell_improvement,
         buy_share=row.buy_share, sell_share=row.sell_share,
         mode=config.trade_mode, horizon_hours=config.horizon_hours,
+        capital_per_unit=_unit_capital(row),
         calibration=config.calibration)
     retained = (row.ranking_value / row.raw_ranking_value
                 if row.raw_ranking_value > 0 else 1.0)

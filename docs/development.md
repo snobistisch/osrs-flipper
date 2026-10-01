@@ -18,8 +18,9 @@ node --test tests/browser.test.cjs
 ```
 
 On Windows, replace `.venv/bin/python` and `.venv/bin/ruff` with their
-`.venv\Scripts\` equivalents. GitHub Actions runs lint, Python tests, browser
-tests, and compilation on Python 3.9 and 3.13 with Node 22.
+`.venv\Scripts\` equivalents. GitHub Actions runs lint, dependency checks,
+Python tests, browser tests, and compilation on Python 3.9 and 3.13 with
+Node 22.
 
 There is no separate build step or configured static type checker. Ruff checks
 correctness rules for imports, syntax, and undefined names without imposing a
@@ -41,6 +42,7 @@ working from the repository root. To run one module:
 | `test_audit.py` | Regression cases for invalid data, arithmetic, archive integrity, and persistence |
 | `test_app.py` | Streamlit landing page and dashboard smoke tests |
 | `test_docs_port.py` | Shared Python/JavaScript constants and static browser guards |
+| `test_parity.py` | Executable Python/JavaScript parity: tax, fees, fills, scores, shrinkage, history and execution choice (needs Node; skipped without it) |
 | `browser.test.cjs` | Executable browser behavior and compilation of the complete inline script |
 
 The Streamlit tests skip when dashboard dependencies are missing. Install
@@ -52,8 +54,10 @@ test runner and need no npm dependencies.
 Python interfaces share `engine.py`, `stats.py`, and `filters.py`. The standalone
 browser app carries its own JavaScript implementation in `docs/index.html`.
 Update both when changing formulas or shared configuration. Static guards
-check constants and key structures; executable tests cover critical behavior,
-but do not prove complete numerical parity of every statistical model.
+check constants and key structures. `test_parity.py` runs the same inputs
+through both implementations and compares the results; extend it whenever a
+shared formula changes. Browser-only gates (automatic plan selection, bank-risk
+sizing, saved reservations) are intentionally not mirrored in Python.
 
 Keep browser requests compatible with CORS: do not add a `User-Agent` header.
 The Python client supplies one; customize `USER_AGENT` in `api.py` when deploying
@@ -74,4 +78,5 @@ real browser.
 
 Model parameters remain assumptions until calibrated against recorded fills.
 See [model notes](model.md) and the historical
-[repository audit](audit-2026-09-13.md) for known limitations.
+repository audits of [September](audit-2026-09-13.md) and
+[October 2026](audit-2026-10-01.md) for known limitations.

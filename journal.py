@@ -410,7 +410,7 @@ def _row_is_exempt(row) -> bool:
     keys = row.keys()
     if "tax_exempt" in keys and row["tax_exempt"] is not None:
         return bool(row["tax_exempt"])
-    return row["item_id"] in exemptions.resolve().ids
+    return exemptions.is_exempt_item(row["item_id"], row["item_name"])
 
 
 def flip_seconds(row) -> Optional[float]:
@@ -511,8 +511,11 @@ def parse_args(argv):
     o.add_argument("--placed-at", type=int, default=None,
                    help="unix time the buy offer went in, if not now — the "
                         "gap to the fill is the buy-leg fill time")
-    o.add_argument("--tax-exempt", action="store_true",
-                   help="item pays no GE tax (see tax_exempt.json)")
+    o.add_argument("--tax-exempt", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="override whether the item pays GE tax; by default "
+                        "it is looked up by --id and --name in "
+                        "tax_exempt.json")
 
     c = sub.add_parser("close", help="record the matching filled sell offer")
     c.add_argument("flip_id", type=int)
@@ -611,11 +614,15 @@ def main(argv=None):
     journal = Journal(opts.db)
     try:
         if opts.command == "open":
+            # Record the rule in force at entry, so a later edit of the
+            # hand-maintained list cannot rewrite this flip's history.
+            tax_exempt = (opts.tax_exempt if opts.tax_exempt is not None
+                          else exemptions.is_exempt_item(opts.id, opts.name))
             flip_id = journal.open_flip(
                 opts.name, opts.qty, opts.buy, item_id=opts.id,
                 predicted_margin=opts.predicted,
                 offer_placed_at=opts.placed_at,
-                tax_exempt=opts.tax_exempt)
+                tax_exempt=tax_exempt)
             print("Opened flip {}: {} x{:,} @ {:,} gp".format(
                 flip_id, opts.name, opts.qty, opts.buy))
         elif opts.command == "close":
@@ -633,7 +640,7 @@ def main(argv=None):
             cmd_stats(journal)
         elif opts.command == "calibration":
             cmd_calibration(journal)
-    except ValueError as exc:
+    except (ValueError, sqlite3.Error) as exc:
         print("Error: {}".format(exc), file=sys.stderr)
         return 1
     finally:

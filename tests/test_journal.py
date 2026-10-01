@@ -1,5 +1,9 @@
 """Unit tests for journal.py — run with: python3 -m unittest tests.test_journal -v"""
+import io
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 from types import SimpleNamespace
 
 import engine
@@ -30,6 +34,26 @@ class JournalTests(unittest.TestCase):
         self.j.close_flip(flip_id, sell_price=5_000_000)
         self.assertEqual(journal.realised_profit(self.j.rows()[0]), -300_000)
 
+    def test_unrecorded_exemption_is_resolved_by_name(self):
+        flip_id = self.j.open_flip("Lobster", quantity=10, buy_price=100)
+        self.j.close_flip(flip_id, sell_price=110)
+        self.assertEqual(journal.realised_profit(self.j.rows()[0]), 100)
+
+    def test_cli_records_the_exemption_in_force_at_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "journal.db")
+            with redirect_stdout(io.StringIO()):
+                journal.main(["--db", db, "open", "--name", "Lobster",
+                              "--qty", "10", "--buy", "100"])
+                journal.main(["--db", db, "open", "--name", "Steel bar",
+                              "--qty", "10", "--buy", "100"])
+                journal.main(["--db", db, "open", "--name", "Lobster",
+                              "--qty", "10", "--buy", "100",
+                              "--no-tax-exempt"])
+            with journal.Journal(db) as stored:
+                self.assertEqual([row["tax_exempt"] for row in stored.rows()],
+                                 [1, 0, 0])
+
     def test_closing_twice_fails(self):
         flip_id = self.j.open_flip("Coal", quantity=10, buy_price=150)
         self.j.close_flip(flip_id, sell_price=160)
@@ -50,14 +74,16 @@ class JournalTests(unittest.TestCase):
         a = self.j.open_flip("Steel bar", 100, 950, predicted_margin=275)
         self.j.close_flip(a, 1_250)          # realised 275/item, as predicted
         b = self.j.open_flip("Lobster", 100, 88, predicted_margin=10)
-        self.j.close_flip(b, 91)             # realised 2/item, predicted 10
+        # Lobster is GE-tax exempt: realised 3/item, predicted 10. This
+        # asserted 2/item while unrecorded exemptions fell back to ids only.
+        self.j.close_flip(b, 91)
         self.j.open_flip("Coal", 10, 150)    # still open, excluded
         s = self.j.stats()
         self.assertEqual(s["flips_closed"], 2)
-        self.assertEqual(s["realised_profit"], 27_500 + 200)
+        self.assertEqual(s["realised_profit"], 27_500 + 300)
         self.assertEqual(s["flips_with_prediction"], 2)
         self.assertEqual(s["predicted_profit"], 27_500 + 1_000)
-        self.assertEqual(s["realised_on_predicted"], 27_500 + 200)
+        self.assertEqual(s["realised_on_predicted"], 27_500 + 300)
 
     def test_row_snapshot_keeps_overnight_risk_prediction(self):
         prediction = SimpleNamespace(

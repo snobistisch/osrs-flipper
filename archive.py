@@ -241,3 +241,17 @@ class Archive:
             "buckets": buckets["rows"] if buckets else 0,
             "days": span,
         }
+
+
+def volume_lookup(store: Archive):
+    """(buyer-initiated, seller-initiated) units/hour, smoothed over days.
+
+    The shape filters.screen expects as `volume_lookup`; None where the
+    archive holds too little for that item to beat the live 1-hour bucket.
+    """
+    def lookup(item_id):
+        estimate = store.volume_ewma(item_id)
+        if estimate is None or not estimate.usable:
+            return None
+        return estimate.high_per_hour, estimate.low_per_hour
+    return lookup

@@ -18,6 +18,7 @@ jobs:
         with:
           node-version: '22'
       - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip check
       - run: ruff check .
       - run: python -m unittest -q
       - run: node --test tests/browser.test.cjs

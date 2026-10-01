@@ -90,6 +90,30 @@ def _read_json(path: Path, fallback):
         return fallback
 
 
+def _positive_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _read_positions(path: Path) -> list:
+    """Portfolio entries, refusing (never repairing) a malformed record.
+
+    A position the code cannot read must stop the command with a message,
+    not crash it half-way or be dropped by the next write.
+    """
+    positions = _read_json(path, [])
+    for number, position in enumerate(positions, 1):
+        if not (isinstance(position, dict)
+                and _positive_int(position.get("item_id"))
+                and isinstance(position.get("name"), str)
+                and _positive_int(position.get("qty"))
+                and _positive_int(position.get("buy_price"))
+                and isinstance(position.get("opened_at"), (int, float))
+                and not isinstance(position.get("opened_at"), bool)):
+            raise ValueError("{}: position {} is malformed; original file "
+                             "preserved".format(path, number))
+    return positions
+
+
 def _write_json(path: Path, payload) -> None:
     """Atomic write: a killed cron job must not leave half a state file."""
     write_json(path, payload)
@@ -284,7 +308,7 @@ def rank(client: api.WikiClient, capital: int,
         nature_rune_cost=nature_cost)
 
     store = _open_archive()
-    volume_lookup = _archive_lookup(store) if store is not None else None
+    volume_lookup = archive.volume_lookup(store) if store is not None else None
 
     def fetch(item_id):
         try:
@@ -326,16 +350,6 @@ def _open_archive() -> Optional["archive.Archive"]:
         pass
     store.close()
     return None
-
-
-def _archive_lookup(store: "archive.Archive"):
-    """(buyer-initiated, seller-initiated) units/hour, smoothed over days."""
-    def lookup(item_id):
-        estimate = store.volume_ewma(item_id)
-        if estimate is None or not estimate.usable:
-            return None
-        return estimate.high_per_hour, estimate.low_per_hour
-    return lookup
 
 
 def flip_to_dict(row: filters.FlipRow) -> dict:
@@ -565,7 +579,7 @@ def cmd_portfolio(opts) -> int:
         print("Quantity must be a positive integer.", file=sys.stderr)
         return 1
     path = opts.state_dir / PORTFOLIO_FILE
-    positions = _read_json(path, [])
+    positions = _read_positions(path)
     client = api.WikiClient()
 
     if opts.action == "add":
@@ -626,8 +640,9 @@ def cmd_portfolio(opts) -> int:
     for index, position in enumerate(positions, 1):
         quote = quotes.get(position["item_id"])
         # Value the position at what a sale would actually net: the price a
-        # buyer is bidding, minus GE tax and any bond conversion fee. Marking to
-        # the instant-buy price and ignoring tax is how a losing position reads as a winning one.
+        # buyer is bidding, minus GE tax and any bond conversion fee. Marking
+        # to the instant-buy price and ignoring tax is how a losing position
+        # reads as a winning one.
         current = quote.low if quote and quote.low else None
         net = engine.net_revenue(
             current, position["item_id"] in exempt,
@@ -712,7 +727,7 @@ def cmd_status(opts) -> int:
     else:
         lines.append("last watch run: never")
 
-    positions = _read_json(opts.state_dir / PORTFOLIO_FILE, [])
+    positions = _read_positions(opts.state_dir / PORTFOLIO_FILE)
     lines.append("portfolio: {} open position{}".format(
         len(positions), "" if len(positions) == 1 else "s"))
 
@@ -727,6 +742,13 @@ def cmd_status(opts) -> int:
 # ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
+
+def _non_negative_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be zero or more")
+    return value
+
 
 def build_parser() -> argparse.ArgumentParser:
     # The shared flags go on a parent parser so they work on either side of the
@@ -770,8 +792,8 @@ def build_parser() -> argparse.ArgumentParser:
                        default=engine.DEFAULT_TRADE_MODE.value)
     flips.add_argument("--overnight-hours", type=float,
                        default=engine.DEFAULT_OVERNIGHT_HOURS)
-    flips.add_argument("--top", type=int, default=10)
-    flips.add_argument("--deep", type=int, default=15,
+    flips.add_argument("--top", type=_non_negative_int, default=10)
+    flips.add_argument("--deep", type=_non_negative_int, default=15,
                        help="candidates to deep-check against 14d history")
     flips.set_defaults(func=cmd_flips)
 

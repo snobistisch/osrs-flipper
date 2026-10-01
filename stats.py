@@ -232,6 +232,10 @@ class ShrinkageResult:
         """
         if not self.posterior_variances or index >= len(self.posterior_variances):
             return 0.5
+        if self.prior_variance <= 0:
+            # Every estimate collapsed onto the mean: no item can be told apart
+            # from it, which is a coin flip rather than a certain "no".
+            return 0.5
         variance = self.posterior_variances[index]
         if variance <= 0:
             return 1.0 if self.values[index] > self.prior_mean else 0.0

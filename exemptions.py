@@ -82,6 +82,23 @@ def resolve(items: Optional[Dict[int, object]] = None,
     return ExemptionSet(ids, wanted - seen if items else ())
 
 
+def is_exempt_item(item_id: Optional[int], name: Optional[str],
+                   config: Optional[dict] = None) -> bool:
+    """Exemption for one item without a /mapping snapshot.
+
+    Matches the configured ids and names directly, which is what an offline
+    caller such as the journal CLI can do. resolve() remains the source of
+    truth when /mapping is loaded.
+    """
+    if config is None:
+        config = load_config()
+    if item_id is not None and int(item_id) in {
+            int(i) for i in config.get("ids", [])}:
+        return True
+    wanted = {str(n).strip().lower() for n in config.get("names", [])}
+    return isinstance(name, str) and name.strip().lower() in wanted
+
+
 def freshness_warning(config: Optional[dict] = None, max_age_days: int = 90,
                       today: Optional[date] = None) -> Optional[str]:
     """Warn when the hand-maintained exemption source needs re-verification."""

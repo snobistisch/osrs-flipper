@@ -2,7 +2,9 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -12,8 +14,10 @@ from unittest import mock
 import agent
 import api
 import archive
+import cli
 import collect
 import engine
+import exemptions
 import filters
 import journal
 from storage import state_lock, write_json
@@ -191,3 +195,105 @@ class ArchiveTests(unittest.TestCase):
                 estimate = store.volume_ewma(1)
                 self.assertEqual(estimate.buckets, 2)
                 self.assertLess(estimate.high_per_hour, 50)
+
+
+class AuditOctober2026Tests(unittest.TestCase):
+    """Regressions for the findings of docs/audit-2026-10-01.md."""
+
+    NOW = 1_785_000_000.0
+
+    def bond_market(self):
+        bond = exemptions.BOND_ID
+        items = {bond: api.Item(bond, "Old school bond", False, 100, 0, None)}
+        quotes = {bond: api.Quote(10_600_000, int(self.NOW - 10),
+                                  9_000_000, int(self.NOW - 10))}
+        activity = {bond: api.Activity(10_600_000, 50_000, 9_000_000, 50_000)}
+        return items, quotes, activity
+
+    def test_bond_allocation_funds_the_conversion_fee(self):
+        items, quotes, activity = self.bond_market()
+        capital = 29_000_000
+        config = filters.FilterConfig(capital=capital, trade_mode="overnight")
+        row = filters.rank_flips(items, quotes, {}, activity, config,
+                                 self.NOW).rows[0]
+        unit = row.buy + row.bond_fee
+        self.assertGreater(row.bond_fee, 0)
+        self.assertGreater(row.allocated_quantity, 0)
+        # The fee is cash the player must hold, so it is part of the commitment.
+        self.assertEqual(row.allocated_capital, row.allocated_quantity * unit)
+        self.assertEqual(row.capital_needed, row.allocated_capital)
+        self.assertLessEqual(row.allocated_capital, capital)
+        self.assertEqual(row.allocated_quantity, capital // unit)
+
+    def test_break_even_covers_uncapped_bond_fee(self):
+        for buy in (1, 9, 10, 4_500_000, 45_000_000, 50_000_000,
+                    engine.MAX_CASH_STACK):
+            sell = engine.break_even_sell(buy, True, True)
+            self.assertGreater(engine.net_margin(buy, sell, True, True), 0)
+            self.assertLessEqual(engine.net_margin(buy, sell - 1, True, True), 0)
+
+    def test_bond_fee_is_exact_integer_arithmetic(self):
+        for sell in (9, 10, 19, 20, 4_999_999, 5_000_000, engine.MAX_CASH_STACK):
+            self.assertEqual(engine.bond_conversion_fee(sell, True), sell // 10)
+        self.assertEqual(engine.bond_conversion_fee(10_000, False), 0)
+
+    def test_indistinguishable_scores_are_a_coin_flip(self):
+        shrunk = engine.shrink_scores([100.0, 100.0, 100.0], [1e6] * 3)
+        self.assertFalse(shrunk.informative)
+        self.assertEqual(shrunk.edge_probability, [0.5, 0.5, 0.5])
+
+    def test_cli_rejects_invalid_profile_without_traceback(self):
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error), \
+                mock.patch("cli.api.WikiClient") as client:
+            self.assertEqual(cli.main(["--overnight-hours", "30"]), 2)
+        client.assert_not_called()
+        self.assertIn("overnight horizon", error.getvalue())
+
+    def test_malformed_portfolio_entry_is_reported_and_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, agent.PORTFOLIO_FILE)
+            write_json(path, [{"name": "No id", "qty": 1}])
+            original = path.read_text()
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error), \
+                    mock.patch("agent.api.WikiClient"):
+                code = agent.main(["portfolio", "--state-dir", directory,
+                                   "add", "Coal", "--qty", "1",
+                                   "--price", "100"])
+            self.assertEqual(code, 1)
+            self.assertIn("malformed", error.getvalue())
+            self.assertEqual(path.read_text(), original)
+
+    def test_expired_mapping_serves_an_outage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "mapping.json")
+            path.write_text(json.dumps([{"id": 1, "name": "Coal",
+                                         "members": False}]))
+            old = path.stat().st_mtime - 3 * api.MAPPING_MAX_AGE
+            os.utime(path, (old, old))
+            client = api.WikiClient(directory)
+            with mock.patch.object(client, "_get",
+                                   side_effect=api.ApiError("offline")):
+                self.assertEqual(client.mapping()[1].name, "Coal")
+            self.assertIn("mapping", client.stale_keys)
+            self.assertNotIn("mapping", client._memory)
+
+    def test_slow_history_fetch_does_not_block_latest(self):
+        client = api.WikiClient()
+        started, release = threading.Event(), threading.Event()
+
+        def slow():
+            started.set()
+            release.wait(5)
+            return []
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(client._cached, "ts:1:6h", 60, slow)
+            self.assertTrue(started.wait(5))
+            try:
+                self.assertEqual(client._cached("latest", 30, lambda: {1: 2}),
+                                 {1: 2})
+            finally:
+                release.set()
+            self.assertEqual(pending.result(5), [])

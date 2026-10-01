@@ -142,7 +142,7 @@ def landing():
             st.rerun()
 
 
-def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfig, int]":
+def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
     with st.sidebar:
         st.header("Trading setup")
         account = st.radio(
@@ -209,24 +209,27 @@ def sidebar_config(capital: int, nature_cost: int) -> "tuple[filters.FilterConfi
                  "well and clear fast; the supply curve is a script that "
                  "answers a price rise by producing more.")
         top_n = st.slider("Rows", 10, 100, 50, step=10)
-        st.caption("Nature rune {:,} gp (live) — the cost side of the high-alch "
-                   "floor. Prices refetch at most once per 30 s (wiki "
-                   "acceptable-use policy).".format(nature_cost))
+        st.caption("Prices refetch at most once per 30 s (wiki acceptable-use "
+                   "policy).")
 
-    def parse_price(raw):
+    def parse_price(raw, label):
+        if not raw.strip():
+            return None
         try:
             return engine.parse_gp(raw)
         except ValueError:
+            st.sidebar.warning("{} {!r} is not a gp amount, so it is ignored."
+                               .format(label, raw))
             return None
 
     return filters.FilterConfig(
         capital=capital, account=account, trade_mode=mode,
         overnight_hours=overnight_hours,
-        nature_rune_cost=nature_cost,
+        nature_rune_cost=exemptions.NATURE_RUNE_FALLBACK,
         max_quote_age=max_age or None, min_thin_volume_1h=min_vol,
         min_roi=min_roi / 100, min_undercut_depth=min_depth,
-        min_price=parse_price(min_price_raw) or 1,
-        max_price=parse_price(max_price_raw),
+        min_price=parse_price(min_price_raw, "Min price") or 1,
+        max_price=parse_price(max_price_raw, "Max price"),
         tax_free_only=tax_free, hide_botted=hide_botted), top_n
 
 
@@ -589,8 +592,8 @@ def main():
 
     # Streamlit fragments cannot write into st.sidebar. Build controls in the
     # full app run, then refresh only the market view with those settings.
-    config, top_n = sidebar_config(st.session_state.capital,
-                                   exemptions.NATURE_RUNE_FALLBACK)
+    # The nature rune is priced from /latest inside the market fragment.
+    config, top_n = sidebar_config(st.session_state.capital)
     render_market(config, top_n)
 
 
@@ -631,8 +634,11 @@ def render_market(config, top_n):
             volume_lookup=volume_lookup(), fetch_recent=fetch_recent)
 
     st.title("🪙 Grand Exchange Flipper")
-    st.caption("Live snapshot refreshed automatically every 60 seconds · {}"
-               .format(time.strftime("%H:%M:%S")))
+    rune = quotes.get(exemptions.NATURE_RUNE_ID)
+    rune_source = "live" if rune is not None and rune.high else "fallback"
+    st.caption("Live snapshot refreshed automatically every 60 seconds · {} · "
+               "nature rune {:,} gp ({}), the cost side of the high-alch floor"
+               .format(time.strftime("%H:%M:%S"), nature_cost, rune_source))
     if client.stale_keys:
         st.warning("Cached data after an API failure: {}. Verify live prices "
                    "before placing an offer.".format(

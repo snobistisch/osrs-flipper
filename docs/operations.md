@@ -31,6 +31,7 @@ The point of predictions is checking them.
 
 ```bash
 python3 journal.py open --name "Steel bar" --qty 1000 --buy 558 --predicted 6
+python3 journal.py open --name "Lobster" --qty 5000 --buy 120   # tax exemption looked up
 python3 journal.py close 1 --sell 575
 python3 journal.py cancel 2 --reason "never filled"
 python3 journal.py stats

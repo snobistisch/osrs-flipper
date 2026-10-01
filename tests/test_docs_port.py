@@ -163,7 +163,10 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("state.deepReady = true", self.source)
         self.assertIn("kept: eligible", self.source)
         self.assertIn("eligible.map((row)", self.source)
-        self.assertIn('id="filter-details" class="hidden"', self.source)
+        # The manual display filters were hidden and never read; they are gone
+        # rather than left as dead controls next to the automatic gates.
+        self.assertNotIn('id="filter-details"', self.source)
+        self.assertNotIn("function parsePriceInput(", self.source)
 
     def test_recent_repeatable_edge_changes_ranking_and_plan_quality(self):
         timestep = re.search(
@@ -192,7 +195,7 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("function positionCapitalCeiling(", self.source)
         self.assertIn('row.mode === "active" ? row.fillLowQty : row.fillHighQty',
                       self.source)
-        self.assertIn("reachableQty * (row.buy", self.source)
+        self.assertIn("reachableQty * rowUnitCapital(row)", self.source)
         self.assertIn("o.config.maxPositionCapital ?? o.config.capital", self.source)
         self.assertIn("/ ${formatGp(config.capital)} COMMITTED", self.source)
 

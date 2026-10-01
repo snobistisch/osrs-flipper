@@ -44,8 +44,17 @@ fast recycling after completion is not available while the player is offline.
 far apart, the raw number was mostly the thinness of the data. Say so rather
 than quoting the bigger one.
 
-**`edge_probability`** is the chance the item's score is not noise. Below about
-0.6, present it as a coin flip.
+**`edge_probability`** is the probability that the item's true score beats the
+market-wide average, after shrinkage. Below about 0.6, present it as a coin
+flip.
+
+**Only rows with `quantity` above 0 are the plan.** `flips` returns the funded
+slots first, then further candidates with `quantity: 0` and `capital_needed: 0`.
+Present those as alternatives, never as positions to open.
+
+**`capital_needed` is the cash to hold, not just the buy offer.** For an Old
+School bond it includes `bond_fee` per unit: bonds pay no GE tax, but each one
+costs 10% to make tradeable again, and that cash must be available.
 
 **`noise_probability` on a trend is the number to read first.** It is the share
 of items with *no trend at all* that would look at least this trendy. An item

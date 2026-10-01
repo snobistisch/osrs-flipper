@@ -103,7 +103,8 @@ node --test tests/browser.test.cjs
 GitHub Actions checks Python 3.9 and 3.13. There is no npm build. Calculation
 changes need matching Python and JavaScript updates; see
 [Development](docs/development.md) for test coverage and maintenance guidance.
-The [September 2026 audit](docs/audit-2026-09-13.md) records fixes and remaining
+The [September](docs/audit-2026-09-13.md) and
+[October 2026](docs/audit-2026-10-01.md) audits record fixes and remaining
 limitations (in Dutch).
 
 Not affiliated with Jagex or the OSRS Wiki.

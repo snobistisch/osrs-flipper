@@ -230,7 +230,10 @@ instead of ranking anyway.
 - **A bond is not free to flip.** Bonds pay no GE tax, but a bond bought from
   the GE must be converted back to tradeable status before resale. The model
   deducts the 10% conversion fee from net revenue and reserves that fee in the
-  required capital for the offer.
+  required capital: candidate sizing, the slot allocation, the committed bank
+  shown in the plan and saved-offer reservations all count buy price plus fee
+  per bond. The game charges 10% of the guide price; the model estimates it
+  from the planned sell price, which is the closest per-offer figure.
 - **Updates generally ship Wednesday around 11:30 UTC**, with a recurring
   Tuesday maintenance risk window and announced exceptions. A position still
   open when either prior lands is discounted; the app does not claim this

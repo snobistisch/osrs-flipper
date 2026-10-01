@@ -131,7 +131,8 @@ class WikiClient:
         self._memory: Dict[str, Tuple[float, object]] = {}
         self.stale_keys = set()
         self.interval_timestamps: Dict[str, int] = {}
-        self._lock = RLock()
+        self._lock = RLock()            # guards the per-key lock table only
+        self._key_locks: Dict[str, RLock] = {}
         self._retry_at = {}
 
     # -- transport -----------------------------------------------------------
@@ -177,7 +178,11 @@ class WikiClient:
     def _cached(self, key: str, ttl: float, fetch: Callable[[], object]) -> object:
         # The Streamlit resource is shared between sessions. Coalesce fetches
         # and enforce the poll floor even when several sessions refresh at once.
+        # One lock per key: a slow per-item history request must not hold up
+        # /latest for every other session while it retries.
         with self._lock:
+            key_lock = self._key_locks.setdefault(key, RLock())
+        with key_lock:
             return self._cached_locked(key, ttl, fetch)
 
     def _cached_locked(self, key: str, ttl: float, fetch: Callable[[], object]) -> object:
@@ -273,19 +278,35 @@ class WikiClient:
         return activity
 
     def mapping(self) -> Dict[int, Item]:
-        """Static item metadata, cached on disk and refreshed daily."""
-        return self._cached("mapping", MAPPING_MAX_AGE, self._load_mapping)
+        """Static item metadata, cached on disk and refreshed daily.
+
+        Item metadata barely changes, so during an outage an expired disk copy
+        beats no ranking at all. It is reported through stale_keys and is not
+        promoted into the memory cache, so the next call tries the API again.
+        """
+        try:
+            return self._cached("mapping", MAPPING_MAX_AGE, self._load_mapping)
+        except ApiError:
+            raw = self._read_mapping_file(max_age=None)
+            if raw is None:
+                raise
+            self.stale_keys.add("mapping")
+            return self._parse_mapping(raw)
+
+    def _read_mapping_file(self, max_age: Optional[float]) -> Optional[list]:
+        path = self.cache_dir / "mapping.json"
+        try:
+            age = time.time() - path.stat().st_mtime
+            if age < 0 or (max_age is not None and age >= max_age):
+                return None
+            raw = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        return raw if isinstance(raw, list) else None
 
     def _load_mapping(self) -> Dict[int, Item]:
         path = self.cache_dir / "mapping.json"
-        raw = None
-        try:
-            if 0 <= time.time() - path.stat().st_mtime < MAPPING_MAX_AGE:
-                raw = json.loads(path.read_text())
-                if not isinstance(raw, list):
-                    raw = None
-        except (OSError, ValueError):
-            raw = None
+        raw = self._read_mapping_file(max_age=MAPPING_MAX_AGE)
         if raw is None:
             raw = self._get("/mapping")
             if not isinstance(raw, list):
@@ -294,8 +315,10 @@ class WikiClient:
                 write_json(path, raw)
             except (OSError, ValueError):
                 pass
-        if not isinstance(raw, list):
-            raise ApiError("/mapping: expected a list")
+        return self._parse_mapping(raw)
+
+    @staticmethod
+    def _parse_mapping(raw: list) -> Dict[int, Item]:
         items = {}
         for row in raw:
             if not isinstance(row, dict):
