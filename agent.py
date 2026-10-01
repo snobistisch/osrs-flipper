@@ -599,7 +599,8 @@ def cmd_portfolio(opts) -> int:
             return 1
         closed = positions.pop(opts.index - 1)
         _write_json(path, positions)
-        net = engine.net_revenue(opts.price, closed["item_id"] in exempt)
+        net = engine.net_revenue(opts.price, closed["item_id"] in exempt,
+                                 closed["item_id"] == exemptions.BOND_ID)
         profit = (net - closed["buy_price"]) * closed["qty"]
         held = (time.time() - closed["opened_at"]) / 86400
         print("Closed {:,} x {} after {:.0f} days: {} gp after tax.".format(
@@ -625,10 +626,12 @@ def cmd_portfolio(opts) -> int:
     for index, position in enumerate(positions, 1):
         quote = quotes.get(position["item_id"])
         # Value the position at what a sale would actually net: the price a
-        # buyer is bidding, minus GE tax. Marking to the instant-buy price and
-        # ignoring tax is how a losing position reads as a winning one.
+        # buyer is bidding, minus GE tax and any bond conversion fee. Marking to
+        # the instant-buy price and ignoring tax is how a losing position reads as a winning one.
         current = quote.low if quote and quote.low else None
-        net = engine.net_revenue(current, position["item_id"] in exempt) if current else None
+        net = engine.net_revenue(
+            current, position["item_id"] in exempt,
+            position["item_id"] == exemptions.BOND_ID) if current else None
         pnl = (net - position["buy_price"]) * position["qty"] if net is not None else None
         total += pnl or 0
         enriched.append({

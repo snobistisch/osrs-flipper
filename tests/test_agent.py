@@ -9,13 +9,18 @@ these tests run the logic twice and assert on the silence.
 """
 from __future__ import annotations
 
+import io
 import json
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 import agent
+import api
 import engine
+import exemptions
 import merch
 
 
@@ -205,3 +210,33 @@ class ItemResolutionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PortfolioBondFeeTests(unittest.TestCase):
+    """A bond pays no GE tax but costs 10% to make tradeable again."""
+
+    class FakeClient:
+        def latest(self):
+            return {exemptions.BOND_ID: api.Quote(
+                high=10_100_000, high_time=0, low=10_000_000, low_time=0)}
+
+        def mapping(self):
+            return {exemptions.BOND_ID: api.Item(
+                id=exemptions.BOND_ID, name="Old school bond", members=False,
+                limit=100, value=0, highalch=None)}
+
+    def test_a_bond_position_is_valued_after_the_conversion_fee(self):
+        with TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            (state / agent.PORTFOLIO_FILE).write_text(json.dumps([{
+                "item_id": exemptions.BOND_ID, "name": "Old school bond",
+                "qty": 1, "buy_price": 9_500_000, "opened_at": 0}]))
+            opts = agent.build_parser().parse_args(
+                ["--json", "portfolio", "--state-dir", tmp])
+            out = io.StringIO()
+            with mock.patch.object(agent.api, "WikiClient", self.FakeClient), \
+                    redirect_stdout(out):
+                self.assertEqual(agent.cmd_portfolio(opts), 0)
+        report = json.loads(out.getvalue())
+        self.assertEqual(report["positions"][0]["net_of_tax"], 9_000_000)
+        self.assertEqual(report["total_pnl"], -500_000)
