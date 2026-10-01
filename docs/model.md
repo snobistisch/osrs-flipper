@@ -12,19 +12,28 @@ both rules to F2P-only items and 3 slots. Slot count and item access are not
 separate settings, so `members + 3 slots` cannot exist in the normal UI, CLI or
 Python configuration.
 
-There are two first-class flip strategies:
+There are two first-class flip strategies. They are the two ends of one
+question — how long until you next look at the Grand Exchange:
 
-- **Active** — while you are playing. Ranks expected GP per occupied slot-hour,
-  rewarding fast round trips and capital recycling.
-- **Overnight** — while you are offline, with 6/8/10/12-hour horizons (8h by
-  default). The buy offer rests while you are away; bought items land in the
+- **Active** — you are watching and relist the sell as soon as the buy fills.
+  Ranks expected GP per occupied slot-hour, rewarding fast round trips and
+  capital recycling.
+- **Away** (stored as `overnight`; `away` is accepted everywhere) — your next
+  check is 1, 2, 4, 6, 8, 10 or 12 hours off: an errand, a work day or a night
+  (8h by default). The buy offer rests unattended; bought items land in the
   collection box and cannot create a sell offer by themselves. The model
   therefore estimates partial inventory on return across the rolling 4-hour
   limit windows, followed by a separate 4-hour liquidation window. Expected
   value subtracts stress loss for inventory still unsold after that window.
-  Volatility, falling drift,
-  seller-heavy flow, the alch floor, regime/mean-reversion context, update risk,
-  quote age and historical reach all affect that result.
+  Volatility, falling drift, seller-heavy flow, the alch floor (as far as you
+  can cast it), regime/mean-reversion context over the whole holding period,
+  update risk across the absence, quote age and historical reach all affect
+  that result.
+
+Before you switch to Away, leave listed sell offers in place — they need no
+watching — and cancel Active buys that have not filled: they were priced for
+someone who relists immediately. A saved Active flip in the browser says this
+on its card when the strategy changes.
 
 The portfolio layer evaluates candidates against the whole bank—never an equal
 split made before ranking—then funds at most one candidate per slot, rounds to
@@ -69,7 +78,7 @@ Everything about timing comes from that one distribution:
 - the **re-check time**: if not one unit has bought by then, the forecast has
   failed — re-check the live margin and reprice or cancel.
 
-Overnight reports the buy fill by return separately from liquidation.
+Away reports the buy fill by return separately from liquidation.
 
 ### 1b. Why the ETA used to be too optimistic
 
@@ -137,6 +146,44 @@ What changed:
 Fast flips stay recognisably fast: a small order on a deep book shows a band
 of minutes, not hours. What disappears is a point estimate that the model's
 own uncertainty contradicted.
+
+### 1c. What Away does differently, and why
+
+Measured on live data on 2026-10-01 (20m bank, 8h), the old Overnight plan
+had four problems. Each is fixed:
+
+1. **The alch floor removed the downside of positions far larger than anyone
+   can alch.** Dragonstone bolts (e), Atlatl darts and Rune javelin tips showed
+   0 gp stress downside while 28–31% of 20,000-unit orders was expected to stay
+   unsold. High Alchemy is capped at 1,200 casts an hour (five 0.6 s ticks), so
+   the floor now covers at most `1,200 × liquidation hours` units; the rest
+   carries the full stress move.
+2. **Quantity was everything the mean rate could buy.** The full buy completed
+   38% of the time and about 30% of the order was left unsold after the
+   selling window. Away quantity is now the one with the best expected value
+   after that stranded-inventory stress, chosen from 25/50/75/100% of the
+   mean-rate capacity at the optimal prices.
+3. **Exposure was measured over the wrong time.** Update risk and mean
+   reversion used the sell leg's duration for inventory held all night. They
+   now use the absence plus the sell (update risk: the absence plus the whole
+   selling window).
+4. **It never bid below today's price.** Time is what an unattended buy has,
+   and a lower bid fills if the price dips to it. For depths of 1–8% under the
+   touch the fill rate is scaled by the expected share of the absence a
+   driftless walk with the item's own volatility spends at or below the bid.
+   A dip fill is sold into the market that dipped, so the exit price is
+   lowered by the dip minus what a *significantly mean-reverting* item is
+   expected to recover by the sale (`1 − exp(−κ·t)` from its OU fit). Without
+   reversion evidence the dip carries through to the exit, a lower bid only
+   fills more slowly, and the optimiser never chooses it — dip bids therefore
+   appear only after the 14-day check, and are labelled.
+
+Away is also sized on the **14-day average rate** of each side rather than on
+the one live hour the snapshot happened to land in: an 8-hour absence spans a
+good part of the daily cycle. On the cached 1-hour series (5 items, 15 days)
+the next eight hours ran at 0.73–0.81× the snapshot hour after midnight UTC
+and 1.3–1.8× from late morning; the daily average takes the cycle out without
+inventing an hourly profile that five items cannot support.
 
 ### 2. You have to get to the front of the queue, and you are not alone in it
 
@@ -284,7 +331,7 @@ and it is worst exactly where the data is thinnest.
 So every score is shrunk toward the market-wide average by an amount set by how
 much volume it rests on, using a hierarchical (empirical-Bayes) posterior. The
 output shows both numbers: **MEASURED** is the score before shrinkage;
-**EV/SLOT/H** (Active) or **HORIZON EV** (Overnight) is after. A wide gap means
+**EV/SLOT/H** (Active) or **HORIZON EV** (Away) is after. A wide gap means
 the measured number was mostly the thinness of the data behind it. When no
 difference between the day's scores survives the noise at all, the tool says so
 instead of ranking anyway.
@@ -322,7 +369,7 @@ instead of ranking anyway.
 
 The browser is deliberately one-click. It derives freshness, minimum volume,
 net ROI, undercut room, maximum unit price and bot-supply gates from the bank,
-account and Active/Overnight strategy. The **Max bank per trade** slider sets
+account and Active/Away strategy. The **Max bank per trade** slider sets
 how much of the total bank one new recommendation may commit, from 10% to 100%
 (25% by default). Raising it can put more cash behind the strongest opportunity,
 but also concentrates more of the bank in one item; the total plan can never

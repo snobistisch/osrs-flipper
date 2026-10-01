@@ -568,16 +568,14 @@ class AllocationStageTests(unittest.TestCase):
             filters.ScreenResult(rows=[slow], funnel={}), cfg)
         self.assertIsNone(result.rows[0].allocated_quantity)
 
-    def test_overnight_allocation_can_use_the_upper_fill_bound(self):
+    def test_overnight_allocation_funds_its_expected_value_size(self):
         cfg = filters.FilterConfig(capital=10_000_000,
                                    trade_mode=engine.TradeMode.OVERNIGHT)
-        row = one(capital=cfg.capital).rows[0]
-        row = dataclasses.replace(
-            row, fill_low_qty=3.9, fill_high_qty=7.9,
-            capital_needed=100 * row.buy)
+        row = one(capital=cfg.capital,
+                  trade_mode=engine.TradeMode.OVERNIGHT).rows[0]
         result = filters.allocate(
             filters.ScreenResult(rows=[row], funnel={}), cfg)
-        self.assertEqual(result.rows[0].allocated_quantity, 7)
+        self.assertEqual(result.rows[0].allocated_quantity, row.qty_per_window)
 
 
 class ExecutionDecisionTests(unittest.TestCase):

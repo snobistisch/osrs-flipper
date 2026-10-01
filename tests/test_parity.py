@@ -174,6 +174,89 @@ class ParityTests(unittest.TestCase):
         for (expression, python), browser in zip(cases, results):
             self.assertClose(python, browser, expression)
 
+    def test_away_primitives_match(self):
+        cases = [("alchProtectedUnits(4)", engine.alch_protected_units(4))]
+        for depth, sigma, hours in ((0.0, 0.05, 8), (0.01, 0.05, 8),
+                                    (0.05, 0.08, 2), (0.08, 0.2, 12)):
+            cases.append(("dipFillMultiplier({}, {}, {})".format(
+                depth, sigma, hours),
+                engine.dip_fill_multiplier(depth, sigma, hours)))
+        mids = [p for p in (engine._bucket_vwap([point]) for point in history(3))
+                if p is not None]
+        fit = stats.fit_ou(mids, engine.HISTORY_BUCKET_DAYS)
+        cases.append(("dipExitRetention(fitOU({}, HISTORY_BUCKET_DAYS), 6)"
+                      .format(json.dumps(mids)),
+                      engine.dip_exit_retention(fit, 6)))
+        points = history(5)
+        view = engine.history_view(points, 985, 1_030)
+        for field, key in (("low_volume_per_hour", "lowVolumePerHour"),
+                           ("high_volume_per_hour", "highVolumePerHour")):
+            cases.append(("historyView({}, 985, 1030).{}".format(
+                json.dumps(points), key), getattr(view, field)))
+        results = js(*(expression for expression, _ in cases))
+        for (expression, python), browser in zip(cases, results):
+            self.assertClose(python, browser, expression[:60])
+
+    def test_away_execution_choice_matches_including_dip_bids(self):
+        reverting = stats.OUFit(kappa=6.0, mu=math.log(1_000), sigma=0.12,
+                                t_stat=-6.0, n=56, dt_days=0.25)
+        cases = [
+            # A reverting item where a dip bid wins, and one where it cannot.
+            dict(ou=reverting, base_sell=1_040, volume=40_000.0, hours=8.0),
+            dict(ou=None, base_sell=1_080, volume=3_000.0, hours=2.0),
+            dict(ou=reverting, base_sell=1_080, volume=500.0, hours=12.0),
+        ]
+        for case in cases:
+            ou = case["ou"]
+            ou_js = ("null" if ou is None else
+                     "{{kappa:{}, mu:{}, sigma:{}, tStat:{}, meanReverting:true,"
+                     " expectedLogReturn(price, days) {{ return price <= 0 ||"
+                     " days <= 0 || this.kappa <= 0 ? 0 : (this.mu -"
+                     " Math.log(price)) * (1 - Math.exp(-this.kappa * days));"
+                     " }}}}".format(ou.kappa, ou.mu, ou.sigma, ou.t_stat))
+            expression = (
+                "optimiseExecution({{baseBuy:1000, baseSell:{base_sell},"
+                " exempt:false, bond:false, limit:20000,"
+                " config:{{capital:50000000, maxPositionCapital:50000000,"
+                " strategy:\"overnight\", horizonHours:{hours}}},"
+                " buyVolume1h:{volume}, sellVolume1h:{volume}, quoteAge:60,"
+                " ofi:0, drift:0, now:{now}, competitors:9, highalch:null,"
+                " natureCost:100, sigmaDaily:{sigma}, ou:{ou}}})".format(
+                    base_sell=case["base_sell"], hours=case["hours"],
+                    volume=case["volume"], now=NOW,
+                    sigma=json.dumps(ou.sigma if ou else None), ou=ou_js))
+            browser = js(expression)[0]
+            config = filters.FilterConfig(capital=50_000_000,
+                                          trade_mode="overnight",
+                                          overnight_hours=case["hours"])
+            python = filters._optimise_execution(
+                base_buy=1_000, base_sell=case["base_sell"], tax_exempt=False,
+                limit=20_000, available_capital=50_000_000,
+                buy_volume_1h=case["volume"], sell_volume_1h=case["volume"],
+                quote_age=60, ofi=0.0, drift=0.0, now=NOW, highalch=None,
+                competitors=9, config=config,
+                sigma_daily=ou.sigma if ou else None, ou_fit=ou)
+            label = "away {}".format(case)
+            self.assertEqual((python.buy, python.sell, python.qty),
+                             (browser["buy"], browser["sell"], browser["qty"]),
+                             label)
+            self.assertClose(python.dip_depth, browser["dipDepth"], label)
+            self.assertClose(python.breakdown.ranking_value,
+                             browser["breakdown"]["rankingValue"], label,
+                             abs_tol=0.01)
+            self.assertClose(python.breakdown.downside_risk_gp,
+                             browser["breakdown"]["downsideRisk"], label,
+                             abs_tol=0.01)
+        self.assertLess(filters._optimise_execution(
+            base_buy=1_000, base_sell=1_040, tax_exempt=False, limit=20_000,
+            available_capital=50_000_000, buy_volume_1h=40_000.0,
+            sell_volume_1h=40_000.0, quote_age=60, ofi=0.0, drift=0.0,
+            now=NOW, highalch=None, competitors=9,
+            config=filters.FilterConfig(capital=50_000_000,
+                                        trade_mode="overnight"),
+            sigma_daily=0.12, ou_fit=reverting).buy, 1_000,
+            "the first case must exercise a dip bid")
+
     def test_score_flip_matches_in_both_strategies(self):
         mids = [p for p in (engine._bucket_vwap([point]) for point in history(3))
                 if p is not None]
@@ -315,7 +398,7 @@ class ParityTests(unittest.TestCase):
                 limit=case["limit"], available_capital=case["capital"],
                 buy_volume_1h=3000, sell_volume_1h=2500, quote_age=60,
                 ofi=0.1, drift=0.0, now=NOW, highalch=None, competitors=9,
-                config=config)
+                config=config)[:6]
             label = "{} {}".format(case["mode"], case["base_buy"])
             self.assertEqual((buy, sell, qty),
                              (browser["buy"], browser["sell"], browser["qty"]),

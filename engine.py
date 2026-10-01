@@ -87,16 +87,33 @@ class AccountType(str, Enum):
 
 
 class TradeMode(str, Enum):
-    """The decision horizon changes the utility function, not just the copy."""
+    """The decision horizon changes the utility function, not just the copy.
+
+    The two modes are the two ends of one question: how long until you next
+    look at the Grand Exchange. ACTIVE means you are watching and relist the
+    sell as soon as the buy fills. OVERNIGHT — shown as "Away" — means the buy
+    rests unattended for ``overnight_hours`` (1 to 24: a short errand, a work
+    day or a night) and the sell can only go in when you are back. "away" is
+    accepted as a synonym; the stored value stays "overnight" so saved
+    profiles keep working.
+    """
 
     ACTIVE = "active"
     OVERNIGHT = "overnight"
+
+    @classmethod
+    def _missing_(cls, value):
+        if isinstance(value, str) and value.strip().lower() == "away":
+            return cls.OVERNIGHT
+        return None
 
 
 DEFAULT_ACCOUNT = AccountType.MEMBERS
 DEFAULT_TRADE_MODE = TradeMode.ACTIVE
 DEFAULT_OVERNIGHT_HOURS = 8.0
-OVERNIGHT_HORIZON_PRESETS = (6.0, 8.0, 10.0, 12.0)
+# Away horizons: short absences are as real as a night's sleep, and they were
+# the gap the old 6-12h presets left between watching and sleeping.
+OVERNIGHT_HORIZON_PRESETS = (1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0)
 
 
 @dataclass(frozen=True)
@@ -1041,6 +1058,57 @@ def target_quantity(rate: float, usable_seconds: float, target: float,
                                           - s * normal_quantile(target))))
 
 
+# ---------------------------------------------------------------------------
+# Away bids below the market
+# ---------------------------------------------------------------------------
+# An unattended buy has time on its side: a bid under today's instant-sell
+# price fills if the price dips to it while you are away. Depths tried, as a
+# fraction of the touch. A search grid, not a belief about any item.
+AWAY_BID_DEPTHS = (0.01, 0.02, 0.03, 0.05, 0.08)
+_DIP_STEPS = 64
+
+
+def dip_fill_multiplier(depth_log: float, sigma_daily: float,
+                        horizon_hours: float) -> float:
+    """Fill rate of a bid ``depth_log`` (log) under the touch, relative to
+    one at the touch, over an unattended horizon.
+
+    The price is a driftless random walk with the item's own daily log
+    volatility. A bid fills while the market trades at or below it, so its
+    rate relative to the touch is the expected share of the horizon spent
+    down there, normalised by the same share at the touch (one half):
+    ``(2/T) * integral_0^T Phi(-d / (sigma * sqrt(t)))``. Computed with a fixed
+    midpoint rule so both ports evaluate the identical sum.
+    """
+    if depth_log <= 0:
+        return 1.0
+    if sigma_daily <= 0 or horizon_hours <= 0:
+        return 0.0
+    total = 0.0
+    for step in range(_DIP_STEPS):
+        days = (step + 0.5) / _DIP_STEPS * horizon_hours / HOURS_PER_DAY
+        total += _normal_cdf(-depth_log / (sigma_daily * math.sqrt(days)))
+    return min(1.0, 2.0 * total / _DIP_STEPS)
+
+
+def dip_exit_retention(fit: Optional["stats.OUFit"], hold_hours: float,
+                       regime_score: float = 0.0,
+                       calibration: Calibration = DEFAULT_CALIBRATION
+                       ) -> float:
+    """Share of a dip the price is expected to have recovered by the sale.
+
+    A bid that fills because the market fell is sold into that same fallen
+    market. Only a significantly mean-reverting item gives part of the dip
+    back, over the time from the fill to the sale. Without that evidence the
+    whole dip carries through to the exit, so bidding lower buys nothing but
+    a slower fill — the honest default, and why deep bids need a deep check.
+    """
+    if (fit is None or not fit.mean_reverting or hold_hours <= 0
+            or regime_score >= calibration.regime_shift_threshold):
+        return 0.0
+    return 1.0 - math.exp(-fit.kappa * hold_hours / HOURS_PER_DAY)
+
+
 def reprice_check_seconds(buy_work_seconds: float, sigma: float,
                           calibration: Calibration = DEFAULT_CALIBRATION
                           ) -> float:
@@ -1320,6 +1388,16 @@ def mean_reversion_factor(
 # ---------------------------------------------------------------------------
 # High alchemy — the floor under the price
 # ---------------------------------------------------------------------------
+
+# High Alchemy takes five game ticks of 0.6 s: at most 1,200 casts an hour, so
+# the alch floor only protects what you can physically cast. DERIVED.
+ALCH_CASTS_PER_HOUR = 1_200
+
+
+def alch_protected_units(hours: float) -> float:
+    """Units the alch floor can absorb within ``hours`` of casting."""
+    return max(0.0, float(hours)) * ALCH_CASTS_PER_HOUR
+
 
 def alch_floor(highalch: Optional[int], nature_rune_cost: int) -> Optional[int]:
     """Guaranteed gp per item from casting High Level Alchemy, net of the rune.
@@ -1660,17 +1738,28 @@ def score_flip(
     if sigma is None or sigma <= 0:
         sigma = calibration.default_sigma_daily
 
+    # How long inventory is held. Active: the sell leg. Away: at least until
+    # you are back, then the sell — the old code used the sell leg alone and
+    # so measured update and reversion exposure over minutes for a position
+    # that is held all night.
+    if mode is TradeMode.OVERNIGHT:
+        hold_seconds = horizon_seconds + sell_seconds
+        exposure_seconds = (horizon_seconds
+                            + liquidation_hours * SECONDS_PER_HOUR)
+    else:
+        hold_seconds = sell_seconds
+        exposure_seconds = trip_p80
     adverse = adverse_selection_factor(ofi, drift, calibration)
     hold = holding_risk(sigma, sell_seconds, calibration)
     stale = staleness_factor(quote_age, sigma, calibration)
-    reversion = mean_reversion_factor(ou_fit, mid, sell_seconds, regime_score,
+    reversion = mean_reversion_factor(ou_fit, mid, hold_seconds, regime_score,
                                       calibration)
     floor = alch_floor(highalch, nature_rune_cost)
     distance = alch_distance(buy, floor)
     alch = alch_bonus(distance, calibration)
-    # Exposure to the weekly update is the time a slow trip may still be open,
-    # so the P80 rather than the median.
-    update = update_risk_factor(now, trip_p80, calibration)
+    # Exposure to the weekly update: Active, the time a slow trip may still be
+    # open (P80); Away, the whole absence plus the selling window after it.
+    update = update_risk_factor(now, exposure_seconds, calibration)
 
     raw_profit = margin * qty
     completed_profit = margin * expected_sell_qty
@@ -1689,10 +1778,17 @@ def score_flip(
         stress_move += max(0.0, -ofi) * 0.025
         stress_move = max(0.0, min(0.50, stress_move))
         floor_loss = None if floor is None else max(0.0, (buy - floor) / buy)
+        stranded = max(0.0, expected_buy_qty - expected_sell_qty)
+        protected = 0.0
         if (floor_loss is not None
                 and floor_loss < calibration.alch_relevant_distance):
-            stress_move = min(stress_move, floor_loss)
-        downside_risk = max(0.0, expected_buy_qty - expected_sell_qty) * buy * stress_move
+            # The floor is only as wide as your casting: ~1,200 alchs an
+            # hour across the selling window. It used to cap the loss on
+            # every stranded unit, which zeroed the downside of 20,000 bolts
+            # that would take seventeen hours to alch.
+            protected = min(stranded, alch_protected_units(liquidation_hours))
+        downside_risk = buy * (protected * min(stress_move, floor_loss or 0.0)
+                               + (stranded - protected) * stress_move)
         completed_value = (completed_profit * adverse * stale * reversion
                            * alch * update)
         expected = completed_value - downside_risk
@@ -1949,6 +2045,13 @@ class HistoryView:
     ou: Optional["stats.OUFit"] = None
     regime_score: float = 0.0
     mean_volume: float = 0.0
+    # Units per hour on each side, averaged over every bucket in the window,
+    # quiet ones included: the rate across the whole daily cycle. An Away
+    # horizon spans hours of that cycle; the live 1-hour bucket is one point
+    # on it, and after midnight UTC the next eight hours ran at 0.73-0.81x the
+    # snapshot hour on the cached 1h series (5 items, 15 days).
+    low_volume_per_hour: float = 0.0
+    high_volume_per_hour: float = 0.0
 
     @property
     def mean_reverting(self) -> bool:
@@ -2076,7 +2179,13 @@ def history_view(points: List[dict], buy: int, sell: int,
         dislocation=dislocation,
         median_mid=int(round(median_mid)) if median_mid else None,
         elevation=elevation, volatility=volatility, ou=ou, regime_score=regime,
-        mean_volume=(sum(volumes) / len(volumes)) if volumes else 0.0)
+        mean_volume=(sum(volumes) / len(volumes)) if volumes else 0.0,
+        low_volume_per_hour=(
+            sum(p.get("lowPriceVolume") or 0 for p in points)
+            / (len(points) * HISTORY_BUCKET_HOURS) if points else 0.0),
+        high_volume_per_hour=(
+            sum(p.get("highPriceVolume") or 0 for p in points)
+            / (len(points) * HISTORY_BUCKET_HOURS) if points else 0.0))
 
 
 @dataclass(frozen=True)

@@ -157,16 +157,21 @@ def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
             "Strategy", [engine.TradeMode.ACTIVE, engine.TradeMode.OVERNIGHT],
             horizontal=True,
             format_func=lambda value: ("Active" if value is
-                                       engine.TradeMode.ACTIVE else "Overnight"),
-            help="Active maximizes expected GP per occupied slot-hour. "
-                 "Overnight leaves buy offers while you are away, then models "
-                 "a separate sell window after you return.")
+                                       engine.TradeMode.ACTIVE else "Away"),
+            help="Active: you are watching and relist the sell at once; ranks "
+                 "expected GP per occupied slot-hour. Away: your next check is "
+                 "hours off (an errand, work, overnight); buy offers rest "
+                 "unattended — some below today's price to catch a dip — and "
+                 "you sell after you return.")
         overnight_hours = engine.DEFAULT_OVERNIGHT_HOURS
         if mode is engine.TradeMode.OVERNIGHT:
             overnight_hours = st.select_slider(
-                "Back in", options=list(engine.OVERNIGHT_HORIZON_PRESETS),
+                "Next check in", options=list(engine.OVERNIGHT_HORIZON_PRESETS),
                 value=engine.DEFAULT_OVERNIGHT_HOURS,
                 format_func=lambda value: "{:.0f} hours".format(value))
+            st.caption("Before you go: leave listed sell offers in place and "
+                       "cancel Active buys that have not filled — they were "
+                       "priced for someone watching.")
         slots = account.slots
         st.metric("Budget", engine.format_gp(capital) + " gp",
                   delta="pooled across {} slots; not pre-split".format(slots),
@@ -541,8 +546,13 @@ def detail_view(row):
     if not active:
         st.warning("About {:.0%} of planned quantity may remain after the "
                    "post-return sell window; the model subtracts {:,.0f} gp "
-                   "of stress downside from Overnight EV.".format(row.p_stranded,
+                   "of stress downside from Away EV.".format(row.p_stranded,
                                            row.downside_risk_gp))
+        if row.dip_depth > 0:
+            st.info("Away bid {:.0%} under today's price: it only fills if the "
+                    "price dips while you are away. The exit assumes {:.0%} of "
+                    "that dip is recovered by the sale.".format(
+                        row.dip_depth, row.dip_retention), icon="🌙")
 
     if row.allocated_capital is not None:
         st.info("Executable portfolio allocation: commit {} gp ({} units) "
@@ -712,7 +722,7 @@ def render_market(config, top_n):
     with flip_tab:
         if not result.rows:
             st.info("No flips meet the current execution and display criteria. "
-                    "Loosen optional filters, switch Active ↔ Overnight, or "
+                    "Loosen optional filters, switch Active ↔ Away, or "
                     "refresh when the market changes.")
         else:
             slot_plan(result.rows, config)

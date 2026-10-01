@@ -31,7 +31,8 @@ def _non_negative_int(text):
 
 def parse_args(argv):
     p = argparse.ArgumentParser(
-        description="Build an executable GE plan for active or overnight trading")
+        description="Build an executable GE plan for active trading or for "
+                    "time away (an errand, work, overnight)")
     p.add_argument("--capital", type=engine.parse_gp, default=1_000_000,
                    help="gp available across all slots, e.g. 250k or 1.5m")
     p.add_argument("--account", choices=[value.value for value in
@@ -40,14 +41,15 @@ def parse_args(argv):
                    help="coherent account profile; members is the default "
                         "and implies 8 slots plus members items")
     p.add_argument("--strategy", choices=[value.value for value in
-                                          engine.TradeMode],
+                                          engine.TradeMode] + ["away"],
                    default=engine.DEFAULT_TRADE_MODE.value,
-                   help="active ranks slot turnover; overnight ranks "
-                        "buy-fill-by-return plus post-return liquidation")
+                   help="active: you are watching and relist at once, ranked "
+                        "on slot turnover. away (= overnight): the buy rests "
+                        "unattended for --overnight-hours, then you sell")
     p.add_argument("--overnight-hours", type=float,
                    default=engine.DEFAULT_OVERNIGHT_HOURS,
-                   help="unattended horizon (default: 8; useful presets "
-                        "are 6, 8, 10 and 12)")
+                   help="hours until you next check the GE in away mode "
+                        "(default: 8; presets 1, 2, 4, 6, 8, 10, 12)")
     p.add_argument("--top", type=_non_negative_int, default=20,
                    help="rows to show")
     p.add_argument("--deep", type=_non_negative_int, default=15,
@@ -215,7 +217,11 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
     else:
         print("RETURN+SELL = unattended buy horizon followed by a separate "
               "post-return liquidation window. HORIZON EV includes partial "
-              "fills and the stress cost of inventory still unsold.")
+              "fills and the stress cost of inventory still unsold. A buy "
+              "under today's price ('away bid') only fills on a dip and is "
+              "only chosen for items that measurably bounce back. Before you "
+              "go: leave listed sells in place; cancel Active buys that have "
+              "not filled.")
         ranking_explanation = "HORIZON EV"
     print("MEASURED = the score before shrinkage; {} is after. Ranking hundreds "
           "of noisy estimates surfaces the biggest errors rather than the "

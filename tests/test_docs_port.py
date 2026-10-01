@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 
 import engine
+import filters
 import exemptions
 import merch
 
@@ -193,10 +194,9 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("row.pricedFromReference", self.source)
         self.assertIn("config.maxPositionCapital", self.source)
         self.assertIn("function positionCapitalCeiling(", self.source)
-        # Active is funded to the size sized for the completion target, not
-        # to a second, more optimistic or pessimistic bound.
-        self.assertIn('row.mode === "active" ? row.qty : row.fillHighQty',
-                      self.source)
+        # Both modes fund the size their optimiser chose, not a second,
+        # more optimistic or pessimistic bound.
+        self.assertIn("const baseFillBound = row.qty;", self.source)
         self.assertIn("reachableQty * rowUnitCapital(row)", self.source)
         self.assertIn("o.config.maxPositionCapital ?? o.config.capital", self.source)
         self.assertIn("/ ${formatGp(config.capital)} COMMITTED", self.source)
@@ -245,6 +245,23 @@ class PortSyncTests(unittest.TestCase):
         self.assertNotIn("const PLAN_SIZE = 3", self.source)
         self.assertIn("Array(config.slots).fill(null)", self.source)
         self.assertIn("config.slots - state.slotLocks.length", self.source)
+
+    def test_away_presets_and_search_grids_match(self):
+        for name, values in (
+                ("AWAY_HORIZON_PRESETS", engine.OVERNIGHT_HORIZON_PRESETS),
+                ("AWAY_BID_DEPTHS", engine.AWAY_BID_DEPTHS),
+                ("AWAY_QTY_FRACTIONS", filters.AWAY_QTY_FRACTIONS)):
+            match = re.search(r"const {} = \[([^\]]*)\]".format(name),
+                              self.source)
+            self.assertIsNotNone(match, name)
+            self.assertEqual([float(v) for v in match.group(1).split(",")],
+                             [float(v) for v in values], name)
+        self.assertIn("const ALCH_CASTS_PER_HOUR = {}".format(
+            engine.ALCH_CASTS_PER_HOUR), self.source)
+        self.assertIn("const DIP_STEPS = {}".format(engine._DIP_STEPS),
+                      self.source)
+        for preset in engine.OVERNIGHT_HORIZON_PRESETS:
+            self.assertIn('<option value="{:.0f}"'.format(preset), self.source)
 
     def test_history_window_matches(self):
         for js_name, expected in (
@@ -340,7 +357,10 @@ class PortSyncTests(unittest.TestCase):
         botted commodities top while the Python side buries them."""
         self.assertIn("function touchCompetitors(", self.source)
         self.assertIn("touchCompetitors(thinVolume, item.limit)", self.source)
-        self.assertIn("touchCompetitors(row.volume, row.limit)", self.source)
+        # The deep check sizes the crowd on the item's real volume: the live
+        # thin side, or for Away the 14-day average rate.
+        self.assertIn("touchCompetitors(baseVolume, row.limit)", self.source)
+        self.assertIn(": row.volume;", self.source)
 
     def test_removed_factors_are_not_still_referenced(self):
         # Functions the rebuild deleted. Their presence means a half-done port.

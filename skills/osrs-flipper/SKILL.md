@@ -35,10 +35,15 @@ Exchange offer slot per hour, not per flip. A 200k margin that takes six hours
 loses to a 20k margin that clears in twenty minutes, and that is the whole
 point of the metric.
 
-That statement applies to `strategy: active`. For `strategy: overnight`, read
-`ranking_value` as risk-adjusted expected profit over `horizon_hours`. Always
-report `p_fill`, `p_stranded` and `downside_risk_gp` with an overnight pick;
-fast recycling after completion is not available while the player is offline.
+That statement applies to `strategy: active`. For `strategy: overnight` —
+shown to players as **Away**, and `--strategy away` works too — read
+`ranking_value` as risk-adjusted expected profit over `horizon_hours` (the
+hours until the player's next check: 1 to 12). Always report `p_fill`,
+`p_stranded` and `downside_risk_gp` with an Away pick; fast recycling after
+completion is not available while the player is offline. A warning starting
+"away bid" means the buy is under today's price and fills only on a dip; say
+so. Before the player leaves, tell them to keep listed sells and cancel
+unfilled Active buys.
 
 **Never quote one ETA for an active pick.** Report the band
 `round_trip_p50_seconds` (typical) to `round_trip_p90_seconds` (one trip in

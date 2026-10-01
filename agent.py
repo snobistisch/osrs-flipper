@@ -803,7 +803,7 @@ def build_parser() -> argparse.ArgumentParser:
                                              engine.AccountType],
                        default=engine.DEFAULT_ACCOUNT.value)
     flips.add_argument("--strategy", choices=[value.value for value in
-                                              engine.TradeMode],
+                                              engine.TradeMode] + ["away"],
                        default=engine.DEFAULT_TRADE_MODE.value)
     flips.add_argument("--overnight-hours", type=float,
                        default=engine.DEFAULT_OVERNIGHT_HOURS)

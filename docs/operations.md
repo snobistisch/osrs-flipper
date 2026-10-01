@@ -53,7 +53,7 @@ round-trip probability, the fill-time band (leg medians, round-trip
 P50/P80/P90 and the log-width they came from), the reprice-check time, the
 liquidity at entry, stranded-inventory probability, downside stress, ranking
 value, individual factors and timestamps. That makes future Active and
-Overnight calibration possible without pretending public market prints reveal
+Away calibration possible without pretending public market prints reveal
 private player fills.
 
 `calibration` is the diagnostic the old journal could not produce:

@@ -250,3 +250,15 @@ test('the ETA is shown as a band and Active funding meets the completion target'
   assert.ok(choice.breakdown.pFill >= run('CAL.active_target_completion') - 1e-9);
   assert.ok(choice.meanCapacityQty > choice.qty);
 });
+
+test('switching to Away advises on Active offers still running', () => {
+  const { run } = setup();
+  run('state.config = { strategy: "overnight" }');
+  const offer = '({ mode: "active", createdAt: 0, qty: 100, sold: 0, repriceCheckSeconds: 900 })';
+  assert.match(run(`executionTimingNote({ ...${offer}, bought: 0 }, 60 * 1000)`),
+    /Cancel it, or replace it with the Away plan/);
+  assert.match(run(`executionTimingNote({ ...${offer}, bought: 40 }, 60 * 1000)`),
+    /leave the sell offer listed/);
+  run('state.config = { strategy: "active" }');
+  assert.equal(run(`executionTimingNote({ ...${offer}, bought: 0 }, 60 * 1000)`), null);
+});

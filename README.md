@@ -10,16 +10,18 @@ tax, buy limits, fill estimates, and risk-aware slot allocation.
 ## Using the app
 
 1. Enter your available bank and choose **Members** or **Free-to-play**.
-2. Choose **Active** for trading while playing, or **Overnight** for resting
-   buy offers while away.
+2. Choose **Active** for trading while you watch the GE, or **Away** for
+   resting buy offers until your next check (1–12 hours, overnight included).
 3. Review each suggested item's buy price, quantity, sell price, estimated
    profit, and risk before placing the offer in-game.
 4. Save offers to track them. Saved commitments reserve bank across strategy
    changes; keep their status up to date as you trade.
 
 The planner uses eight GE slots for Members and three for Free-to-play.
-Active ranks expected profit per occupied slot-hour. Overnight estimates
-inventory bought while away and a separate selling phase after you return.
+Active ranks expected profit per occupied slot-hour while you watch. Away
+(next check in 1–12 hours, overnight included) estimates inventory bought
+while you are gone — including bids under today's price on items that
+measurably bounce back — and a separate selling phase after you return.
 **Merch** shows longer-term watchlist signals; **Crash** highlights price
 dislocations. The app provides guidance; all in-game orders are manual.
 
@@ -66,7 +68,7 @@ The CLI and agent use only the Python standard library:
 
 ```bash
 python3 cli.py --capital 1m --account members --strategy active
-python3 cli.py --capital 20m --strategy overnight --overnight-hours 8
+python3 cli.py --capital 20m --strategy away --overnight-hours 8
 python3 agent.py flips --json --capital 1.5m
 python3 agent.py portfolio list
 ```

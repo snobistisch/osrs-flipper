@@ -31,8 +31,9 @@ missing from /mapping, /5m, or /1h.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import math
 import re
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import engine
 import exemptions
@@ -149,6 +150,8 @@ class FlipRow:
     fill_high_qty: float = 0.0
     liquidation_hours: float = 0.0
     fill_log_sigma: float = 0.0
+    dip_depth: float = 0.0        # Away bid under the touch, as a fraction
+    dip_retention: float = 0.0    # share of that dip expected back by the sale
     round_trip_p50_seconds: float = 0.0
     round_trip_p80_seconds: float = 0.0
     round_trip_p90_seconds: float = 0.0
@@ -328,6 +331,25 @@ def _concession_points(maximum: int) -> List[int]:
     return sorted(max(0, min(maximum, value)) for value in values)
 
 
+class ExecutionChoice(NamedTuple):
+    """The concrete offer the optimiser settled on, and what it assumed."""
+    buy: int
+    sell: int                  # expected exit price per item
+    buy_improvement: int       # negative: an Away bid under the touch
+    sell_improvement: int      # queue priority bought on the sell side
+    qty: int
+    breakdown: engine.ScoreBreakdown
+    buy_volume_1h: float       # the buy-side volume the score used
+    dip_depth: float = 0.0     # fraction under the touch, Away bids only
+    dip_retention: float = 0.0  # share of that dip recovered by the sale
+    capacity_qty: int = 0      # Active: size that only clears at the mean rate
+
+
+# Away quantity is chosen by expected value, stranded-inventory stress
+# included, among these shares of the mean-rate capacity. A search grid.
+AWAY_QTY_FRACTIONS = (0.25, 0.5, 0.75, 1.0)
+
+
 def _optimise_execution(
     *, base_buy: int, base_sell: int, tax_exempt: bool, bond: bool = False,
     limit: Optional[int], available_capital: int,
@@ -336,7 +358,7 @@ def _optimise_execution(
     highalch: Optional[int], competitors: float, config: FilterConfig,
     sigma_daily: Optional[float] = None, ou_fit: Optional[object] = None,
     regime_score: float = 0.0, fill_log_sigma: Optional[float] = None,
-) -> Optional[Tuple[int, int, int, int, int, engine.ScoreBreakdown]]:
+) -> Optional[ExecutionChoice]:
     """Choose concrete order prices and quantity as one decision.
 
     Every queue-share benefit is paid for in ``buy``/``sell`` first. This
@@ -347,72 +369,127 @@ def _optimise_execution(
     deadline with ``active_target_completion`` probability. It used to fill
     each half of the window at the mean rate, so every candidate was ranked,
     and its prices chosen, at a size that completed about one time in eight.
+
+    Away has two more choices. It may bid under the touch and wait for a dip
+    (dip_fill_multiplier), which pays only on items that measurably revert
+    (dip_exit_retention). And its quantity is the one with the best expected
+    value after stranded-inventory stress, rather than everything the mean
+    rate could buy — that sizing completed the full buy 38% of the time and
+    left about 30% of it unsold after the selling window.
     """
     if fill_log_sigma is None:
         fill_log_sigma = engine.fill_log_sigma(config.calibration)
     calibration = config.calibration
+    away = config.trade_mode is engine.TradeMode.OVERNIGHT
     free_sell = engine.tax_boundary_undercut(base_sell, tax_exempt, bond)
     max_total = max(0, base_sell - base_buy - 1)
-    buy_points = _concession_points(max_total)
     sell_points = _concession_points(max(0, max_total - (base_sell - free_sell)))
     effective_limit = engine.effective_buy_limit(
         limit, config.horizon_hours, config.trade_mode)
-    best = None
-    best_value = float("-inf")
     original_spread = max(1, base_sell - base_buy)
-    for buy_improvement in buy_points:
-        buy = base_buy + buy_improvement
-        for extra_sell in sell_points:
-            sell = free_sell - extra_sell
-            unit_capital = engine.unit_capital(buy, sell, bond)
-            affordable = (available_capital // unit_capital
-                          if unit_capital > 0 else 0)
-            if affordable <= 0:
-                continue
-            margin = engine.net_margin(buy, sell, tax_exempt, bond)
-            if margin <= 0:
-                continue
-            sell_improvement = base_sell - sell
-            buy_share = engine.aggressiveness(
-                engine.price_edge(buy_improvement, original_spread),
-                config.calibration, competitors)
-            sell_share = engine.aggressiveness(
-                engine.price_edge(sell_improvement, original_spread),
-                config.calibration, competitors)
-            if config.trade_mode is engine.TradeMode.OVERNIGHT:
-                capacity = engine.fillable_quantity(
-                    buy_volume_1h, buy_share, config.horizon_hours)
-            else:
-                capacity = engine.target_quantity(
-                    engine.round_trip_rate(
-                        engine.fill_rate(buy_volume_1h, buy_share),
-                        engine.fill_rate(sell_volume_1h, sell_share)),
-                    config.horizon_hours * engine.SECONDS_PER_HOUR
-                    - engine.LEGS_PER_ROUND_TRIP * calibration.min_leg_seconds,
-                    calibration.active_target_completion, fill_log_sigma,
-                    engine.fill_log_mu(calibration))
+    usable = (config.horizon_hours * engine.SECONDS_PER_HOUR
+              - engine.LEGS_PER_ROUND_TRIP * calibration.min_leg_seconds)
+
+    # (buy price, improvement, buy-side volume, dip depth, dip retention)
+    bids = [(base_buy + step, step, buy_volume_1h, 0.0, 0.0)
+            for step in _concession_points(max_total)]
+    if away:
+        hold_hours = (config.horizon_hours
+                      + calibration.overnight_liquidation_hours) / 2
+        retention = engine.dip_exit_retention(ou_fit, hold_hours,
+                                              regime_score, calibration)
+        price_sigma = (sigma_daily if sigma_daily and sigma_daily > 0
+                       else getattr(ou_fit, "sigma", None)
+                       or calibration.default_sigma_daily)
+        if retention > 0:
+            seen = {bid[0] for bid in bids}
+            for depth in engine.AWAY_BID_DEPTHS:
+                bid = int(base_buy * (1 - depth))
+                if bid < 1 or bid >= base_buy or bid in seen:
+                    continue
+                seen.add(bid)
+                share = engine.dip_fill_multiplier(
+                    math.log(base_buy / bid), price_sigma, config.horizon_hours)
+                if share > 0:
+                    bids.append((bid, bid - base_buy, buy_volume_1h * share,
+                                 depth, retention))
+
+    def evaluate(bid, extra_sell, fraction=1.0):
+        buy, step, volume, depth, kept = bid
+        listed = free_sell - extra_sell
+        # A dip fill is sold into the market that dipped, less what it is
+        # expected to have recovered by then.
+        # floor(x + 0.5), not round(): Python rounds halves to even and the
+        # browser port must produce the identical integer price.
+        sell = listed - int(math.floor(max(0, -step) * (1.0 - kept) + 0.5))
+        if sell <= buy:
+            return None
+        unit_capital = engine.unit_capital(buy, sell, bond)
+        affordable = (available_capital // unit_capital
+                      if unit_capital > 0 else 0)
+        margin = engine.net_margin(buy, sell, tax_exempt, bond)
+        if affordable <= 0 or margin <= 0:
+            return None
+        sell_improvement = base_sell - listed
+        buy_share = engine.aggressiveness(
+            engine.price_edge(max(0, step), original_spread),
+            calibration, competitors)
+        sell_share = engine.aggressiveness(
+            engine.price_edge(sell_improvement, original_spread),
+            calibration, competitors)
+        trip_rate = engine.round_trip_rate(
+            engine.fill_rate(volume, buy_share),
+            engine.fill_rate(sell_volume_1h, sell_share))
+        mean_capacity = engine.flippable_qty(
+            effective_limit, int(trip_rate * max(0.0, usable)), affordable)
+        if away:
+            capacity = engine.fillable_quantity(volume, buy_share,
+                                                config.horizon_hours)
             qty = engine.flippable_qty(effective_limit, capacity, affordable)
-            qty = max(1, qty)
-            breakdown = engine.score_flip(
-                buy=buy, sell=sell, margin=margin, qty=qty, depth=0,
-                buy_volume_1h=buy_volume_1h, sell_volume_1h=sell_volume_1h,
-                quote_age=quote_age, ofi=ofi, drift=drift, now=now,
-                sigma_daily=sigma_daily, ou_fit=ou_fit,
-                regime_score=regime_score,
-                highalch=highalch, nature_rune_cost=config.nature_rune_cost,
-                competitors=competitors,
-                buy_improvement=buy_improvement,
-                sell_improvement=sell_improvement,
-                buy_share=buy_share, sell_share=sell_share,
-                mode=config.trade_mode, horizon_hours=config.horizon_hours,
-                capital_per_unit=unit_capital,
-                fill_log_sigma=fill_log_sigma,
-                calibration=config.calibration)
-            if breakdown.ranking_value > best_value:
-                best_value = breakdown.ranking_value
-                best = (buy, sell, buy_improvement, sell_improvement,
-                        qty, breakdown)
-    return best
+            qty = max(1, int(qty * fraction))
+        else:
+            capacity = engine.target_quantity(
+                trip_rate, usable, calibration.active_target_completion,
+                fill_log_sigma, engine.fill_log_mu(calibration))
+            qty = max(1, engine.flippable_qty(effective_limit, capacity,
+                                              affordable))
+        breakdown = engine.score_flip(
+            buy=buy, sell=sell, margin=margin, qty=qty, depth=0,
+            buy_volume_1h=volume, sell_volume_1h=sell_volume_1h,
+            quote_age=quote_age, ofi=ofi, drift=drift, now=now,
+            sigma_daily=sigma_daily, ou_fit=ou_fit,
+            regime_score=regime_score,
+            highalch=highalch, nature_rune_cost=config.nature_rune_cost,
+            competitors=competitors,
+            buy_improvement=step, sell_improvement=sell_improvement,
+            buy_share=buy_share, sell_share=sell_share,
+            mode=config.trade_mode, horizon_hours=config.horizon_hours,
+            capital_per_unit=unit_capital,
+            fill_log_sigma=fill_log_sigma,
+            calibration=calibration)
+        return ExecutionChoice(buy, sell, step, sell_improvement, qty,
+                               breakdown, volume, depth, kept,
+                               max(qty, mean_capacity))
+
+    best = None
+    for bid in bids:
+        for extra_sell in sell_points:
+            choice = evaluate(bid, extra_sell)
+            if choice is not None and (
+                    best is None or choice.breakdown.ranking_value
+                    > best[0].breakdown.ranking_value):
+                best = (choice, bid, extra_sell)
+    if best is None:
+        return None
+    choice, bid, extra_sell = best
+    if away:
+        # Prices first at full size, then the size at those prices.
+        for fraction in AWAY_QTY_FRACTIONS[:-1]:
+            smaller = evaluate(bid, extra_sell, fraction)
+            if (smaller is not None and smaller.breakdown.ranking_value
+                    > choice.breakdown.ranking_value):
+                choice = smaller
+    return choice
 
 
 def _evaluate(
@@ -495,7 +572,7 @@ def _evaluate(
                                              verified=False))
     if choice is None:
         return "margin not positive"
-    buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice
+    buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice[:6]
     margin = engine.net_margin(buy, sell, tax_exempt, bond)
     affordable = available_capital // engine.unit_capital(buy, sell, bond)
 
@@ -539,7 +616,8 @@ def _evaluate(
         buy_improvement=buy_improvement,
         sell_improvement=sell_improvement,
         buy_share=breakdown.buy_share, sell_share=breakdown.sell_share,
-        model_buy_volume_1h=low_vol_1h,
+        model_buy_volume_1h=choice.buy_volume_1h,
+        dip_depth=choice.dip_depth, dip_retention=choice.dip_retention,
         model_sell_volume_1h=high_vol_1h,
         competitors=crowd,
         priced_from_reference=priced.from_reference,
@@ -704,12 +782,19 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
     # about the rate your offer fills at, not a separate penalty on profit. A
     # price only 5% of the market ever reached is not a flip earning 5% of its
     # margin — it is a flip that takes twenty times as long.
-    reachable_buy = max(0.0, row.thin_volume_1h * max(view.buy_fill_share, 0.01))
-    reachable_sell = max(0.0, row.thin_volume_1h * max(view.sell_fill_share, 0.01))
+    # Away spans hours of the daily cycle, so it is sized on the 14-day
+    # average rate rather than on the one live hour the snapshot happened to
+    # land in. Active is executed now, at the live rate.
+    base_volume = float(row.thin_volume_1h)
+    if (config.trade_mode is engine.TradeMode.OVERNIGHT
+            and view.low_volume_per_hour > 0 and view.high_volume_per_hour > 0):
+        base_volume = min(view.low_volume_per_hour, view.high_volume_per_hour)
+    reachable_buy = max(0.0, base_volume * max(view.buy_fill_share, 0.01))
+    reachable_sell = max(0.0, base_volume * max(view.sell_fill_share, 0.01))
 
     # Crowd from the item's REAL volume, not the reachable slice: a low fill
     # share means fewer units arrive at your price, not fewer rivals queued.
-    crowd = engine.touch_competitors(row.thin_volume_1h, row.limit,
+    crowd = engine.touch_competitors(base_volume, row.limit,
                                      config.calibration)
     sigma = view.ou.sigma if view.ou is not None else None
     highalch = (None if row.alch_floor is None
@@ -727,8 +812,19 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
     if choice is None:
         return replace(row, deep_checked=True, warnings=row.warnings + (
             "history left no positive concrete execution price",))
-    buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice
+    buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice[:6]
     margin = engine.net_margin(buy, sell, row.tax_exempt, row.bond)
+    dip_notes: Tuple[str, ...] = ()
+    if choice.dip_depth > 0:
+        half_life = view.half_life_hours
+        dip_notes = ((
+            "away bid {:.0%} under the market ({:,} vs {:,}): it fills only if "
+            "the price dips while you are away; the exit assumes {:.0%} of the "
+            "dip is recovered by the sale{}".format(
+                choice.dip_depth, buy, row.base_buy or row.buy,
+                choice.dip_retention,
+                " (mean-reverting, half-life {:.0f}h)".format(half_life)
+                if half_life else "")),)
 
     return replace(
         row,
@@ -761,7 +857,8 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         buy_improvement=buy_improvement,
         sell_improvement=sell_improvement,
         buy_share=breakdown.buy_share, sell_share=breakdown.sell_share,
-        model_buy_volume_1h=reachable_buy,
+        model_buy_volume_1h=choice.buy_volume_1h,
+        dip_depth=choice.dip_depth, dip_retention=choice.dip_retention,
         model_sell_volume_1h=reachable_sell,
         competitors=crowd, sigma_daily=sigma, ou_fit=view.ou, scored_at=now,
         alch_arbitrage_gp=breakdown.alch_arbitrage_gp,
@@ -776,7 +873,7 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         history_mean_volume=view.mean_volume,
         warnings=_refresh_timing_warnings(row.warnings, breakdown,
                                           config.calibration)
-        + _history_warnings(view),
+        + _history_warnings(view) + dip_notes,
     )
 
 
@@ -850,18 +947,11 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
         category_count[row.category] = category_count.get(row.category, 0) + 1
         remaining_seed -= _unit_capital(row)
 
-    # Active quantity was already sized so the whole round trip completes
-    # before the deadline with the target probability; funding more would
-    # trade that guarantee away, funding less only idles the bank. Overnight
-    # intentionally waits and keeps the upper bound.
-    capital_caps = []
-    for row in selected:
-        if config.trade_mode is engine.TradeMode.ACTIVE:
-            capital_caps.append(row.capital_needed)
-            continue
-        reachable = max(1, int(row.fill_high_qty))
-        capital_caps.append(min(row.capital_needed,
-                                reachable * _unit_capital(row)))
+    # Quantity was already chosen per mode: Active so the whole round trip
+    # completes before the deadline with the target probability, Away by
+    # expected value after stranded-inventory stress. Funding a different
+    # bound here would trade that choice away again.
+    capital_caps = [row.capital_needed for row in selected]
     amounts = engine.allocate_portfolio(
         [row.ranking_value for row in selected], config.capital,
         [_unit_capital(row) for row in selected], capital_caps,
@@ -1136,6 +1226,23 @@ def _warnings(depth: int, drift: float, ofi: float, affordable: int, qty: int,
     return tuple(notes)
 
 
+# Quote age at which confidence drops: (no longer Medium, Speculative). A
+# display policy, by mode. Active trades the print now, so minutes matter. An
+# Away bid rests for hours, where the price can move far more than in a few
+# minutes of quote age — the staleness factor already discounts the score by
+# the item's own volatility — and the automatic Away profile admits quotes up
+# to 15 minutes old, which the Active limit then contradicted by declaring
+# them all Speculative.
+QUOTE_AGE_LIMITS = {
+    engine.TradeMode.ACTIVE: (180, 300),
+    engine.TradeMode.OVERNIGHT: (600, 900),
+}
+
+
+def quote_age_limits(mode: engine.TradeMode) -> Tuple[int, int]:
+    return QUOTE_AGE_LIMITS[engine.TradeMode(mode)]
+
+
 def confidence_label(row: FlipRow) -> str:
     """One confidence policy shared by the Python surfaces.
 
@@ -1147,7 +1254,8 @@ def confidence_label(row: FlipRow) -> str:
     interval_width = ((row.fill_high_qty - row.fill_low_qty) /
                       max(1.0, row.qty_per_window))
     regime = row.regime_score or 0.0
-    stale = row.quote_age > 300
+    fresh_limit, stale_limit = quote_age_limits(row.trade_mode)
+    stale = row.quote_age > stale_limit
     if stale or regime >= engine.DEFAULT_CALIBRATION.regime_shift_threshold:
         return "Speculative"
     if (not row.priced_from_reference and row.deep_checked
@@ -1156,7 +1264,7 @@ def confidence_label(row: FlipRow) -> str:
             and interval_width <= 0.55 and row.execution_quality >= 0.62):
         return "High"
     if (row.edge_probability >= 0.55 and row.p_fill >= 0.25
-            and row.quote_age <= 180 and interval_width <= 0.85
+            and row.quote_age <= fresh_limit and interval_width <= 0.85
             and row.execution_quality >= 0.45):
         return "Medium"
     return "Speculative"
