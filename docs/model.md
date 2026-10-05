@@ -12,8 +12,9 @@ both rules to F2P-only items and 3 slots. Slot count and item access are not
 separate settings, so `members + 3 slots` cannot exist in the normal UI, CLI or
 Python configuration.
 
-There are two first-class flip strategies. They are the two ends of one
-question — how long until you next look at the Grand Exchange:
+There are three first-class flip strategies. Active and Away are the two
+ends of one question — how long until you next look at the Grand Exchange;
+Max profit (section 1d) asks which single flip makes the most money:
 
 - **Active** — you are watching and relist the sell as soon as the buy fills.
   Ranks expected GP per occupied slot-hour, rewarding fast round trips and
@@ -185,6 +186,52 @@ the next eight hours ran at 0.73–0.81× the snapshot hour after midnight UTC
 and 1.3–1.8× from late morning; the daily average takes the cycle out without
 inventing an hourly profile that five items cannot support.
 
+### 1d. Max profit: the best flip, whatever it takes
+
+**Max profit** (stored as `profit`; `--strategy profit`) is for a player who
+cares how much a flip makes, not how fast the slot turns over. Active's
+gp-per-slot-hour rightly prefers a 20k margin that clears in twenty minutes
+to a 200k one that takes six hours — but only if the slot is refilled with
+another good flip. When it is not, the slow flip is the better trade, and
+Active can never say so.
+
+What it does:
+
+- **Ranks on profit per flip**, not per hour: risk-adjusted expected profit
+  for the funded quantity after GE tax, the bond fee, the fill distribution,
+  adverse selection, holding risk, quote staleness, mean reversion, the alch
+  floor, update risk and the stress cost of unsold inventory. Shrinkage, edge
+  probability, execution evidence and the portfolio layer work unchanged.
+- **Relists like Active**: the sell goes in as soon as the buy fills, so it
+  uses the same sequential round-trip distribution. The deadline is 24 hours,
+  the longest horizon the profile accepts. A trip not finished by then is
+  cancelled.
+- **Charges unsold inventory like Away.** Units bought but not sold by the
+  deadline carry the same stress move (1.65σ over the horizon plus falling
+  drift and seller flow, capped at 50%), with the alch floor covering at
+  most what can be cast in Away's four-hour clearing window.
+- **One flip is one buy offer of at most one buy-limit window**, although 24
+  hours span six windows. The quantity is Away's expected-value choice —
+  25/50/75/100% of the round trip's mean-rate capacity before the deadline,
+  at the optimal prices — so a size whose tail would sit unsold loses to a
+  smaller one.
+- **Prices and sizes on the 14-day average volume** after the deep check,
+  as Away does: a day-long deadline spans the whole daily cycle, so the one
+  live hour the snapshot landed in is the wrong rate.
+- **Never bids under the touch.** Dip bids are an Away tool for an offer
+  nobody watches; a Max profit buy is relisted and repriced instead.
+
+Time is information here, not the ranking. Every pick still shows the
+P50/P80/P90 band, P(full trip within 24h), the re-check and cancel-by times,
+expected slot-hours, downside risk and warnings ("fill odds" below 50%,
+"inventory risk" from 20% unsold). A slow pick can have a median past the
+deadline: its expected value already counts the cancelled remainder, and the
+band says so plainly. Quote-age confidence uses Active's limits, because the
+offer is placed at the live quote now. The automatic browser plan keeps
+Active's freshness and ROI floors but Away's lower volume floor — admitting
+slow items is the point — and has no completion-target or 2-hour single-unit
+gate; the stress charge is what keeps a fragile slow flip down.
+
 ### 2. You have to get to the front of the queue, and you are not alone in it
 
 How many offers you are queued behind used to be a constant: four, on every
@@ -331,7 +378,8 @@ and it is worst exactly where the data is thinnest.
 So every score is shrunk toward the market-wide average by an amount set by how
 much volume it rests on, using a hierarchical (empirical-Bayes) posterior. The
 output shows both numbers: **MEASURED** is the score before shrinkage;
-**EV/SLOT/H** (Active) or **HORIZON EV** (Away) is after. A wide gap means
+**EV/SLOT/H** (Active), **HORIZON EV** (Away) or **PROFIT/FLIP** (Max profit)
+is after. A wide gap means
 the measured number was mostly the thinness of the data behind it. When no
 difference between the day's scores survives the noise at all, the tool says so
 instead of ranking anyway.

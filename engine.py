@@ -89,17 +89,24 @@ class AccountType(str, Enum):
 class TradeMode(str, Enum):
     """The decision horizon changes the utility function, not just the copy.
 
-    The two modes are the two ends of one question: how long until you next
-    look at the Grand Exchange. ACTIVE means you are watching and relist the
-    sell as soon as the buy fills. OVERNIGHT — shown as "Away" — means the buy
-    rests unattended for ``overnight_hours`` (1 to 24: a short errand, a work
-    day or a night) and the sell can only go in when you are back. "away" is
-    accepted as a synonym; the stored value stays "overnight" so saved
+    ACTIVE and OVERNIGHT are the two ends of one question: how long until you
+    next look at the Grand Exchange. ACTIVE means you are watching and relist
+    the sell as soon as the buy fills. OVERNIGHT — shown as "Away" — means the
+    buy rests unattended for ``overnight_hours`` (1 to 24: a short errand, a
+    work day or a night) and the sell can only go in when you are back. "away"
+    is accepted as a synonym; the stored value stays "overnight" so saved
     profiles keep working.
+
+    PROFIT — shown as "Max profit" — asks a different question: which single
+    flip (one buy offer, at most one buy-limit window) makes the most money,
+    however long it takes. You relist at once as in ACTIVE, but the deadline
+    is PROFIT_HORIZON_HOURS and the ranking is risk-adjusted profit per flip,
+    not per slot-hour. Time is still reported; it just does not rank.
     """
 
     ACTIVE = "active"
     OVERNIGHT = "overnight"
+    PROFIT = "profit"
 
     @classmethod
     def _missing_(cls, value):
@@ -114,6 +121,10 @@ DEFAULT_OVERNIGHT_HOURS = 8.0
 # Away horizons: short absences are as real as a night's sleep, and they were
 # the gap the old 6-12h presets left between watching and sleeping.
 OVERNIGHT_HORIZON_PRESETS = (1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0)
+# Max profit round-trip deadline: the longest horizon the profile accepts. An
+# unfinished trip is cancelled here and what is still unsold carries the same
+# stress cost as Away inventory.
+PROFIT_HORIZON_HOURS = 24.0
 
 
 @dataclass(frozen=True)
@@ -140,6 +151,8 @@ class TradingProfile:
 
     @property
     def horizon_hours(self) -> float:
+        if self.mode is TradeMode.PROFIT:
+            return PROFIT_HORIZON_HOURS
         return (float(self.overnight_hours)
                 if self.mode is TradeMode.OVERNIGHT else float(WINDOW_HOURS))
 
@@ -1586,7 +1599,7 @@ class ScoreBreakdown:
             "alch": self.alch,
             "update_risk": self.update_risk,
         }
-        if self.mode is TradeMode.ACTIVE:
+        if self.mode is not TradeMode.OVERNIGHT:
             values["holding_risk"] = self.holding_risk
         return values
 
@@ -1620,7 +1633,8 @@ def score_flip(
     fill_log_sigma: Optional[float] = None,
     calibration: Calibration = DEFAULT_CALIBRATION,
 ) -> ScoreBreakdown:
-    """Expected gp per slot-hour for one flip, with its decomposition.
+    """Expected gp per slot-hour (Active) or risk-adjusted gp per flip (Away,
+    Max profit) for one flip, with its decomposition.
 
     `buy_volume_1h` is seller-initiated volume (what fills your buy offer);
     `sell_volume_1h` is buyer-initiated volume (what fills your sell offer).
@@ -1677,6 +1691,8 @@ def score_flip(
     effective_horizon = (float(horizon_hours) if horizon_hours is not None
                          else (DEFAULT_OVERNIGHT_HOURS
                                if mode is TradeMode.OVERNIGHT
+                               else PROFIT_HORIZON_HOURS
+                               if mode is TradeMode.PROFIT
                                else calibration.horizon_hours))
     if effective_horizon <= 0:
         raise ValueError("horizon_hours must be positive")
@@ -1741,11 +1757,16 @@ def score_flip(
     # How long inventory is held. Active: the sell leg. Away: at least until
     # you are back, then the sell — the old code used the sell leg alone and
     # so measured update and reversion exposure over minutes for a position
-    # that is held all night.
+    # that is held all night. Max profit relists like Active, but its P80 can
+    # run past the deadline, where the trip is cancelled; what is held after
+    # that is priced by the stranded-inventory stress below instead.
     if mode is TradeMode.OVERNIGHT:
         hold_seconds = horizon_seconds + sell_seconds
         exposure_seconds = (horizon_seconds
                             + liquidation_hours * SECONDS_PER_HOUR)
+    elif mode is TradeMode.PROFIT:
+        hold_seconds = sell_seconds
+        exposure_seconds = min(trip_p80, horizon_seconds)
     else:
         hold_seconds = sell_seconds
         exposure_seconds = trip_p80
@@ -1769,7 +1790,8 @@ def score_flip(
         downside_risk = 0.0
     else:
         # An unattended buy that fills without its sell is inventory, not a
-        # successful flip.  Price risk grows with sqrt(time); falling drift and
+        # successful flip — and so is a Max profit buy still unsold at its
+        # deadline.  Price risk grows with sqrt(time); falling drift and
         # seller-heavy flow widen the stress move.  The alch floor caps that
         # move where it is genuinely close enough to matter.
         horizon_days = effective_horizon / HOURS_PER_DAY
@@ -1786,16 +1808,24 @@ def score_flip(
             # hour across the selling window. It used to cap the loss on
             # every stranded unit, which zeroed the downside of 20,000 bolts
             # that would take seventeen hours to alch.
-            protected = min(stranded, alch_protected_units(liquidation_hours))
+            # Max profit has no separate selling phase; leftovers at the
+            # deadline get the same clearing window Away inventory gets.
+            protected = min(stranded, alch_protected_units(
+                liquidation_hours if mode is TradeMode.OVERNIGHT
+                else calibration.overnight_liquidation_hours))
         downside_risk = buy * (protected * min(stress_move, floor_loss or 0.0)
                                + (stranded - protected) * stress_move)
-        completed_value = (completed_profit * adverse * stale * reversion
-                           * alch * update)
+        # Max profit relists at once, so completed units carry the same
+        # between-legs price risk as Active; Away's is in the stress move.
+        completed_value = (completed_profit * adverse
+                           * (hold if mode is TradeMode.PROFIT else 1.0)
+                           * stale * reversion * alch * update)
         expected = completed_value - downside_risk
 
     # Active: renewal reward. Expected completed profit over expected slot
     # occupancy, both taken over the same multiplier and the same deadline.
-    hours = ((occupancy if mode is TradeMode.ACTIVE else total_seconds)
+    # Max profit reports the same rate, but ranks on the profit itself.
+    hours = ((total_seconds if mode is TradeMode.OVERNIGHT else occupancy)
              / SECONDS_PER_HOUR)
     per_slot_hour = expected / hours if hours > 0 and hours != float("inf") else 0.0
     ranking_value = (per_slot_hour if mode is TradeMode.ACTIVE else expected)

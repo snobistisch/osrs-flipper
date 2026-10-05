@@ -580,8 +580,9 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     so those two cannot drift silently.
   -->
   <p>A members-first Grand Exchange decision terminal. Enter your bank, choose
-     <strong>Active</strong> (you are watching) or <strong>Away</strong> (your next
-     check is hours off), and get an executable
+     <strong>Active</strong> (you are watching), <strong>Away</strong> (your next
+     check is hours off) or <strong>Max profit</strong> (the most gp per flip,
+     however long it takes), and get an executable
      eight-slot setup from live OSRS Wiki market data.</p>
   <details class="panel" id="strategy">
     <summary>How the ranking thinks — five reasons a quoted margin isn't profit</summary>
@@ -700,6 +701,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
       <select id="f-strategy">
         <option value="active" selected>Active — I'm watching the GE</option>
         <option value="overnight">Away — next check in a few hours / overnight</option>
+        <option value="profit">Max profit — best flips, any duration</option>
       </select>
     </div>
     <div class="field hidden" id="overnight-field">
@@ -936,6 +938,10 @@ const MEMBER_SLOTS = 8;
 const DEFAULT_ACCOUNT = "members";
 const DEFAULT_STRATEGY = "active";
 const DEFAULT_OVERNIGHT_HOURS = 8;
+/* Max profit round-trip deadline: the longest horizon the profile accepts.
+   Same as engine.PROFIT_HORIZON_HOURS. */
+const PROFIT_HORIZON_HOURS = 24;
+const STRATEGIES = ["active", "overnight", "profit"];
 const DEFAULT_BANK_RISK_PERCENT = 25;
 const MIN_BANK_RISK_PERCENT = 10;
 const MAX_BANK_RISK_PERCENT = 100;
@@ -1710,7 +1716,8 @@ function scoreFlip(o) {
 
   const mode = o.mode || DEFAULT_STRATEGY;
   const horizonHours = o.horizonHours || (mode === "overnight"
-    ? DEFAULT_OVERNIGHT_HOURS : CAL.horizon_hours);
+    ? DEFAULT_OVERNIGHT_HOURS
+    : mode === "profit" ? PROFIT_HORIZON_HOURS : CAL.horizon_hours);
   const horizonSeconds = horizonHours * SECONDS_PER_HOUR;
   let buyFill, sellFill, pBuy, pSell, pBoth, pStranded, fillLow, fillHigh;
   let liquidationHours = 0;
@@ -1747,10 +1754,12 @@ function scoreFlip(o) {
   let sigma = o.sigmaDaily != null ? o.sigmaDaily : (o.ou ? o.ou.sigma : null);
   if (sigma == null || sigma <= 0) sigma = CAL.default_sigma_daily;
 
-  // Away holds inventory at least until you are back, then sells.
+  // Away holds inventory at least until you are back, then sells. Max profit
+  // cancels at its deadline; inventory held past it is priced by the stress.
   const holdSeconds = mode === "overnight" ? horizonSeconds + sellSeconds : sellSeconds;
   const exposureSeconds = mode === "overnight"
-    ? horizonSeconds + liquidationHours * SECONDS_PER_HOUR : tripP80;
+    ? horizonSeconds + liquidationHours * SECONDS_PER_HOUR
+    : mode === "profit" ? Math.min(tripP80, horizonSeconds) : tripP80;
   const adverse = adverseSelectionFactor(o.ofi, o.drift);
   const hold = holdingRisk(sigma, sellSeconds);
   const stale = stalenessFactor(o.quoteAge, sigma);
@@ -1764,28 +1773,34 @@ function scoreFlip(o) {
   const completedProfit = o.margin * sellFill.expected;
   let downsideRisk = 0;
   let expected;
-  if (mode === "overnight") {
+  if (mode === "overnight" || mode === "profit") {
+    // Away inventory unsold after the sell window, or Max profit inventory
+    // still unsold at its deadline.
     let stressMove = 1.65 * sigma * Math.sqrt(horizonHours / HOURS_PER_DAY);
     stressMove += Math.max(0, -o.drift) * Math.sqrt(horizonHours);
     stressMove += Math.max(0, -o.ofi) * 0.025;
     stressMove = Math.max(0, Math.min(0.50, stressMove));
     const floorLoss = floor == null ? null : Math.max(0, (o.buy - floor) / o.buy);
     const stranded = Math.max(0, buyFill.expected - sellFill.expected);
-    // The floor is only as wide as your casting across the selling window.
+    // The floor is only as wide as your casting across the selling window;
+    // Max profit leftovers get the same clearing window after the deadline.
     const protectedUnits = floorLoss != null && floorLoss < CAL.alch_relevant_distance
-      ? Math.min(stranded, alchProtectedUnits(liquidationHours)) : 0;
+      ? Math.min(stranded, alchProtectedUnits(mode === "overnight"
+        ? liquidationHours : CAL.overnight_liquidation_hours)) : 0;
     downsideRisk = o.buy * (protectedUnits * Math.min(stressMove, floorLoss || 0) +
       (stranded - protectedUnits) * stressMove);
-    expected = completedProfit * adverse * stale * reversion * alch * update -
-      downsideRisk;
+    // Max profit relists at once: completed units carry Active's holding risk.
+    expected = completedProfit * adverse * (mode === "profit" ? hold : 1) *
+      stale * reversion * alch * update - downsideRisk;
   } else {
     expected = completedProfit * adverse * hold * stale * reversion * alch * update;
   }
   // Active: expected completed profit over expected occupancy, both over the
-  // same multiplier and deadline.
+  // same multiplier and deadline. Max profit reports that rate but ranks on
+  // the profit per flip itself.
   const hours = (mode === "overnight" ? totalSeconds : occupancy) / SECONDS_PER_HOUR;
   const perSlotHour = hours > 0 && isFinite(hours) ? expected / hours : 0;
-  const rankingValue = mode === "overnight" ? expected : perSlotHour;
+  const rankingValue = mode === "profit" || mode === "overnight" ? expected : perSlotHour;
 
   return {
     qty: o.qty, margin: o.margin, rawProfit,
@@ -1797,7 +1812,7 @@ function scoreFlip(o) {
     fillLowQty: fillLow, fillHighQty: fillHigh, liquidationHours,
     factors: {
       "both legs fill": pBoth, "adverse selection": adverse,
-      ...(mode === "active" ? { "holding risk": hold } : {}),
+      ...(mode !== "overnight" ? { "holding risk": hold } : {}),
       "quote staleness": stale,
       "mean reversion": reversion, "alch floor": alch, "update risk": update,
     },
@@ -1993,8 +2008,8 @@ function positionCapitalCeiling(row, maxPerPosition, bankRiskPercent) {
   // CAL.active_target_completion probability. Above the safe default, the
   // user's risk setting deliberately blends toward the quantity that only
   // fills at the MEAN rate (about one completion in three); the card then
-  // shows the lower completion odds. Away quantity is already the
-  // expected-value choice after stranded-inventory stress, so it is not
+  // shows the lower completion odds. Away and Max profit quantity is already
+  // the expected-value choice after stranded-inventory stress, so it is not
   // blended.
   const baseFillBound = row.qty;
   const riskPercent = normalizeBankRiskPercent(bankRiskPercent);
@@ -2046,7 +2061,7 @@ function rescoreAllocated(r) {
    An Away bid rests for hours, so minutes of quote age matter far less than for
    an Active trade; the automatic Away profile admits 15-minute-old quotes.
    Same policy as filters.QUOTE_AGE_LIMITS. */
-const QUOTE_AGE_LIMITS = { active: [180, 300], overnight: [600, 900] };
+const QUOTE_AGE_LIMITS = { active: [180, 300], overnight: [600, 900], profit: [180, 300] };
 const quoteAgeLimits = (mode) => QUOTE_AGE_LIMITS[mode === "overnight" ? "overnight" : "active"];
 
 function confidenceLabel(row) {
@@ -3252,11 +3267,18 @@ function timingWarnings(breakdown) {
     if (breakdown.pFill < 0.25) {
       notes.push(`fill odds: only ${pctOf(breakdown.pFill)} chance the full buy fills before return`);
     }
+  } else if (breakdown.mode === "profit") {
+    if (breakdown.pFill < 0.50) {
+      notes.push(`fill odds: only ${pctOf(breakdown.pFill)} chance the whole round trip completes within ${Math.round(breakdown.horizonHours)}h; what is left is cancelled at the deadline`);
+    }
   } else if (breakdown.pFill + 1e-9 < CAL.active_target_completion) {
     notes.push(`fill odds: only ${pctOf(breakdown.pFill)} chance the whole round trip completes within ${Math.round(breakdown.horizonHours)}h at this size (target ${pctOf(CAL.active_target_completion)})`);
   }
   if (breakdown.mode === "overnight" && breakdown.pStranded >= 0.20) {
     notes.push(`inventory risk: about ${pctOf(breakdown.pStranded)} may remain after the post-return sell window; stress downside ${formatGp(Math.round(breakdown.downsideRisk))} gp`);
+  }
+  if (breakdown.mode === "profit" && breakdown.pStranded >= 0.20) {
+    notes.push(`inventory risk: about ${pctOf(breakdown.pStranded)} may still be unsold at the ${Math.round(breakdown.horizonHours)}h deadline; stress downside ${formatGp(Math.round(breakdown.downsideRisk))} gp`);
   }
   return notes;
 }
@@ -3332,11 +3354,14 @@ function concessionPoints(maximum) {
 /* Active quantity is the largest whose whole round trip completes before the
    deadline with CAL.active_target_completion probability. Away may also bid
    under the touch and wait for a dip (paid only on items that measurably
-   revert), and sizes by expected value after stranded-inventory stress.
-   Mirrors filters._optimise_execution, including the two-stage search. */
+   revert), and sizes by expected value after stranded-inventory stress. Max
+   profit sizes the same way from the round trip's mean-rate capacity before
+   its deadline, capped at one buy-limit window, and never bids under the
+   touch. Mirrors filters._optimise_execution, including the two-stage search. */
 function optimiseExecution(o) {
   const sigma = o.fillLogSigma ?? fillLogSigma(false);
   const away = o.config.strategy === "overnight";
+  const profit = o.config.strategy === "profit";
   const freeSell = taxBoundaryUndercut(o.baseSell, o.exempt, o.bond);
   const maxTotal = Math.max(0, o.baseSell - o.baseBuy - 1);
   const originalSpread = Math.max(1, o.baseSell - o.baseBuy);
@@ -3387,6 +3412,8 @@ function optimiseExecution(o) {
       qty = flippableQty(limit, fillableQuantity(bid.volume, buyShare,
         o.config.horizonHours), affordable);
       qty = Math.max(1, Math.floor(qty * fraction));
+    } else if (profit) {
+      qty = Math.max(1, Math.floor(meanCapacity * fraction));
     } else {
       qty = Math.max(1, flippableQty(limit, targetQuantity(tripRate, usable,
         CAL.active_target_completion, sigma, fillLogMu()), affordable));
@@ -3412,7 +3439,7 @@ function optimiseExecution(o) {
       }
     }
   }
-  if (best && away) {
+  if (best && (away || profit)) {
     // Prices first at full size, then the size at those prices.
     for (const fraction of AWAY_QTY_FRACTIONS.slice(0, -1)) {
       const smaller = evaluate(bestBid, bestExtra, fraction);
@@ -3582,9 +3609,9 @@ async function refineTopRows(rows, config, now) {
       // about the RATE your offer fills at, not a separate penalty on profit.
       // A price only 5% of the market ever reached is not a flip earning 5% of
       // its margin — it is a flip that takes twenty times as long.
-      // Away spans hours of the daily cycle, so it is sized on the 14-day
-      // average rate, not the one live hour the snapshot landed in.
-      const baseVolume = config.strategy === "overnight" &&
+      // Away and Max profit span hours of the daily cycle, so they are sized
+      // on the 14-day average rate, not the one live hour the snapshot landed in.
+      const baseVolume = config.strategy !== "active" &&
         view.lowVolumePerHour > 0 && view.highVolumePerHour > 0
         ? Math.min(view.lowVolumePerHour, view.highVolumePerHour) : row.volume;
       const reachableBuy = Math.max(0, baseVolume * Math.max(view.buyFillShare, 0.01));
@@ -3889,7 +3916,7 @@ function validSlotLock(value, slots) {
     limit: value.limit == null ? null : Number(value.limit),
     limitGroup: value.limitGroup == null ? null : String(value.limitGroup),
     category: value.category == null ? "other" : String(value.category),
-    mode: value.mode === "overnight" ? "overnight" : "active",
+    mode: STRATEGIES.includes(value.mode) ? value.mode : "active",
     horizonHours: Number.isFinite(Number(value.horizonHours)) ? Number(value.horizonHours) : WINDOW_HOURS,
   };
 }
@@ -4190,7 +4217,7 @@ function normalizeBankRiskPercent(value) {
 function restorePreferences() {
   const p = loadPreferences();
   $("#f-account").value = p.account === "free-to-play" ? p.account : DEFAULT_ACCOUNT;
-  $("#f-strategy").value = p.strategy === "overnight" ? p.strategy : DEFAULT_STRATEGY;
+  $("#f-strategy").value = STRATEGIES.includes(p.strategy) ? p.strategy : DEFAULT_STRATEGY;
   $("#f-horizon").value = AWAY_HORIZON_PRESETS.includes(Number(p.horizon))
     ? String(p.horizon) : String(DEFAULT_OVERNIGHT_HOURS);
   $("#f-bank-risk").value = String(normalizeBankRiskPercent(p.bankRiskPercent));
@@ -4200,12 +4227,16 @@ function restorePreferences() {
 
 function automaticFilterProfile(capital, account, strategy, bankRiskPercent) {
   const overnight = strategy === "overnight";
+  // Max profit places its offer at the live quote like Active, but a slow
+  // item is exactly what it is for, so it keeps Away's volume floor.
+  const profit = strategy === "profit";
   const lowBank = capital <= 10_000_000;
   const riskPercent = normalizeBankRiskPercent(bankRiskPercent);
   const maxPositionCapital = Math.max(1, Math.floor(capital * riskPercent / 100));
   return {
     maxQuoteAge: overnight ? 900 : 600,
-    minVolume1h: overnight ? (lowBank ? 40 : 20) : (lowBank ? 100 : 40),
+    minVolume1h: overnight ? (lowBank ? 40 : 20)
+      : profit ? (lowBank ? 40 : 20) : (lowBank ? 100 : 40),
     minRoi: overnight ? 0.008 : 0.003,
     minUndercutDepth: 1,
     minPrice: 1,
@@ -4230,7 +4261,8 @@ function readConfig() {
     includeMembers: account === "members",
     strategy,
     horizonHours: strategy === "overnight"
-      ? Number($("#f-horizon").value) : WINDOW_HOURS,
+      ? Number($("#f-horizon").value)
+      : strategy === "profit" ? PROFIT_HORIZON_HOURS : WINDOW_HOURS,
     natureCost: state.natureCost,
     ...automatic,
   };
@@ -4375,14 +4407,18 @@ function show(allRows, config, statusText) {
   renderTape();
   renderTerminalStats(config);
   const overnight = config.strategy === "overnight";
+  const profit = config.strategy === "profit";
+  const slotsText = config.account === "members" ? "Members · 8 slots" : "F2P · 3 slots";
   $("#mode-summary").innerHTML = overnight
-    ? `<strong>AWAY · NEXT CHECK IN ${config.horizonHours}H</strong><span>${config.account === "members" ? "Members · 8 slots" : "F2P · 3 slots"} · automatic liquidity and risk gates</span>`
-    : `<strong>ACTIVE FLIPPING</strong><span>${config.account === "members" ? "Members · 8 slots" : "F2P · 3 slots"} · automatic liquidity and risk gates</span>`;
-  $("#ranking-heading").textContent = overnight ? "Horizon EV" : "EV/slot/h";
+    ? `<strong>AWAY · NEXT CHECK IN ${config.horizonHours}H</strong><span>${slotsText} · automatic liquidity and risk gates</span>`
+    : profit
+      ? `<strong>MAX PROFIT · ANY DURATION UP TO ${config.horizonHours}H</strong><span>${slotsText} · automatic liquidity and risk gates</span>`
+      : `<strong>ACTIVE FLIPPING</strong><span>${slotsText} · automatic liquidity and risk gates</span>`;
+  $("#ranking-heading").textContent = overnight ? "Horizon EV" : profit ? "Profit/flip" : "EV/slot/h";
   $("#time-heading").textContent = overnight ? "Return + sell" : "Round trip";
   if (state.tab === "flip") $("#tab-blurb").textContent = overnight
     ? `Buy offers rest for ${config.horizonHours}h — some below today's price, to catch a dip on items that measurably bounce back. You sell on return, with a ${CAL.overnight_liquidation_hours}h sell window. Before you go: leave listed sell offers in place, and cancel Active buys that have not filled — they were priced for someone watching.`
-    : TAB_BLURB.flip;
+    : profit ? PROFIT_BLURB(config.horizonHours) : TAB_BLURB.flip;
   savePreferences();
   $("#plan").classList.toggle("hidden", state.tab !== "flip" ||
     (!kept.length && !locks.length));
@@ -4595,7 +4631,9 @@ function renderPlan(config) {
     parts.push(`${slots - state.planEntries.length} slot${
       slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: the remaining candidates failed the automatic confidence, trend or fill checks.`);
   }
-  if (config.strategy === "overnight") {
+  if (config.strategy === "profit") {
+    parts.push(`Automatic selection only uses direct live quotes and history-checked items. Max profit ranks risk-adjusted expected profit per flip, not per hour: each offer is at most one buy limit, sized for the best expected value after the cost of inventory still unsold at the ${Math.round(config.horizonHours)}h deadline, with a maximum of ${config.bankRiskPercent}% of your bank (${formatGp(config.maxPositionCapital)}) per new trade. A slow flip can win here; its time band and completion odds are on its card, and what is not done by the deadline is cancelled. Each card says when to re-check: if nothing has bought by then, re-check the live margin.`);
+  } else if (config.strategy === "overnight") {
     parts.push(`Automatic selection only uses direct live quotes and history-checked items. Away quantities are the expected-value choice after the cost of inventory still unsold after the ${CAL.overnight_liquidation_hours}h selling window, with a maximum of ${config.bankRiskPercent}% of your bank (${formatGp(config.maxPositionCapital)}) per new trade. Some bids sit under today's price: they only fill if the price dips while you are away, and are chosen only for items that measurably bounce back. Before you go: leave listed sell offers in place, and cancel Active buys that have not filled.`);
   } else {
     const target = pctOf(CAL.active_target_completion);
@@ -4639,7 +4677,7 @@ function renderTable() {
       <td>${num(r.buy)}</td>
       <td${r.listAt < r.sell ? ` class="pos" title="List here, not ${num(r.sell)} — identical net revenue after tax, better queue position"` : ""}>${num(r.listAt)}</td>
       <td>${(r.roi * 100).toFixed(1)}%</td>
-      <td class="${r.mode !== "overnight" && r.pFill + 1e-9 < CAL.active_target_completion ? "bad" : ""}" title="${r.mode === "overnight" ? "" : `${Math.round(r.pFill * 100)}% chance the whole round trip completes within ${Math.round(r.horizonHours)}h. Typical (median) to 90% time; not a guarantee.`}">${r.mode === "overnight" ? formatDuration(r.totalSeconds) : `${formatDuration(r.roundTripP50Seconds ?? r.totalSeconds)}–${formatDuration(r.roundTripP90Seconds ?? r.totalSeconds)}`}</td>
+      <td class="${r.mode === "active" && r.pFill + 1e-9 < CAL.active_target_completion ? "bad" : ""}" title="${r.mode === "overnight" ? "" : `${Math.round(r.pFill * 100)}% chance the whole round trip completes within ${Math.round(r.horizonHours)}h. Typical (median) to 90% time; not a guarantee.`}">${r.mode === "overnight" ? formatDuration(r.totalSeconds) : `${formatDuration(r.roundTripP50Seconds ?? r.totalSeconds)}–${formatDuration(r.roundTripP90Seconds ?? r.totalSeconds)}`}</td>
       <td><span class="confidence confidence-${confidenceLabel(r)}">${confidenceLabel(r)}</span></td>
       <td class="pos"><strong>${formatGp(Math.round(r.rankingValue))}</strong></td>
       <td>${savedIds.has(r.id)
@@ -4693,6 +4731,11 @@ document.addEventListener("error", (event) => {
    showing every column at once; the badge and volume columns now live on the
    Flip table, so "All" would have been the Flip tab with a longer header. */
 
+const PROFIT_BLURB = (hours) => "Ranked by risk-adjusted expected profit per " +
+  "flip — one buy offer of at most one buy limit — not per hour. You relist " +
+  `the sell as soon as the buy fills; what is not done by ${hours}h is ` +
+  "cancelled, and inventory still unsold then is charged as a stress loss. " +
+  "The time band is shown, but it does not rank.";
 const TAB_BLURB = {
   flip: "Ranked by expected gp per offer slot per hour. Buy, undercut, sell, " +
         "repeat — the horizon is hours.",
@@ -4779,7 +4822,8 @@ function selectTab(tab) {
     });
   $("#tab-blurb").textContent = (tab === "flip" && state.config?.strategy === "overnight")
     ? `Buy offers rest for ${state.config.horizonHours}h; liquidation begins only after you return.`
-    : TAB_BLURB[tab];
+    : (tab === "flip" && state.config?.strategy === "profit")
+      ? PROFIT_BLURB(state.config.horizonHours) : TAB_BLURB[tab];
   const flip = tab === "flip";
   $("#options-panel").classList.toggle("hidden", !flip);
   $("#merch-wrap").classList.toggle("hidden", flip);
@@ -5005,7 +5049,9 @@ function showDetail(id) {
   $("#d-figure").innerHTML =
     row.mode === "overnight"
       ? `${row.horizonHours}H HORIZON · <b>${formatGp(Math.round(row.rankingValue))}</b> EXPECTED GP`
-      : `${(row.roi * 100).toFixed(1)}% ROI · <b>${num(Math.round(row.rankingValue))}</b> GP/SLOT/H`;
+      : row.mode === "profit"
+        ? `${(row.roi * 100).toFixed(1)}% ROI · <b>${formatGp(Math.round(row.rankingValue))}</b> GP PER FLIP`
+        : `${(row.roi * 100).toFixed(1)}% ROI · <b>${num(Math.round(row.rankingValue))}</b> GP/SLOT/H`;
   $("#d-prices").textContent = `${num(row.buy)} → ${num(row.sell)}`;
   $("#d-raw").textContent =
     `raw quote ${num(row.latestLow)} → ${num(row.latestHigh)} gp · list the sell at ${num(row.listAt)}`;
@@ -5020,7 +5066,8 @@ function showDetail(id) {
     : `80% by ${formatDuration(row.roundTripP80Seconds ?? row.totalSeconds)}, 90% by ${formatDuration(row.roundTripP90Seconds ?? row.totalSeconds)} · ${Math.round(row.pFill * 100)}% chance the whole trip completes within ${Math.round(row.horizonHours)}h · median buy ${formatDuration(row.buySeconds)}, sell ${formatDuration(row.sellSeconds)} · nothing bought after ${formatDuration(row.repriceCheckSeconds || 0)}? re-check and reprice`;
   $("#d-profit").textContent = formatGp(Math.round(row.rankingValue)) + " gp";
   $("#d-profit-label").textContent = row.mode === "overnight"
-    ? "Expected after return liquidation" : "Expected / slot / hour";
+    ? "Expected after return liquidation"
+    : row.mode === "profit" ? "Expected profit per flip" : "Expected / slot / hour";
   $("#d-qty").textContent =
     `${formatGp(Math.round(row.rawRankingValue))} before shrinkage · ${num(row.allocatedQty || 0)} units · ${formatGp(row.allocated || 0)} gp committed`;
 
@@ -5033,6 +5080,8 @@ function showDetail(id) {
     `Quoted best case: <strong>${num(row.gross)} gp</strong>; expected completed quantity is ${num(Math.round(row.expectedSellQty))}.`,
     row.mode === "overnight"
       ? `Away workflow: the buy rests for ${row.horizonHours}h${row.dipDepth > 0 ? `, ${pctOf(row.dipDepth)} under today's price so it only fills on a dip` : ""}, you collect on return, then sell for up to ${row.liquidationHours}h. Horizon EV is <strong>${formatGp(Math.round(row.rankingValue))} gp</strong> after ${formatGp(Math.round(row.downsideRisk))} gp of unsold-inventory stress risk.`
+      : row.mode === "profit"
+      ? `Max profit: ranked on <strong>${formatGp(Math.round(row.rankingValue))} gp</strong> of risk-adjusted profit for this one offer, not per hour. Expected occupancy is ${formatDuration(row.expectedOccupancySeconds || row.totalSeconds)} (an unfinished trip is cancelled at ${Math.round(row.horizonHours)}h, ${num(Math.round(row.perSlotHour))} gp per slot-hour); ${formatGp(Math.round(row.downsideRisk))} gp of stress risk is subtracted for inventory still unsold then. One trip in ten takes longer than ${formatDuration(row.roundTripP90Seconds ?? row.totalSeconds)}.`
       : `A slot is time: expected occupancy is <strong>${formatDuration(row.expectedOccupancySeconds || row.totalSeconds)}</strong> (an unfinished trip is cancelled at ${Math.round(row.horizonHours)}h), producing ${num(Math.round(row.rankingValue))} gp per slot-hour. The ETA is a band, not a promise: one trip in ten takes longer than ${formatDuration(row.roundTripP90Seconds ?? row.totalSeconds)}.`,
   ];
   for (const [name, value] of Object.entries(row.factors)) {

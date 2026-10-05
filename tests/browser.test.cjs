@@ -262,3 +262,90 @@ test('switching to Away advises on Active offers still running', () => {
   run('state.config = { strategy: "active" }');
   assert.equal(run(`executionTimingNote({ ...${offer}, bought: 0 }, 60 * 1000)`), null);
 });
+
+test('Max profit ranks profit per flip, caps one buy limit and charges unsold stock', () => {
+  const { run } = setup();
+  const execution = (strategy, buy, sell, volume, limit) => run(`optimiseExecution({
+    baseBuy: ${buy}, baseSell: ${sell}, exempt: false, bond: false, limit: ${limit},
+    config: { capital: 50000000, maxPositionCapital: 50000000, strategy: "${strategy}",
+      horizonHours: ${strategy === 'profit' ? 'PROFIT_HORIZON_HOURS' : 4} },
+    buyVolume1h: ${volume}, sellVolume1h: ${volume}, quoteAge: 60, ofi: 0, drift: 0,
+    now: 1785000000, competitors: 8, highalch: null, natureCost: 100 })`);
+  const fast = [1000, 1030, 6000, 2000], slow = [20000, 21500, 30, 100];
+  assert.ok(execution('active', ...fast).breakdown.rankingValue >
+    execution('active', ...slow).breakdown.rankingValue);
+  const profitFast = execution('profit', ...fast), profitSlow = execution('profit', ...slow);
+  assert.ok(profitSlow.breakdown.rankingValue > profitFast.breakdown.rankingValue);
+  assert.equal(profitSlow.breakdown.rankingValue, profitSlow.breakdown.expected);
+  assert.equal(profitFast.breakdown.horizonHours, 24);
+  // A deep book still buys one window, not the six a 24h Away horizon reaches.
+  assert.equal(execution('profit', 1000, 1100, 200000, 500).qty, 500);
+  assert.equal(run('effectiveBuyLimit(500, 24, "profit")'), 500);
+
+  const score = (qty) => run(`scoreFlip({ buy: 1000, sell: 1080, margin: 58, qty: ${qty},
+    depth: 0, buyVolume1h: 150, sellVolume1h: 150, quoteAge: 60, ofi: 0, drift: 0,
+    now: 1785000000, buyShare: 0.125, sellShare: 0.125, mode: "profit" })`);
+  const heavy = score(450);
+  assert.ok(heavy.downsideRisk > score(50).downsideRisk);
+  assert.ok(score(1000).rankingValue < score(200).rankingValue);
+  assert.ok(heavy.roundTripP50Seconds < heavy.roundTripP90Seconds);
+  assert.ok('holding risk' in heavy.factors);
+  const notes = run(`timingWarnings(${JSON.stringify(heavy)})`);
+  assert.ok(notes.some((note) => /^inventory risk: .*24h deadline/.test(note)), notes.join(' | '));
+  assert.ok(notes.some((note) => note.startsWith('fill odds:')));
+});
+
+test('Max profit is a selectable, saved strategy and old saves load as before', () => {
+  const { run, storage } = setup();
+  const prefs = 'osrs-flipper.preferences.v2';
+  for (const [saved, restored] of [['profit', 'profit'], ['overnight', 'overnight'],
+    ['active', 'active'], ['away', 'active'], [undefined, 'active']]) {
+    storage.set(prefs, JSON.stringify({ strategy: saved }));
+    run('restorePreferences()');
+    assert.equal(run('$("#f-strategy").value'), restored, String(saved));
+  }
+  run('state.capital = 20000000; $("#f-strategy").value = "profit"; $("#f-horizon").value = "2"; $("#f-bank-risk").value = "25"');
+  const config = run('readConfig()');
+  assert.equal(config.strategy, 'profit');
+  assert.equal(config.horizonHours, 24);
+  assert.equal(config.minVolume1h, run('automaticFilterProfile(20000000, "members", "overnight", 25).minVolume1h'));
+  assert.equal(config.maxQuoteAge, run('automaticFilterProfile(20000000, "members", "active", 25).maxQuoteAge'));
+
+  const lock = { slot: 0, id: 1, name: 'Test', qty: 10, buy: 100, sell: 110,
+    commit: 0, expected: 10, lockedAt: 1 };
+  storage.set('osrs-flipper.slot-locks.v1', JSON.stringify({
+    'members:profit:0': [{ ...lock, mode: 'profit', horizonHours: 24 }],
+    'members:overnight:8': [{ ...lock, slot: 1, id: 2, mode: 'overnight', horizonHours: 8 }],
+    'members:active:0': [{ ...lock, slot: 2, id: 3 }],
+  }));
+  const modes = run('locksFor({account:"members", strategy:"profit", horizonHours:24, slots:8})' +
+    '.map((l) => [l.id, l.mode, l.horizonHours])');
+  assert.deepEqual(JSON.parse(JSON.stringify(modes)).sort(),
+    [[1, 'profit', 24], [2, 'overnight', 8], [3, 'active', 4]]);
+
+  // A saved Max profit offer is relisted at once, so it keeps the reminders.
+  const offer = '({ mode: "profit", createdAt: 0, qty: 100, bought: 0, sold: 0,' +
+    ' repriceCheckSeconds: 900, cancelBySeconds: 30000 })';
+  assert.match(run(`executionTimingNote(${offer}, 1000 * 1000)`), /not one unit has bought/);
+  run('state.config = { strategy: "overnight" }');
+  assert.match(run(`executionTimingNote(${offer}, 60 * 1000)`), /Cancel it, or replace it/);
+});
+
+test('the Max profit plan card and note describe profit per flip', () => {
+  const { run, elements } = setup();
+  run(`(() => {
+    const b = scoreFlip({ buy: 1000, sell: 1080, margin: 58, qty: 200, depth: 0,
+      buyVolume1h: 150, sellVolume1h: 150, quoteAge: 60, ofi: 0, drift: 0,
+      now: 1785000000, buyShare: 0.125, sellShare: 0.125, mode: "profit" });
+    const row = { ...b, id: 1, name: "Test", buy: 1000, sell: 1080, listAt: 1080,
+      roi: 0.058, allocatedQty: b.qty, allocated: b.qty * 1000,
+      allocatedExpected: b.expected, warnings: timingWarnings(b), deep: true,
+      edgeProbability: 0.9, volume: 500, age: 60, rawRankingValue: b.rankingValue,
+      shrinkRetention: 1, tags: [] };
+    state.planRows = [row]; state.slotLocks = []; state.sourceRows = [];
+    renderPlan({ slots: 8, strategy: "profit", horizonHours: 24, capital: 20000000,
+      bankRiskPercent: 25, maxPositionCapital: 5000000 });
+  })()`);
+  assert.match(elements.get('#plan-cards').innerHTML, /FULL TRIP WITHIN 24H/);
+  assert.match(elements.get('#plan-note').textContent, /Max profit ranks risk-adjusted expected profit per flip/);
+});

@@ -1,7 +1,7 @@
 """Ranked flips as a plain terminal table.
 
 Usage: python3 cli.py [--capital N] [--account members|free-to-play]
-                      [--strategy active|overnight] [--overnight-hours N]
+                      [--strategy active|overnight|profit] [--overnight-hours N]
                       [--max-age S] [--min-vol N] [--min-roi F] [--min-depth N]
 
 The filter flags now narrow what is *displayed*. They no longer decide what
@@ -45,7 +45,9 @@ def parse_args(argv):
                    default=engine.DEFAULT_TRADE_MODE.value,
                    help="active: you are watching and relist at once, ranked "
                         "on slot turnover. away (= overnight): the buy rests "
-                        "unattended for --overnight-hours, then you sell")
+                        "unattended for --overnight-hours, then you sell. "
+                        "profit: the most risk-adjusted gp per flip (one buy "
+                        "limit), however long it takes up to 24h")
     p.add_argument("--overnight-hours", type=float,
                    default=engine.DEFAULT_OVERNIGHT_HOURS,
                    help="hours until you next check the GE in away mode "
@@ -136,6 +138,8 @@ def print_crash_table(result, opts):
 
 
 def print_table(result, opts, config, exempt, nature_cost, archive_note):
+    profit = config.trade_mode is engine.TradeMode.PROFIT
+    relist = config.trade_mode is not engine.TradeMode.OVERNIGHT
     print("Budget {} gp across {} slots | {} tax-exempt items loaded | "
           "nature rune {} gp | {}".format(
               engine.format_gp(opts.capital), config.slots, len(exempt),
@@ -153,9 +157,10 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
             print("Shrinkage: every difference between these scores is within "
                   "estimation noise — today's ranking is not meaningful.")
         else:
-            print("Shrinkage: market-wide mean {} gp/slot/h; scores are pulled "
+            print("Shrinkage: market-wide mean {} {}; scores are pulled "
                   "toward it, hardest where volume is thinnest.".format(
-                      engine.format_gp(int(shrink.prior_mean_gp))))
+                      engine.format_gp(int(shrink.prior_mean_gp)),
+                      "gp per flip" if profit else "gp/slot/h"))
     hidden = {k: v for k, v in result.hidden.items() if v and k != "shown"}
     if hidden:
         print("Hidden by display filters:  " + "  ".join(
@@ -166,10 +171,11 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
               "genuinely offering nothing right now.")
         return
 
-    metric = "EV/SLOT/H" if config.trade_mode is engine.TradeMode.ACTIVE else "HORIZON EV"
+    metric = ("EV/SLOT/H" if config.trade_mode is engine.TradeMode.ACTIVE
+              else "PROFIT/FLIP" if profit else "HORIZON EV")
     header = ("{:<24} {:>8} {:>8} {:>7} {:>6} {:>7} {:>8} {:>13} {:>7} {:>11}")
-    timing = "TRIP P50-P90" if config.trade_mode is engine.TradeMode.ACTIVE else "RETURN+SELL"
-    probability = "P(TRIP)" if config.trade_mode is engine.TradeMode.ACTIVE else "P(BUY)"
+    timing = "TRIP P50-P90" if relist else "RETURN+SELL"
+    probability = "P(TRIP)" if relist else "P(BUY)"
     print(header.format("ITEM", "BUY", "SELL", "MARGIN", "ROI", "QTY",
                         "COMMIT", timing, probability, metric))
     for row in result.rows[:opts.top]:
@@ -179,7 +185,7 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
                             engine.format_duration(row.round_trip_p50_seconds
                                                    or row.expected_total_seconds),
                             engine.format_duration(row.round_trip_p90_seconds))
-                        if config.trade_mode is engine.TradeMode.ACTIVE else
+                        if relist else
                         "{:.0f}h+{:.0f}h".format(
                             row.horizon_hours, row.liquidation_hours))
         print("{:<24.24} {:>8,} {:>8,} {:>7,} {:>5.1f}% {:>7,} {:>8} "
@@ -189,8 +195,7 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
                   engine.format_gp(row.allocated_capital or 0),
                   timing_value,
                   row.p_fill * 100, value))
-        if (config.trade_mode is engine.TradeMode.ACTIVE
-                and (row.allocated_quantity or 0) > 0):
+        if relist and (row.allocated_quantity or 0) > 0:
             print("{:<24} · 80% done by {}; nothing bought after {}? re-check "
                   "the margin and reprice. Not sold by {}? cancel the rest"
                   .format("", engine.format_duration(row.round_trip_p80_seconds),
@@ -202,6 +207,11 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
                                       "", row.expected_buy_qty, row.p_stranded,
                                       row.liquidation_hours,
                                       row.downside_risk_gp))
+        if profit:
+            print("{:<24} · {:.0%} may still be unsold at the {:.0f}h deadline; "
+                  "{:,.0f} gp stress downside; {:,.0f} gp/slot/h for "
+                  "reference".format("", row.p_stranded, row.horizon_hours,
+                                     row.downside_risk_gp, row.gp_per_slot_hour))
         for note in row.warnings:
             print("{:<24} · {}".format("", note))
     print()
@@ -214,6 +224,17 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
               "freed in 20 minutes is worth more than one held for four hours "
               "at twice the margin.".format(config.horizon_hours))
         ranking_explanation = "EV/SLOT/H"
+    elif profit:
+        print("TRIP P50-P90 = both sequential legs: the median and the time "
+              "one trip in ten still exceeds. P(TRIP) is the chance the whole "
+              "quantity is bought AND sold within {:.0f}h; what is left then "
+              "is cancelled. PROFIT/FLIP is risk-adjusted expected profit for "
+              "one offer of at most one buy limit, after tax, fill odds, "
+              "holding and update risk and the stress cost of inventory still "
+              "unsold at the deadline. It is not divided by time: a slow flip "
+              "can rank first, and its band says how slow.".format(
+                  config.horizon_hours))
+        ranking_explanation = "PROFIT/FLIP"
     else:
         print("RETURN+SELL = unattended buy horizon followed by a separate "
               "post-return liquidation window. HORIZON EV includes partial "

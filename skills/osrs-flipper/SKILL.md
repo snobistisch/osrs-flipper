@@ -19,6 +19,7 @@ from that directory.
 |-----|---------|
 | What should I actively flip now? | `python3 agent.py flips --json --capital <gp> --account members --strategy active` |
 | What should I leave overnight? | `python3 agent.py flips --json --capital <gp> --account members --strategy overnight --overnight-hours 8` |
+| What makes the most per flip, however long it takes? | `python3 agent.py flips --json --capital <gp> --account members --strategy profit` |
 | What should I buy and hold? | `python3 agent.py merch --json` |
 | Anything new since last time? | `python3 agent.py watch` |
 | What am I holding? | `python3 agent.py portfolio --json` |
@@ -45,7 +46,19 @@ completion is not available while the player is offline. A warning starting
 so. Before the player leaves, tell them to keep listed sells and cancel
 unfilled Active buys.
 
-**Never quote one ETA for an active pick.** Report the band
+For `strategy: profit` — shown to players as **Max profit** — read
+`ranking_value` as risk-adjusted expected profit per flip: one buy offer of
+at most one buy limit (`quantity`), relisted as soon as it fills, with a
+`horizon_hours` deadline of 24. It is not per hour, so a slow pick can rank
+first; `gp_per_slot_hour` is still there for reference but is not the
+ranking. Report a profit pick with its time band, `p_fill` (whole quantity
+bought and sold within 24h; the rest is cancelled), `p_stranded` and
+`downside_risk_gp` (stress cost of what may still be unsold at the
+deadline). If the P50 is past 24 hours, say that the typical trip does not
+finish and the profit already assumes the remainder is cancelled. Do not
+compare a profit `ranking_value` with an active one: different units.
+
+**Never quote one ETA for an active or profit pick.** Report the band
 `round_trip_p50_seconds` (typical) to `round_trip_p90_seconds` (one trip in
 ten takes longer), plus `p_fill`: the chance the whole quantity is bought and
 sold within `horizon_hours`. All three come from one distribution. Tell the

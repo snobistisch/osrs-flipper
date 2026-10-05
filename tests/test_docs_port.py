@@ -362,6 +362,43 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("touchCompetitors(baseVolume, row.limit)", self.source)
         self.assertIn(": row.volume;", self.source)
 
+    def test_max_profit_strategy_is_ported_everywhere(self):
+        """Every mode switch in the port must know "profit"; one that does
+        not silently falls through to Active or Away behaviour."""
+        self.assertIn("const PROFIT_HORIZON_HOURS = {:.0f};".format(
+            engine.PROFIT_HORIZON_HOURS), self.source)
+        match = re.search(r"const STRATEGIES = \[([^\]]*)\]", self.source)
+        self.assertIsNotNone(match)
+        self.assertEqual(re.findall(r'"([^"]+)"', match.group(1)),
+                         [mode.value for mode in engine.TradeMode])
+        self.assertIn('<option value="profit">Max profit — best flips, any '
+                      'duration</option>', self.source)
+        # Ranking, sizing, horizon and deep-check volume.
+        self.assertIn('mode === "profit" || mode === "overnight" ? expected '
+                      ': perSlotHour', self.source)
+        self.assertIn('mode === "profit" ? PROFIT_HORIZON_HOURS : '
+                      'CAL.horizon_hours', self.source)
+        self.assertIn('const profit = o.config.strategy === "profit";',
+                      self.source)
+        self.assertIn("if (best && (away || profit))", self.source)
+        self.assertIn('strategy === "profit" ? PROFIT_HORIZON_HOURS : '
+                      'WINDOW_HOURS', self.source)
+        self.assertIn('const baseVolume = config.strategy !== "active"',
+                      self.source)
+        # Saved data: a stored "profit" survives, old values load as before.
+        self.assertIn('mode: STRATEGIES.includes(value.mode) ? value.mode : '
+                      '"active"', self.source)
+        self.assertIn('STRATEGIES.includes(p.strategy) ? p.strategy : '
+                      'DEFAULT_STRATEGY', self.source)
+        # Confidence uses the same quote-age policy as filters.
+        match = re.search(r"const QUOTE_AGE_LIMITS = \{([^}]*)\}", self.source)
+        limits = {key: [int(value) for value in values.split(",")]
+                  for key, values in re.findall(r"(\w+): \[([^\]]*)\]",
+                                                match.group(1))}
+        self.assertEqual(limits, {
+            mode.value: list(filters.QUOTE_AGE_LIMITS[mode])
+            for mode in engine.TradeMode})
+
     def test_removed_factors_are_not_still_referenced(self):
         # Functions the rebuild deleted. Their presence means a half-done port.
         for gone in ("queueFactor", "levelFactor", "stabilityFactor",

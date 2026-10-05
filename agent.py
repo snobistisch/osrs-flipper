@@ -468,7 +468,9 @@ def cmd_flips(opts) -> int:
     if not rows:
         print("Nothing worth flipping at this capital right now.")
         return 0
-    unit = "gp/slot/h" if mode is engine.TradeMode.ACTIVE else "gp horizon EV"
+    unit = ("gp/slot/h" if mode is engine.TradeMode.ACTIVE
+            else "gp profit/flip" if mode is engine.TradeMode.PROFIT
+            else "gp horizon EV")
     for index, row in enumerate(rows, 1):
         print("{:>2}. {:<26} buy {:>10} sell {:>10} x{:<6} {:>10} {}".format(
             index, row.name[:26], engine.format_gp(row.buy),

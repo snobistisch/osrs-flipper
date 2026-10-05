@@ -142,6 +142,13 @@ def landing():
             st.rerun()
 
 
+STRATEGY_LABELS = {
+    engine.TradeMode.ACTIVE: "Active",
+    engine.TradeMode.OVERNIGHT: "Away",
+    engine.TradeMode.PROFIT: "Max profit — best flips, any duration",
+}
+
+
 def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
     with st.sidebar:
         st.header("Trading setup")
@@ -154,15 +161,19 @@ def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
             help="Account type determines both GE slots and item access; "
                  "they cannot contradict each other.")
         mode = st.radio(
-            "Strategy", [engine.TradeMode.ACTIVE, engine.TradeMode.OVERNIGHT],
+            "Strategy", [engine.TradeMode.ACTIVE, engine.TradeMode.OVERNIGHT,
+                         engine.TradeMode.PROFIT],
             horizontal=True,
-            format_func=lambda value: ("Active" if value is
-                                       engine.TradeMode.ACTIVE else "Away"),
+            format_func=lambda value: STRATEGY_LABELS[value],
             help="Active: you are watching and relist the sell at once; ranks "
                  "expected GP per occupied slot-hour. Away: your next check is "
                  "hours off (an errand, work, overnight); buy offers rest "
                  "unattended — some below today's price to catch a dip — and "
-                 "you sell after you return.")
+                 "you sell after you return. Max profit: you relist at once, "
+                 "but the ranking is risk-adjusted profit per flip (one buy "
+                 "limit), however long it takes up to {:.0f}h; unsold "
+                 "inventory at that deadline is charged as a stress loss."
+                 .format(engine.PROFIT_HORIZON_HOURS))
         overnight_hours = engine.DEFAULT_OVERNIGHT_HOURS
         if mode is engine.TradeMode.OVERNIGHT:
             overnight_hours = st.select_slider(
@@ -305,6 +316,9 @@ def slot_plan(rows, config):
     st.subheader("Best GE setup right now")
     objective = ("expected GP per occupied slot-hour" if config.trade_mode is
                  engine.TradeMode.ACTIVE else
+                 "risk-adjusted profit per flip (one buy limit, any duration "
+                 "up to {:.0f}h)".format(config.horizon_hours)
+                 if config.trade_mode is engine.TradeMode.PROFIT else
                  "risk-adjusted profit over {:.0f} unattended hours".format(
                      config.horizon_hours))
     st.caption("{} account · {} slots · ranked on {}.".format(
@@ -341,7 +355,7 @@ def slot_plan(rows, config):
                 st.caption("EV {:,.0f} gp · {} {:.0%} · {} · {} model confidence"
                            .format(expected, fill_label, row.p_fill, timing,
                                    filters.confidence_label(row)))
-                if config.trade_mode is engine.TradeMode.ACTIVE:
+                if config.trade_mode is not engine.TradeMode.OVERNIGHT:
                     st.caption(reprice_note(row))
                 if st.button("Inspect", key="slot-{}-{}".format(slot,
                                                                   row.item_id)):
@@ -354,6 +368,12 @@ def slot_plan(rows, config):
     st.caption(("Horizon EV ranks expected post-return liquidation profit and "
                 "inventory downside; no sell is assumed while you are offline. "
                 if config.trade_mode is engine.TradeMode.OVERNIGHT else
+                "Profit per flip ranks risk-adjusted expected profit for one "
+                "offer, not per hour: a slow flip can rank first. An unfinished "
+                "trip is cancelled at the deadline and unsold inventory is "
+                "charged as a stress loss. Times are a band from the same model "
+                "as the completion odds, not a promise. "
+                if config.trade_mode is engine.TradeMode.PROFIT else
                 "EV/slot/h ranks expected completed profit divided by expected "
                 "slot occupancy, with an unfinished trip cancelled at the "
                 "deadline. Times are a band from the same model as the "
@@ -505,7 +525,8 @@ def detail_view(row):
                    row.tax, row.bond_fee,
                    " (GE-tax-exempt item)" if row.tax_exempt else ""))
     active = row.trade_mode is engine.TradeMode.ACTIVE
-    if active:
+    profit = row.trade_mode is engine.TradeMode.PROFIT
+    if active or profit:
         right.metric("Round trip (typical)",
                      engine.format_duration(row.round_trip_p50_seconds
                                             or row.expected_total_seconds),
@@ -531,6 +552,7 @@ def detail_view(row):
                               row.expected_buy_qty, row.fill_low_qty,
                               row.fill_high_qty, row.expected_sell_qty))
     far.metric("Expected / slot / hour" if active else
+               "Expected profit per flip" if profit else
                "Expected after liquidation",
                "{:,} gp".format(round(row.gp_per_slot_hour if active else
                                       row.ranking_value)),
@@ -541,9 +563,15 @@ def detail_view(row):
                help="{:,} units, {:,} gp tied up.".format(
                    row.qty_per_window, row.capital_needed))
 
-    if active:
+    if active or profit:
         st.info(reprice_note(row), icon="⏱")
-    if not active:
+    if profit:
+        st.warning("About {:.0%} of planned quantity may still be unsold at "
+                   "the {:.0f}h deadline; the model subtracts {:,.0f} gp of "
+                   "stress downside from the profit per flip.".format(
+                       row.p_stranded, row.horizon_hours,
+                       row.downside_risk_gp))
+    elif not active:
         st.warning("About {:.0%} of planned quantity may remain after the "
                    "post-return sell window; the model subtracts {:,.0f} gp "
                    "of stress downside from Away EV.".format(row.p_stranded,
@@ -722,7 +750,7 @@ def render_market(config, top_n):
     with flip_tab:
         if not result.rows:
             st.info("No flips meet the current execution and display criteria. "
-                    "Loosen optional filters, switch Active ↔ Away, or "
+                    "Loosen optional filters, switch strategy, or "
                     "refresh when the market changes.")
         else:
             slot_plan(result.rows, config)

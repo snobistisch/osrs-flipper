@@ -90,6 +90,8 @@ class FilterConfig:
 
     @property
     def horizon_hours(self) -> float:
+        if self.trade_mode is engine.TradeMode.PROFIT:
+            return engine.PROFIT_HORIZON_HOURS
         return (float(self.overnight_hours)
                 if self.trade_mode is engine.TradeMode.OVERNIGHT
                 else float(self.calibration.horizon_hours))
@@ -136,7 +138,8 @@ class FlipRow:
     raw_gp_per_slot_hour: float   # before shrinkage
     gp_per_slot_hour: float       # after shrinkage — the ranking metric
     edge_probability: float       # P(this score is not noise)
-    raw_ranking_value: float      # active: gp/slot/h; overnight: horizon EV
+    raw_ranking_value: float      # active: gp/slot/h; overnight: horizon EV;
+                                  # profit: risk-adjusted gp per flip
     ranking_value: float          # same metric after shrinkage
     downside_risk_gp: float
     trade_mode: engine.TradeMode
@@ -345,8 +348,8 @@ class ExecutionChoice(NamedTuple):
     capacity_qty: int = 0      # Active: size that only clears at the mean rate
 
 
-# Away quantity is chosen by expected value, stranded-inventory stress
-# included, among these shares of the mean-rate capacity. A search grid.
+# Away and Max profit quantity is chosen by expected value, stranded-inventory
+# stress included, among these shares of the mean-rate capacity. A search grid.
 AWAY_QTY_FRACTIONS = (0.25, 0.5, 0.75, 1.0)
 
 
@@ -376,11 +379,17 @@ def _optimise_execution(
     value after stranded-inventory stress, rather than everything the mean
     rate could buy — that sizing completed the full buy 38% of the time and
     left about 30% of it unsold after the selling window.
+
+    Max profit sizes the same way, from the round trip's mean-rate capacity
+    before its 24-hour deadline, capped at one buy-limit window. It does not
+    bid under the touch: its buy is relisted at once, not left to wait for a
+    dip.
     """
     if fill_log_sigma is None:
         fill_log_sigma = engine.fill_log_sigma(config.calibration)
     calibration = config.calibration
     away = config.trade_mode is engine.TradeMode.OVERNIGHT
+    profit = config.trade_mode is engine.TradeMode.PROFIT
     free_sell = engine.tax_boundary_undercut(base_sell, tax_exempt, bond)
     max_total = max(0, base_sell - base_buy - 1)
     sell_points = _concession_points(max(0, max_total - (base_sell - free_sell)))
@@ -447,6 +456,8 @@ def _optimise_execution(
                                                 config.horizon_hours)
             qty = engine.flippable_qty(effective_limit, capacity, affordable)
             qty = max(1, int(qty * fraction))
+        elif profit:
+            qty = max(1, int(mean_capacity * fraction))
         else:
             capacity = engine.target_quantity(
                 trip_rate, usable, calibration.active_target_completion,
@@ -482,7 +493,7 @@ def _optimise_execution(
     if best is None:
         return None
     choice, bid, extra_sell = best
-    if away:
+    if away or profit:
         # Prices first at full size, then the size at those prices.
         for fraction in AWAY_QTY_FRACTIONS[:-1]:
             smaller = evaluate(bid, extra_sell, fraction)
@@ -782,11 +793,12 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
     # about the rate your offer fills at, not a separate penalty on profit. A
     # price only 5% of the market ever reached is not a flip earning 5% of its
     # margin — it is a flip that takes twenty times as long.
-    # Away spans hours of the daily cycle, so it is sized on the 14-day
-    # average rate rather than on the one live hour the snapshot happened to
-    # land in. Active is executed now, at the live rate.
+    # Away and Max profit span hours of the daily cycle (Max profit's deadline
+    # is a whole day), so they are sized on the 14-day average rate rather
+    # than on the one live hour the snapshot happened to land in. Active is
+    # executed now, at the live rate.
     base_volume = float(row.thin_volume_1h)
-    if (config.trade_mode is engine.TradeMode.OVERNIGHT
+    if (config.trade_mode is not engine.TradeMode.ACTIVE
             and view.low_volume_per_hour > 0 and view.high_volume_per_hour > 0):
         base_volume = min(view.low_volume_per_hour, view.high_volume_per_hour)
     reachable_buy = max(0.0, base_volume * max(view.buy_fill_share, 0.01))
@@ -948,8 +960,8 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
         remaining_seed -= _unit_capital(row)
 
     # Quantity was already chosen per mode: Active so the whole round trip
-    # completes before the deadline with the target probability, Away by
-    # expected value after stranded-inventory stress. Funding a different
+    # completes before the deadline with the target probability, Away and Max
+    # profit by expected value after stranded-inventory stress. Funding a different
     # bound here would trade that choice away again.
     capital_caps = [row.capital_needed for row in selected]
     amounts = engine.allocate_portfolio(
@@ -1007,7 +1019,9 @@ def meets_completion_target(row: FlipRow, config: FilterConfig) -> bool:
 
     Quantity is already sized to the target, so a row below it is one where
     even a single unit is unlikely to make the round trip before the deadline.
-    Such a row stays listed, with a warning, but never receives bank.
+    Such a row stays listed, with a warning, but never receives bank. Away and
+    Max profit have no completion target: their quantity is sized on expected
+    value with the unsold remainder already charged.
     """
     if config.trade_mode is not engine.TradeMode.ACTIVE:
         return True
@@ -1155,6 +1169,12 @@ def _timing_warnings(breakdown: engine.ScoreBreakdown,
                          "fills before you return in {:.0f}h"
                          .format(breakdown.p_fill_both,
                                  breakdown.horizon_hours))
+    elif breakdown.mode is engine.TradeMode.PROFIT:
+        if breakdown.p_fill_both < 0.50:
+            notes.append("fill odds: only {:.0%} chance the whole round trip "
+                         "completes within {:.0f}h; what is left is cancelled "
+                         "at the deadline".format(breakdown.p_fill_both,
+                                                  breakdown.horizon_hours))
     elif (breakdown.p_fill_both + 1e-9
           < calibration.active_target_completion):
         notes.append("fill odds: only {:.0%} chance the whole round trip "
@@ -1168,6 +1188,13 @@ def _timing_warnings(breakdown: engine.ScoreBreakdown,
                      "may remain after the post-return sell window; stress "
                      "downside is {:,.0f} gp"
                      .format(breakdown.p_stranded,
+                             breakdown.downside_risk_gp))
+    if (breakdown.mode is engine.TradeMode.PROFIT
+            and breakdown.p_stranded >= 0.20):
+        notes.append("inventory risk: about {:.0%} of the planned quantity "
+                     "may still be unsold at the {:.0f}h deadline; stress "
+                     "downside is {:,.0f} gp"
+                     .format(breakdown.p_stranded, breakdown.horizon_hours,
                              breakdown.downside_risk_gp))
     return tuple(notes)
 
@@ -1232,10 +1259,12 @@ def _warnings(depth: int, drift: float, ofi: float, affordable: int, qty: int,
 # minutes of quote age — the staleness factor already discounts the score by
 # the item's own volatility — and the automatic Away profile admits quotes up
 # to 15 minutes old, which the Active limit then contradicted by declaring
-# them all Speculative.
+# them all Speculative. Max profit places its offer at the live quote now,
+# like Active, so it uses Active's limits.
 QUOTE_AGE_LIMITS = {
     engine.TradeMode.ACTIVE: (180, 300),
     engine.TradeMode.OVERNIGHT: (600, 900),
+    engine.TradeMode.PROFIT: (180, 300),
 }
 
 

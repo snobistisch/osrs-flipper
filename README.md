@@ -10,8 +10,10 @@ tax, buy limits, fill estimates, and risk-aware slot allocation.
 ## Using the app
 
 1. Enter your available bank and choose **Members** or **Free-to-play**.
-2. Choose **Active** for trading while you watch the GE, or **Away** for
-   resting buy offers until your next check (1–12 hours, overnight included).
+2. Choose **Active** for trading while you watch the GE, **Away** for
+   resting buy offers until your next check (1–12 hours, overnight included),
+   or **Max profit** for the flips that make the most per offer, however long
+   they take.
 3. Review each suggested item's buy price, quantity, sell price, estimated
    profit, and risk before placing the offer in-game.
 4. Save offers to track them. Saved commitments reserve bank across strategy
@@ -22,6 +24,9 @@ Active ranks expected profit per occupied slot-hour while you watch. Away
 (next check in 1–12 hours, overnight included) estimates inventory bought
 while you are gone — including bids under today's price on items that
 measurably bounce back — and a separate selling phase after you return.
+Max profit ranks risk-adjusted expected profit per flip — one buy offer of at
+most one buy limit, relisted as soon as it fills — with a 24-hour deadline; a
+slow flip can rank first, and its time band says how slow.
 **Merch** shows longer-term watchlist signals; **Crash** highlights price
 dislocations. The app provides guidance; all in-game orders are manual.
 
@@ -69,6 +74,7 @@ The CLI and agent use only the Python standard library:
 ```bash
 python3 cli.py --capital 1m --account members --strategy active
 python3 cli.py --capital 20m --strategy away --overnight-hours 8
+python3 cli.py --capital 20m --strategy profit
 python3 agent.py flips --json --capital 1.5m
 python3 agent.py portfolio list
 ```

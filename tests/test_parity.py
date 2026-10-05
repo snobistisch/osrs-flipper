@@ -317,6 +317,139 @@ class ParityTests(unittest.TestCase):
                 self.assertClose(getattr(python, field), browser[key],
                                  "{} {}".format(label, field), abs_tol=0.01)
 
+    def test_max_profit_score_execution_and_warnings_match(self):
+        mids = [p for p in (engine._bucket_vwap([point]) for point in history(3))
+                if p is not None]
+        fit = stats.fit_ou(mids, engine.HISTORY_BUCKET_DAYS)
+        base = dict(buy=1_000, sell=1_080, margin=58, qty=600, depth=3,
+                    buy_volume_1h=2_400.0, sell_volume_1h=1_900.0,
+                    quote_age=240, ofi=-0.2, drift=-0.004, now=NOW,
+                    highalch=1_100, nature_rune_cost=110, competitors=12.0,
+                    buy_improvement=2, sell_improvement=1,
+                    mode=engine.TradeMode.PROFIT)
+        cases = [
+            base,
+            # Unsold at the deadline, alch floor close enough to protect.
+            dict(base, qty=5_000, buy_volume_1h=400.0, sell_volume_1h=60.0),
+            # Past the weekly update, explicit horizon, bond-style capital.
+            dict(base, now=NOW + 3 * 86_400, horizon_hours=24.0,
+                 sigma_daily=0.09, capital_per_unit=1_100),
+        ]
+        expressions = []
+        for case in cases:
+            expressions.append(
+                "scoreFlip({{buy:{buy}, sell:{sell}, margin:{margin}, qty:{qty},"
+                " depth:{depth}, buyVolume1h:{buy_volume_1h},"
+                " sellVolume1h:{sell_volume_1h}, quoteAge:{quote_age},"
+                " ofi:{ofi}, drift:{drift}, now:{now}, sigmaDaily:{sigma},"
+                " ou:fitOU({mids}, HISTORY_BUCKET_DAYS), regimeScore:0,"
+                " highalch:{highalch}, natureCost:{nature_rune_cost},"
+                " competitors:{competitors}, buyImprovement:{buy_improvement},"
+                " sellImprovement:{sell_improvement}, mode:\"profit\","
+                " horizonHours:{horizon}, capitalPerUnit:{capital}}})".format(
+                    **dict(case, mids=json.dumps(mids),
+                           sigma=json.dumps(case.get("sigma_daily")),
+                           horizon=json.dumps(case.get("horizon_hours")),
+                           capital=json.dumps(case.get("capital_per_unit")))))
+        browsers = js(*expressions)
+        warnings = js(*("timingWarnings({})".format(json.dumps(browser))
+                        for browser in browsers))
+        for case, browser, notes in zip(cases, browsers, warnings):
+            python = engine.score_flip(ou_fit=fit, **case)
+            label = "profit qty {} now {}".format(case["qty"], case["now"])
+            self.assertEqual(browser["mode"], "profit", label)
+            self.assertEqual(browser["horizonHours"], 24, label)
+            self.assertEqual(set(browser["factors"]), {
+                "both legs fill", "adverse selection", "holding risk",
+                "quote staleness", "mean reversion", "alch floor",
+                "update risk"}, label)
+            for field, key in (
+                    ("capital_needed", "capitalNeeded"),
+                    ("p_fill_both", "pFill"), ("p_stranded", "pStranded"),
+                    ("expected_buy_qty", "expectedBuyQty"),
+                    ("expected_sell_qty", "expectedSellQty"),
+                    ("fill_low_qty", "fillLowQty"), ("fill_high_qty", "fillHighQty"),
+                    ("holding_risk", None), ("update_risk", None),
+                    ("expected_profit", "expected"),
+                    ("gp_per_slot_hour", "perSlotHour"),
+                    ("ranking_value", "rankingValue"),
+                    ("downside_risk_gp", "downsideRisk"),
+                    ("round_trip_p80_seconds", "roundTripP80Seconds"),
+                    ("round_trip_p90_seconds", "roundTripP90Seconds"),
+                    ("expected_occupancy_seconds", "expectedOccupancySeconds"),
+                    ("reprice_check_seconds", "repriceCheckSeconds"),
+                    ("cancel_by_seconds", "cancelBySeconds")):
+                value = (browser[key] if key else browser["factors"][
+                    "holding risk" if field == "holding_risk" else "update risk"])
+                self.assertClose(getattr(python, field), value,
+                                 "{} {}".format(label, field), abs_tol=0.01)
+            prefixes = ("fill odds:", "inventory risk:")
+            self.assertEqual(
+                [note.split(":")[0] for note in filters._timing_warnings(
+                    python, engine.DEFAULT_CALIBRATION)
+                 if note.startswith(prefixes)],
+                [note.split(":")[0] for note in notes
+                 if note.startswith(prefixes)], label)
+        self.assertGreater(engine.score_flip(ou_fit=fit, **cases[1])
+                           .downside_risk_gp, 0, "case 2 must strand stock")
+
+        executions = [
+            dict(base_buy=1_000, base_sell=1_030, volume=6_000.0, limit=2_000,
+                 tax_exempt=False, bond=False, capital=50_000_000),
+            dict(base_buy=20_000, base_sell=21_500, volume=30.0, limit=100,
+                 tax_exempt=False, bond=False, capital=50_000_000),
+            dict(base_buy=20_000, base_sell=20_800, volume=30.0, limit=100,
+                 tax_exempt=False, bond=False, capital=50_000_000),
+            dict(base_buy=9_000_000, base_sell=10_600_000, volume=40.0,
+                 limit=100, tax_exempt=True, bond=True, capital=50_000_000),
+        ]
+        expressions = [
+            "optimiseExecution({{baseBuy:{base_buy}, baseSell:{base_sell},"
+            " exempt:{exempt}, bond:{bond}, limit:{limit},"
+            " config:{{capital:{capital}, maxPositionCapital:{capital},"
+            " strategy:\"profit\", horizonHours:24}},"
+            " buyVolume1h:{volume}, sellVolume1h:{volume}, quoteAge:60, ofi:0,"
+            " drift:0, now:{now}, competitors:8, highalch:null,"
+            " natureCost:100}})".format(
+                **dict(case, exempt=str(case["tax_exempt"]).lower(),
+                       bond=str(case["bond"]).lower(), now=NOW))
+            for case in executions]
+        for case, browser in zip(executions, js(*expressions)):
+            config = filters.FilterConfig(capital=case["capital"],
+                                          trade_mode="profit")
+            python = filters._optimise_execution(
+                base_buy=case["base_buy"], base_sell=case["base_sell"],
+                tax_exempt=case["tax_exempt"], bond=case["bond"],
+                limit=case["limit"], available_capital=case["capital"],
+                buy_volume_1h=case["volume"], sell_volume_1h=case["volume"],
+                quote_age=60, ofi=0.0, drift=0.0, now=NOW, highalch=None,
+                competitors=8, config=config)
+            label = "profit execution {}".format(case["base_buy"])
+            self.assertEqual((python.buy, python.sell, python.qty),
+                             (browser["buy"], browser["sell"], browser["qty"]),
+                             label)
+            self.assertLessEqual(python.qty, case["limit"], label)
+            # The browser CDF's ~1e-8 error moves an expected quantity by a
+            # few thousandths of a unit when the 24-hour capacity is large,
+            # and the stress charge prices each stranded unit at up to half
+            # its buy price. Quantities must agree to 0.005 units; gp values
+            # may differ by what 0.005 units are worth, never more.
+            unit_tol = 0.005
+            for field, key in (("expected_buy_qty", "expectedBuyQty"),
+                               ("expected_sell_qty", "expectedSellQty")):
+                self.assertClose(getattr(python.breakdown, field),
+                                 browser["breakdown"][key],
+                                 "{} {}".format(label, field),
+                                 abs_tol=unit_tol)
+            for field, key in (("ranking_value", "rankingValue"),
+                               ("downside_risk_gp", "downsideRisk"),
+                               ("p_fill_both", "pFill"),
+                               ("capital_needed", "capitalNeeded")):
+                self.assertClose(getattr(python.breakdown, field),
+                                 browser["breakdown"][key],
+                                 "{} {}".format(label, field),
+                                 abs_tol=max(0.01, unit_tol * python.buy))
+
     def test_shrinkage_and_edge_probability_match(self):
         for estimates, noise in (([1.0, 2.0, 4.0, 8.0, 3.0], [0.2, 1.5, 0.3, 4.0, 0.9]),
                                  ([5.0, 5.0, 5.0], [1.0, 1.0, 1.0]),
