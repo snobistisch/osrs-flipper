@@ -75,39 +75,48 @@
   --down: #ff8a7a;
   --rule: #56462f;
 }
+/* The tab row is the stone strip of the OSRS side panel: stone tiles set
+   edge to edge in a frame, and the open tab lit with the game's red tint. */
 #tabs {
   display: flex;
-  gap: 0.4rem;
   flex-wrap: wrap;
-  margin: 0 0 0.6rem;
+  gap: 2px;
+  width: fit-content; max-width: 100%;
+  margin: 0 0 0.7rem;
+  padding: 3px;
+  background: var(--stone), var(--panel-dark);
+  border: 2px solid var(--edge);
+  box-shadow: var(--frame);
 }
 .tab {
-  background: var(--panel-dark);
+  background: var(--stone), linear-gradient(#4b4132, #372e23);
   color: var(--text-dim);
-  border: 2px solid var(--edge);
-  border-radius: 3px;
-  padding: 0.3rem 0.8rem;
-  cursor: pointer;
+  border: 1px solid var(--edge);
+  box-shadow: var(--raised);
+  padding: 0.38rem 0.95rem;
   font-family: var(--mono);
   font-size: 0.8rem;
   font-weight: 600;
   letter-spacing: 0.06em;
 }
-.tab .fkey { color: var(--gold); opacity: 0.75; margin-right: 0.4em; }
-.tab:hover { border-color: var(--edge-light); color: var(--text); }
-.tab.on {
-  background: var(--panel);
-  color: var(--gold);
-  border-color: var(--gold);
+.tab .fkey { color: var(--title); margin-right: 0.4em; }
+.tab:hover { color: var(--text); }
+.tab.on, .tab.on:hover {
+  background: linear-gradient(rgba(160, 32, 14, .62), rgba(112, 20, 8, .62)),
+    var(--stone), #3b2a20;
+  color: var(--gold-bright);
+  box-shadow: inset 0 0 0 1px #c0513a, inset 1px 1px 0 1px rgba(0, 0, 0, .45);
 }
 .tag {
   display: inline-block;
   white-space: nowrap;
-  font-size: 0.78em;
-  line-height: 1.4;
-  padding: 0 0.3em;
-  border-radius: 2px;
-  background: var(--panel-dark);
+  font-family: var(--mono);
+  font-size: 0.74em;
+  letter-spacing: 0.04em;
+  line-height: 1.45;
+  padding: 0 0.35em;
+  border-radius: 0;
+  background: var(--well);
   border: 1px solid var(--grid);
 }
 .tag + .tag { margin-left: 0.2em; }
@@ -119,7 +128,7 @@
 #plan { margin: 0 0 1.4rem; }
 #plan-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   gap: 0.5rem;
 }
 /* Each plan card is a Grand Exchange offer slot: the side of the offer as
@@ -134,7 +143,7 @@
   padding: 0.4rem 0.6rem 0.55rem;
   min-width: 0;
 }
-.plan-card { cursor: pointer; }
+.plan-card { cursor: pointer; display: flex; flex-direction: column; }
 .plan-card:hover { box-shadow: inset 0 0 0 1px #a08b68, inset 0 0 0 2px var(--edge-inner); }
 .plan-card.price-changed { box-shadow: inset 0 0 0 1px var(--gold-bright), inset 0 0 0 2px var(--edge-inner); }
 /* A placed offer: the slot's inner edge turns interface orange and the stone
@@ -189,8 +198,8 @@
 .plan-warn { color: #ffb59a; font-size: 0.78rem; margin-top: 0.3rem; }
 .plan-warn summary { cursor: pointer; }
 .plan-actions { display:flex; gap:.35rem; margin-top:.45rem; }
+.plan-card .plan-actions { margin-top:auto; padding-top:.45rem; }
 .plan-actions button { padding:.25rem .45rem; font:600 .7rem var(--mono); letter-spacing:.04em; }
-.plan-actions button:active:not(:disabled) { padding-top:calc(.25rem + 1px); padding-bottom:calc(.25rem - 1px); }
 .plan-actions .save-flip-btn { flex:1; }
 .plan-actions .unlock-btn { color:var(--good); }
 .lock-live { color:var(--text-dim); font-family:var(--mono); font-size:.7rem; margin-top:.3rem; }
@@ -216,10 +225,15 @@
   color: var(--text-dim); font-variant-numeric: tabular-nums;
 }
 #auto-setup {
-  margin:.2rem 0 .8rem; padding:.65rem .7rem; border:1px solid var(--gold);
-  background:rgba(197,157,55,.09); font: .76rem/1.45 var(--mono);
+  margin:.2rem 0 .9rem; padding:.6rem .65rem;
+  background:var(--well); border:1px solid var(--edge); box-shadow:var(--sunken);
+  font: .76rem/1.45 var(--mono); color:var(--text);
 }
-#auto-setup strong { color:var(--gold-bright); display:block; margin-bottom:.15rem; }
+#auto-setup strong {
+  color:var(--title); display:block; margin-bottom:.2rem;
+  font-family:Cinzel, "Times New Roman", serif; font-size:.85rem; letter-spacing:.04em;
+  text-shadow:1px 1px 0 #000;
+}
 #execution { margin:0 0 1rem; }
 .active-flip-cards {
   display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr)); gap:.5rem;
@@ -232,27 +246,24 @@
 .confidence-speculative { color: var(--down); }
 #mode-summary {
   display:flex; align-items:center; justify-content:space-between; gap:1rem;
-  margin:0 0 .8rem; padding:.55rem .75rem; background:var(--panel-dark);
-  border:1px solid var(--rule); font-family:var(--mono); font-size:.82rem;
+  margin:0 0 .8rem; padding:.5rem .75rem;
+  background:var(--stone), var(--panel-dark);
+  border:2px solid var(--edge); box-shadow:var(--frame);
+  font-family:var(--mono); font-size:.82rem;
 }
-#mode-summary strong { color:var(--gold-bright); }
+#mode-summary strong { color:var(--title); text-shadow:1px 1px 0 #000; }
 #options-panel { margin-top:1rem; }
 .option-toolbar { display:flex; gap:.55rem; align-items:center; margin:.6rem 0; }
 #option-search { width:100%; max-width:430px; }
 #options-panel #flip-wrap { max-height:620px; overflow:auto; }
-#options-panel thead { position:sticky; top:0; z-index:2; background:var(--panel-dark); }
-.option-save-btn { white-space:nowrap; padding:.25rem .45rem; font-size:.7rem; }
+#options-panel thead { position:sticky; top:0; z-index:2; }
+.option-save-btn { white-space:nowrap; padding:.22rem .45rem; font:600 .68rem var(--mono); letter-spacing:.04em; }
 .hold-btn {
-  background: var(--panel-dark);
+  padding: 0 0.45em;
+  font: 600 0.72rem var(--mono);
   color: var(--text-dim);
-  border: 1px solid var(--grid);
-  border-radius: 2px;
-  padding: 0 0.4em;
-  font: inherit;
-  font-size: 0.82em;
-  cursor: pointer;
 }
-.hold-btn:hover { border-color: var(--gold); color: var(--gold); }
+.hold-btn:hover { color: var(--gold-bright); }
 #tab-blurb { margin: 0 0 0.8rem; max-width: 70ch; }
 * { box-sizing: border-box; }
 body {
@@ -276,7 +287,7 @@ a { color: var(--gold); }
 /* Stone buttons: lit from the top left, and pressed in on :active by
    swapping the bevel and dropping the label one pixel. */
 button {
-  background: var(--stone), linear-gradient(#514636, #3b3226);
+  background: var(--stone), linear-gradient(#4a4031, #3a3125);
   color: var(--title);
   border: 1px solid var(--edge);
   border-radius: 0;
@@ -289,9 +300,8 @@ button {
 }
 button:hover { background: var(--stone), linear-gradient(#5d5140, #44392b); color: var(--gold-bright); }
 button:active:not(:disabled) {
-  background: var(--stone), linear-gradient(#2f281f, #3a3125);
+  background: var(--stone), linear-gradient(#2c251c, #393024);
   box-shadow: var(--sunken);
-  padding-top: calc(0.5rem + 1px); padding-bottom: calc(0.5rem - 1px);
 }
 button:disabled { color: var(--text-dim); cursor: default; }
 /* Inputs are wells cut into the stone: dark, lit from the bottom right. */
@@ -366,13 +376,44 @@ input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; 
   box-shadow: var(--sunken);
 }
 #gate footer { margin-top: 0.9rem; }
-#strategy summary {
-  cursor: pointer; color: var(--gold); font-weight: 600;
-  font-family: Cinzel, serif;
+/* The strategy explainer is the one long read on the page, so it alone is a
+   quest scroll: parchment between two rolled ends, dark ink, chapter titles
+   in a dark red. Closed, it is the scroll still rolled up. Nothing else on
+   the page uses parchment. */
+#strategy, #gate #strategy {
+  position: relative;
+  margin: 1.1rem 0.4rem 0.9rem;
+  padding: 0.7rem 1.1rem;
+  color: #2b1c0d;
+  background:
+    repeating-linear-gradient(90deg, rgba(120, 85, 40, .045) 0 1px, transparent 1px 5px),
+    radial-gradient(ellipse at 50% 50%, transparent 55%, rgba(120, 80, 30, .22) 100%),
+    linear-gradient(#e6d6ad, #dcc999);
+  border: 1px solid #6b4e24;
+  border-block: none;
+  box-shadow: none;
 }
+#strategy::before, #strategy::after {
+  content: ""; position: absolute; left: -0.45rem; right: -0.45rem; height: 12px;
+  background: linear-gradient(#8a6a37, #e9dbb4 35%, #f4e9c8 50%, #c9ae78 75%, #6e5226);
+  border: 1px solid #3d2a10;
+}
+#strategy::before { top: -11px; }
+#strategy::after { bottom: -11px; }
+#strategy summary {
+  cursor: pointer; color: #6e1a0a; font-weight: 700;
+  font-family: Cinzel, "Times New Roman", serif;
+}
+#strategy summary:focus-visible { outline-color: #6e1a0a; }
+#strategy[open] { padding: 1.1rem 1.5rem 0.8rem; }
 #strategy[open] summary { margin-bottom: 0.8rem; }
-#strategy h3 { font-size: 1rem; margin: 1rem 0 0.3rem; }
+#strategy h3 {
+  font-size: 1rem; margin: 1rem 0 0.3rem;
+  color: #6e1a0a; text-shadow: none;
+}
 #strategy p { margin: 0 0 0.6rem; font-size: 0.92rem; }
+#strategy strong { color: #1d1206; }
+#strategy .dim { color: #5a4224; }
 #gate label {
   display: block; margin-bottom: 0.55rem;
   font-family: Cinzel, "Times New Roman", serif; font-weight: 700;
@@ -380,7 +421,6 @@ input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; 
 }
 #gate .row { display: flex; gap: 0.6rem; margin-top: 0.4rem; flex-wrap: wrap; }
 #gate .row button { flex: 1; min-width: 120px; font-size: 1.05rem; padding-block: 0.6rem; }
-#gate .row button:active { padding-top: calc(0.6rem + 1px); padding-bottom: calc(0.6rem - 1px); }
 /* The amount box carries a coin stack in its well, like the GE price field. */
 .gp-input { position: relative; }
 .gp-input .coin-mark {
@@ -396,7 +436,6 @@ input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; 
   font-family: var(--mono); font-variant-numeric: tabular-nums;
   font-size: 0.88rem; padding: 0.35rem 0.75rem !important;
 }
-.preset:active:not(:disabled) { padding-top: calc(0.35rem + 1px) !important; padding-bottom: calc(0.35rem - 1px) !important; }
 /* Coin-stack colours, as the game draws a stack's quantity: yellow under
    100K, white to 9.99M, green from 10M. Only ever on a gp amount. */
 .stack-low, .stack-low:hover { color: var(--stack-low); }
@@ -407,22 +446,42 @@ input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; 
 
 /* -- app shell -- */
 #app { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+/* The sidebar is a stone side panel: framed on its inner edge, its controls
+   on the stone, the budget in a well with its coin stack. */
 #side {
-  background: var(--panel-dark);
+  background: var(--stone), var(--panel);
   border-right: 3px solid var(--edge);
-  padding: 1.2rem;
+  box-shadow: inset -1px 0 0 var(--edge-light), inset -2px 0 0 var(--edge-inner);
+  padding: 1.1rem 1.1rem 1.2rem;
 }
 #main { padding: 1.2rem 1.5rem 3rem; min-width: 0; }
 .field { margin-bottom: 1.1rem; }
 .price-row { display: flex; gap: 0.5rem; }
 .price-row input { min-width: 0; }
-.field label { display: block; font-size: 0.9rem; color: var(--text-dim); }
-.field .val { color: var(--gold); font-weight: 600; }
-.budget-box { margin-bottom: 1.2rem; }
-.budget-box .amount {
-  font-size: 1.8rem; color: var(--value); text-shadow: 1px 1px 0 var(--edge);
-  font-family: Cinzel, serif;
+.field label { display: block; font-size: 0.9rem; color: var(--text); margin-bottom: 0.2rem; }
+.field > .small.dim { margin-top: 0.3rem; }
+.field .val {
+  color: var(--value); font-weight: 600; font-family: var(--mono);
+  text-shadow: 1px 1px 0 #000;
 }
+#side .field > button { width: 100%; }
+.budget-box {
+  margin-bottom: 1.2rem; padding: 0.55rem 0.65rem 0.65rem;
+  background: var(--well); border: 1px solid var(--edge); box-shadow: var(--sunken);
+}
+.budget-box .label {
+  font-family: Cinzel, "Times New Roman", serif; font-weight: 700;
+  color: var(--title); text-shadow: 1px 1px 0 #000; font-size: 0.9rem;
+}
+.budget-amount { display: flex; align-items: center; gap: 0.45rem; margin: 0.1rem 0; }
+.budget-amount .coin-mark { width: 2rem; height: 2rem; }
+.budget-box .amount {
+  font-size: 1.55rem; line-height: 1.2; color: var(--value); text-shadow: 1px 1px 0 #000;
+  font-family: var(--mono); font-weight: 600; font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+}
+.budget-box #per-slot { color: var(--text-dim); }
+.budget-box button { width: 100%; margin-top: 0.5rem; padding: 0.4rem 0.8rem; }
 .checkline { display: flex; align-items: center; gap: 0.5rem; }
 
 /* Filter explanations sit behind a "?" instead of standing under the control.
@@ -442,24 +501,21 @@ input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; 
 .checkline .hint-wrap { margin-left: auto; }
 .hint-wrap { position: relative; display: inline-flex; }
 .hint {
-  background: none;
-  border: 1px solid var(--edge-light);
-  box-shadow: none;
   color: var(--text-dim);
-  border-radius: 50%;
-  width: 1.05rem; height: 1.05rem;
+  width: 1.3rem; height: 1.3rem;
   padding: 0;
-  font-size: 0.72rem; font-weight: 700; line-height: 1;
+  font-family: var(--mono); font-size: 0.75rem; font-weight: 700; line-height: 1;
   display: flex; align-items: center; justify-content: center;
 }
-.hint:hover, .hint:focus { color: var(--gold-bright); border-color: var(--gold); }
+.hint:hover, .hint:focus { color: var(--gold-bright); }
 .tip {
   position: absolute; z-index: 20;
   right: 0; top: calc(100% + 0.35rem);
   width: 14rem; max-width: calc(100vw - 3rem);
-  background: var(--edge);
-  border: 1px solid var(--edge-light);
-  border-radius: 3px;
+  background: #15110c;
+  border: 1px solid #000;
+  box-shadow: inset 0 0 0 1px var(--edge-light);
+  border-radius: 0;
   padding: 0.5rem 0.6rem;
   font-size: 0.8rem; line-height: 1.45;
   color: var(--text); text-align: left; font-weight: 400;
@@ -475,11 +531,11 @@ input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; 
 #termbar {
   display: flex; align-items: center; justify-content: space-between;
   gap: 1rem; flex-wrap: wrap;
-  background: linear-gradient(#443627, #34291d);
+  background: var(--stone), linear-gradient(#4b4031, #362d22);
   border: 2px solid var(--edge);
-  box-shadow: inset 0 0 0 1px var(--edge-light);
-  border-radius: 4px 4px 0 0;
-  padding: 0.35rem 0.7rem;
+  box-shadow: var(--frame);
+  border-radius: 0;
+  padding: 0.4rem 0.75rem;
 }
 #termbar h1 {
   font-size: clamp(0.95rem, 2.2vw, 1.15rem);
@@ -492,24 +548,25 @@ input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; 
   font-family: var(--mono); font-size: 0.78rem; color: var(--text-dim);
   letter-spacing: 0.04em;
 }
-#termstat b { color: var(--gold); font-weight: 600; }
+#termstat b { color: var(--value); font-weight: 600; text-shadow: 1px 1px 0 #000; }
+/* The feed lamp: a flat square light in a dark socket, no glow. */
 .dot {
-  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--up); margin-right: 0.35rem; vertical-align: middle;
-  box-shadow: 0 0 5px var(--up);
+  display: inline-block; width: 9px; height: 9px;
+  background: var(--up); margin-right: 0.4rem; vertical-align: middle;
+  border: 1px solid #000; box-shadow: inset 1px 1px 0 rgba(255, 255, 255, .35);
 }
-.dot.stale { background: var(--gold); box-shadow: 0 0 5px var(--gold); }
-.dot.down { background: var(--down); box-shadow: 0 0 5px var(--down); }
+.dot.stale { background: var(--gold); }
+.dot.down { background: var(--down); }
 
 /* The tape carries market state rather than recommendations: the busiest
    items, their price, and how far the last five minutes have moved from the
    hour. A flat tape is information too — it says nothing is moving. */
 #tape {
   overflow: hidden;
-  background: var(--edge);
+  background: var(--well);
   border: 2px solid var(--edge);
   border-top: none;
-  border-radius: 0 0 4px 4px;
+  box-shadow: var(--sunken);
   margin-bottom: 0.9rem;
 }
 #tape-track {
@@ -540,7 +597,7 @@ input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; 
 }
 .panel-bar h2, .panel-bar h3 {
   margin: 0; font-size: 0.95rem; letter-spacing: 0.08em;
-  text-transform: uppercase; text-shadow: 1px 1px 0 var(--edge);
+  text-transform: uppercase; text-shadow: 1px 1px 0 #000;
 }
 .panel-bar .figure {
   font-family: var(--mono); font-size: 0.8rem; color: var(--text-dim);
@@ -558,13 +615,18 @@ input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; 
 }
 #keys span { white-space: nowrap; }
 #keys kbd {
-  background: var(--panel-dark); color: var(--gold);
-  border: 1px solid var(--edge-light); border-radius: 2px;
-  padding: 0 0.3em; margin-right: 0.3em; font: inherit;
+  background: var(--stone), linear-gradient(#4b4132, #372e23); color: var(--title);
+  border: 1px solid var(--edge); box-shadow: var(--raised); border-radius: 0;
+  padding: 0 0.35em; margin-right: 0.35em; font: inherit; text-shadow: 1px 1px 0 #000;
 }
 
 /* -- table -- */
-.table-wrap { overflow-x: auto; border: 2px solid var(--edge); border-radius: 4px; }
+/* Tables sit in a well: the rows are cut into the stone, the header is a
+   stone strip with interface-orange titles. */
+.table-wrap {
+  overflow-x: auto; background: var(--well);
+  border: 2px solid var(--edge); box-shadow: var(--sunken); border-radius: 0;
+}
 table {
   border-collapse: collapse; width: 100%;
   font-family: var(--mono);
@@ -575,8 +637,9 @@ th, td { padding: 0.22rem 0.6rem; text-align: right; white-space: nowrap; }
 th:first-child, td:first-child { text-align: left; }
 tbody td:first-child { font-family: system-ui, -apple-system, sans-serif; }
 thead th {
-  background: var(--panel-dark);
-  color: var(--gold);
+  background: linear-gradient(#463b2d, #352c21);
+  color: var(--title);
+  text-shadow: 1px 1px 0 #000;
   font-family: system-ui, -apple-system, sans-serif;
   font-size: 0.7rem;
   font-weight: 600;
@@ -589,17 +652,21 @@ thead th {
   position: sticky;
   top: 0;
   border-bottom: 2px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--bevel-hi);
 }
 thead th:hover { color: var(--gold-bright); }
-tbody tr { background: var(--panel); cursor: pointer; }
-tbody tr:nth-child(even) { background: #362c20; }
-tbody tr:hover { background: #4a3d2b; }
-tbody tr.selected { background: #57482f; box-shadow: inset 3px 0 0 var(--gold); }
+thead th[aria-sort="ascending"], thead th[aria-sort="descending"] { color: var(--gold-bright); }
+tbody tr { background: #2c251c; cursor: pointer; }
+tbody tr:nth-child(even) { background: #352d22; }
+tbody tr + tr td { border-top: 1px solid #241e16; }
+tbody tr:hover { background: #4a3f30; }
+tbody tr.selected { background: #54452f; box-shadow: inset 3px 0 0 var(--title); }
 td.pos { color: var(--up); }
 td.bad { color: var(--down); }
 .flag {
   display: inline-block; background: #6b4a1e; color: var(--gold-bright);
-  border-radius: 3px; padding: 0 0.4rem; font-size: 0.78rem; font-weight: 700;
+  border: 1px solid #000; box-shadow: inset 1px 1px 0 #a07a3c;
+  border-radius: 0; padding: 0 0.4rem; font-size: 0.78rem; font-weight: 700;
   cursor: help;
 }
 /* The wiki's sprites are 32px pixel art. Scaled down with smoothing on they
@@ -625,18 +692,18 @@ td.bad { color: var(--down); }
   gap: 0.6rem; margin: 0.9rem 0 1.1rem;
 }
 .metric {
-  background: var(--panel-dark);
+  background: var(--well);
   border: 1px solid var(--edge);
-  box-shadow: inset 0 0 0 1px #423523;
-  border-radius: 3px;
+  box-shadow: var(--sunken);
+  border-radius: 0;
   padding: 0.45rem 0.6rem;
 }
 .metric .label {
-  font-size: 0.68rem; color: var(--text-dim);
+  font-size: 0.68rem; color: var(--title);
   text-transform: uppercase; letter-spacing: 0.11em;
 }
 .metric .value {
-  font-size: 1.35rem; color: var(--value); text-shadow: 1px 1px 0 var(--edge);
+  font-size: 1.35rem; color: var(--value); text-shadow: 1px 1px 0 #000;
   font-family: var(--mono); font-variant-numeric: tabular-nums;
   line-height: 1.25;
 }
@@ -649,7 +716,12 @@ td.bad { color: var(--down); }
   font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.06em;
   padding: 0.25rem 0.6rem;
 }
-.steps button.on { background: #5a4a30; color: var(--gold-bright); border-color: var(--gold); }
+/* A selected toggle stays pressed in, the way the game shows a set option. */
+.steps { gap: 2px; }
+.steps button.on, .steps button.on:hover {
+  background: var(--stone), linear-gradient(#2c251c, #393024);
+  box-shadow: var(--sunken); color: var(--gold-bright);
+}
 .chart-controls {
   display: flex; gap: 1.2rem; flex-wrap: wrap;
   align-items: center; margin: 0.5rem 0 0.6rem;
@@ -669,12 +741,23 @@ td.bad { color: var(--down); }
   letter-spacing: 0.1em; margin-right: 0.45em; font-size: 0.72rem;
 }
 .legend { display: flex; gap: 1.2rem; font-size: 0.85rem; margin-bottom: 0.4rem; flex-wrap: wrap; }
-.swatch { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 0.35rem; vertical-align: baseline; }
-.chart-box { position: relative; }
+.swatch {
+  display: inline-block; width: 11px; height: 11px; border-radius: 0;
+  border: 1px solid #000; margin-right: 0.35rem; vertical-align: baseline;
+}
+.legend .swatch[style*="height:3px"] { border: none; }
+/* The chart is drawn in a recessed well, its labels in the data face. */
+.chart-box {
+  position: relative; padding: 0.4rem 0.3rem 0.2rem;
+  background: var(--well); border: 2px solid var(--edge); box-shadow: var(--sunken);
+}
+#chart text { font-family: var(--mono); }
 svg { display: block; width: 100%; height: auto; }
 #tip {
-  position: absolute; pointer-events: none; background: var(--edge);
-  border: 1px solid var(--edge-light); border-radius: 3px; padding: 0.4rem 0.6rem;
+  position: absolute; pointer-events: none; background: #15110c;
+  border: 1px solid #000; box-shadow: inset 0 0 0 1px var(--edge-light);
+  border-radius: 0; padding: 0.4rem 0.6rem;
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
   font-size: 0.82rem; white-space: nowrap; opacity: 0; transition: opacity 0.1s;
   z-index: 5;
 }
@@ -694,6 +777,18 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     top:0; z-index:30; max-height:180px; overflow:auto; padding:.6rem .8rem; }
   #side .budget-box { margin-bottom:.4rem; }
   #side .budget-box .amount { font-size:1.15rem; }
+  #side .budget-box {
+    display:grid; grid-template-columns:1fr auto; align-items:center; column-gap:.5rem;
+    padding:.35rem .5rem .4rem;
+  }
+  #side .budget-box .label, #side .budget-box #per-slot { grid-column:1; }
+  #side .budget-box .budget-amount { grid-column:1; margin:0; }
+  #side .budget-box button {
+    grid-column:2; grid-row:1 / span 3; width:auto; margin:0;
+    padding:.3rem .6rem; font-size:.8rem;
+  }
+  #side .budget-amount .coin-mark { width:1.5rem; height:1.5rem; }
+  .tab { padding:.35rem .7rem; }
   #side .field { margin-bottom:.55rem; }
   #termbar { padding: 0.4rem 0.6rem; }
   #termstat { font-size: 0.7rem; gap: 0.6rem; }
@@ -847,7 +942,8 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
   <aside id="side">
     <div class="budget-box">
       <div class="label dim small">Budget</div>
-      <div class="amount" id="budget-label">—</div>
+      <div class="budget-amount"><span class="coin-mark" aria-hidden="true"><img class="item-icon" src="https://oldschool.runescape.wiki/images/Coins_10000.png" alt="" decoding="async"></span>
+        <div class="amount" id="budget-label">—</div></div>
       <div class="small dim" id="per-slot">—</div>
       <button id="change-budget">Change budget</button>
     </div>
@@ -987,7 +1083,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
 
     <section id="portfolio" class="hidden">
       <div class="panel-bar">
-        <h2>📊 Holdings</h2>
+        <h2>Holdings</h2>
         <div class="figure" id="holdings-figure"></div>
       </div>
       <div class="table-wrap">
@@ -2778,10 +2874,10 @@ const CRASH = "CRASH", DIP = "DIP", DIPPED_STABLE = "DIPPED_STABLE",
       SUPPLY_DROP = "SUPPLY_DROP";
 
 const BADGE_LABELS = {
-  [CRASH]: "🔴 CRASH", [DIP]: "🟠 DIP", [DIPPED_STABLE]: "🟢 DIPPED",
-  [PUMPED]: "🔴 PUMPED", [SUPPLY_CRUNCH]: "🔥 SUPPLY CRUNCH",
-  [SUPPLY_DROP]: "⚠️ SUPPLY DROP", BOTTED: "🤖 BOTTED", MERCH: "📈 MERCH",
-  RAID: "🏛️ RAID", REPEATABLE: "✓ REPEATABLE EDGE",
+  [CRASH]: "CRASH", [DIP]: "DIP", [DIPPED_STABLE]: "DIPPED",
+  [PUMPED]: "PUMPED", [SUPPLY_CRUNCH]: "SUPPLY CRUNCH",
+  [SUPPLY_DROP]: "SUPPLY DROP", BOTTED: "BOTTED", MERCH: "MERCH",
+  RAID: "RAID", REPEATABLE: "REPEATABLE EDGE",
 };
 
 /* Nothing fires through a regime shift: a level that moved because the game
