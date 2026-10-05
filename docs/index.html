@@ -5,19 +5,32 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OSRS Grand Exchange Flipper</title>
 <meta name="description" content="Live Old School RuneScape Grand Exchange flip finder. Margins after GE tax, filtered for data freshness and traded volume.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🪙</text></svg>">
+<link rel="icon" type="image/png" href="https://oldschool.runescape.wiki/images/Coins_10000.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg: #282017;
-  --panel: #3a2f23;
-  --panel-dark: #332a1f;
-  --edge: #14100b;
-  --edge-light: #6b5b40;
+  /* The interface chrome is OSRS's: the page is the dark ground an interface
+     sits on, and every panel is a slab of stone-brown with the game's double
+     bevel, a near-black outer edge and a light inner edge. Corners stay
+     square. Raised things (buttons, tabs) are lit from the top left; recessed
+     things (inputs, sprite squares, progress tracks) are lit from the bottom
+     right, and a pressed button swaps from the first to the second. */
+  --bg: #1e1913;
+  --panel: #3e3529;
+  --panel-dark: #2f281f;
+  --well: #1c1711;
+  --edge: #0b0907;
+  --edge-light: #6d604c;
+  --edge-inner: #2a231a;
+  --bevel-hi: #857559;
+  --bevel-lo: #1a150f;
   --gold: #ffb83f;
   --gold-bright: #ffe97f;
+  /* Text follows the game's interface conventions: titles in the interface
+     orange, values in yellow with a 1px black shadow, plain text off-white. */
+  --title: #ff981f;
   --value: #ffff00;
   --text: #ece5d8;
   --text-dim: #c9b998;
@@ -25,6 +38,25 @@
   --sell: #d95926;
   --grid: #4a3d2b;
   --good: #6ec96e;
+  /* Two more colour schemes, each bound to one shape so neither can be read
+     as direction. GE progress only ever fills a .ge-bar. Coin-stack colours
+     only ever sit on a gp amount beside a coin sprite. */
+  --ge-progress: #e0861c;
+  --ge-complete: #2f9a2f;
+  --ge-aborted: #c62f2f;
+  --stack-low: #ffff00;
+  --stack-mid: #ffffff;
+  --stack-high: #00ff80;
+  /* Stone grain: two offset speckle grids and a faint top-lit fall-off. It is
+     drawn under text, so it stays below a few percent in either direction. */
+  --stone:
+    radial-gradient(circle at 20% 30%, rgba(255, 236, 200, .035) 0 .5px, transparent 1px) 0 0 / 7px 5px,
+    radial-gradient(circle at 70% 60%, rgba(0, 0, 0, .14) 0 .7px, transparent 1.3px) 0 0 / 11px 13px,
+    radial-gradient(ellipse at 40% 40%, rgba(0, 0, 0, .10) 0 1.5px, transparent 3px) 3px 5px / 23px 19px,
+    linear-gradient(rgba(255, 255, 255, .025), rgba(0, 0, 0, .07));
+  --frame: inset 0 0 0 1px var(--edge-light), inset 0 0 0 2px var(--edge-inner);
+  --raised: inset 1px 1px 0 var(--bevel-hi), inset -1px -1px 0 var(--bevel-lo);
+  --sunken: inset 1px 1px 0 #000, inset -1px -1px 0 #4a3f30;
 
   /* The terminal layer. RuneScape keeps the chrome — palette, bevels, Cinzel
      gold — and the data is set the way a trading screen sets data: one
@@ -87,36 +119,60 @@
 #plan { margin: 0 0 1.4rem; }
 #plan-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 0.6rem;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.5rem;
 }
-.plan-card {
-  background: var(--panel);
+/* Each plan card is a Grand Exchange offer slot: the side of the offer as
+   its header, the item sprite in a recessed square, the figures below. A
+   saved flip is the same slot once the offer is placed, so it shares the
+   look and adds the GE's progress bar for the units recorded as bought. */
+.plan-card, .active-flip-card {
+  background: var(--stone), var(--panel);
   border: 2px solid var(--edge);
-  border-left: 4px solid var(--gold);
-  border-radius: 3px;
-  padding: 0.4rem 0.55rem;
-  cursor: pointer;
+  box-shadow: var(--frame);
+  border-radius: 0;
+  padding: 0.4rem 0.6rem 0.55rem;
+  min-width: 0;
 }
-.plan-card:hover { border-color: var(--edge-light); border-left-color: var(--gold-bright); }
-.plan-card.price-changed { box-shadow:inset 0 0 0 1px var(--gold-bright); }
-.plan-card.locked {
-  border-color: var(--gold-bright);
-  border-left-color: var(--gold-bright);
-  background: linear-gradient(135deg, rgba(197, 157, 55, .16), var(--panel) 42%);
-  box-shadow: 0 0 0 1px rgba(197, 157, 55, .24), 0 0 10px rgba(197, 157, 55, .12);
+.plan-card { cursor: pointer; }
+.plan-card:hover { box-shadow: inset 0 0 0 1px #a08b68, inset 0 0 0 2px var(--edge-inner); }
+.plan-card.price-changed { box-shadow: inset 0 0 0 1px var(--gold-bright), inset 0 0 0 2px var(--edge-inner); }
+/* A placed offer: the slot's inner edge turns interface orange and the stone
+   takes a faint warm cast from the top. No glow. */
+.plan-card.locked, .active-flip-card {
+  background: linear-gradient(rgba(255, 152, 31, .09), rgba(255, 152, 31, 0) 55%),
+    var(--stone), var(--panel);
+  box-shadow: inset 0 0 0 1px var(--title), inset 0 0 0 2px var(--edge-inner);
 }
-.plan-card.locked:hover { border-color: #f4d67a; border-left-color: #f4d67a; }
-.plan-card.locked .plan-rank { color: var(--gold-bright); }
-.plan-card.locked .locked-sell strong { color: var(--gold-bright); font-size: 1rem; }
+.plan-card.locked:hover { box-shadow: inset 0 0 0 1px var(--gold-bright), inset 0 0 0 2px var(--edge-inner); }
+.plan-card.locked .locked-sell strong { font-size: 1rem; }
+.slot-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 0.2rem; margin-bottom: 0.45rem;
+}
+.slot-side {
+  font-family: Cinzel, "Times New Roman", serif; font-weight: 700;
+  font-size: 0.98rem; color: var(--title); text-shadow: 1px 1px 0 #000;
+}
 .plan-rank {
   color: var(--text-dim); font-family: var(--mono);
-  font-size: 0.7rem; letter-spacing: 0.12em;
+  font-size: 0.68rem; letter-spacing: 0.1em; text-align: right;
 }
-.plan-name {
-  font-family: Cinzel, "Times New Roman", serif;
-  color: var(--gold); font-size: 1.02rem; margin: 0.05rem 0 0.35rem;
-  text-shadow: 1px 1px 0 var(--edge);
+.plan-card.locked .plan-rank, .active-flip-card .plan-rank { color: var(--title); }
+.slot-item { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.45rem; min-width: 0; }
+.slot-sprite {
+  flex: none; display: grid; place-items: center;
+  width: 42px; height: 42px;
+  background: var(--well);
+  border: 1px solid var(--edge);
+  box-shadow: var(--sunken);
+}
+.slot-sprite .item-icon { width: 32px; height: 32px; margin: 0; }
+.plan-name, .active-flip-card h3 {
+  font: 600 0.92rem/1.25 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--text); text-shadow: 1px 1px 0 #000; letter-spacing: 0;
+  margin: 0; min-width: 0; overflow-wrap: anywhere;
 }
 .plan-line {
   font-family: var(--mono); font-size: 0.82rem;
@@ -124,40 +180,52 @@
   display: flex; justify-content: space-between; gap: 0.8rem;
 }
 .plan-line span:first-child { color: var(--text-dim); letter-spacing: 0.04em; }
-.plan-line strong { color: var(--value); font-weight: 600; }
+.plan-line strong { color: var(--value); font-weight: 600; text-shadow: 1px 1px 0 #000; }
 .plan-foot {
   color: var(--text-dim); font-family: var(--mono); font-size: 0.72rem;
   margin-top: 0.4rem; padding-top: 0.35rem; border-top: 1px solid var(--rule);
   letter-spacing: 0.02em;
 }
 .plan-warn { color: #ffb59a; font-size: 0.78rem; margin-top: 0.3rem; }
-.plan-actions { display:flex; gap:.35rem; margin-top:.35rem; }
-.plan-actions button { padding:.22rem .45rem; font:600 .7rem var(--mono); }
-.plan-actions .save-flip-btn {
-  flex:1; border-color:var(--gold); color:var(--gold-bright);
-  box-shadow:inset 0 0 0 1px #806526;
-}
-.plan-actions .unlock-btn { border-color:var(--good); color:var(--good); }
+.plan-warn summary { cursor: pointer; }
+.plan-actions { display:flex; gap:.35rem; margin-top:.45rem; }
+.plan-actions button { padding:.25rem .45rem; font:600 .7rem var(--mono); letter-spacing:.04em; }
+.plan-actions button:active:not(:disabled) { padding-top:calc(.25rem + 1px); padding-bottom:calc(.25rem - 1px); }
+.plan-actions .save-flip-btn { flex:1; }
+.plan-actions .unlock-btn { color:var(--good); }
 .lock-live { color:var(--text-dim); font-family:var(--mono); font-size:.7rem; margin-top:.3rem; }
 .stale-actions .plan-actions button:not(.unlock-btn) { opacity:.45; pointer-events:none; }
+/* The GE's offer progress bar: a recessed track, orange while the offer is
+   working, green once it is complete, red if it was aborted. It shows only
+   what was recorded, never a forecast. */
+.ge-bar {
+  height: 12px; margin: 0.5rem 0 0.15rem;
+  background: var(--well);
+  border: 1px solid var(--edge);
+  box-shadow: var(--sunken);
+}
+.ge-bar > span {
+  display: block; height: 100%; min-width: 0;
+  background: var(--ge-progress);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28), inset 0 -1px 0 rgba(0, 0, 0, .35);
+}
+.ge-bar.complete > span { background: var(--ge-complete); }
+.ge-bar.aborted > span { background: var(--ge-aborted); }
+.ge-bar-label {
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.06em;
+  color: var(--text-dim); font-variant-numeric: tabular-nums;
+}
 #auto-setup {
   margin:.2rem 0 .8rem; padding:.65rem .7rem; border:1px solid var(--gold);
   background:rgba(197,157,55,.09); font: .76rem/1.45 var(--mono);
 }
 #auto-setup strong { color:var(--gold-bright); display:block; margin-bottom:.15rem; }
-#execution { margin:0 0 1rem; border-color:var(--gold); }
+#execution { margin:0 0 1rem; }
 .active-flip-cards {
-  display:grid; grid-template-columns:repeat(auto-fit,minmax(235px,1fr)); gap:.55rem;
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr)); gap:.5rem;
 }
-.active-flip-card {
-  border:2px solid var(--gold-bright); border-left-width:5px; border-radius:3px;
-  padding:.55rem .65rem; background:linear-gradient(135deg,rgba(197,157,55,.18),var(--panel) 45%);
-  box-shadow:0 0 0 1px rgba(197,157,55,.24),0 0 10px rgba(197,157,55,.12);
-}
-.active-flip-card h3 { font-size:1rem; margin-bottom:.35rem; color:var(--gold-bright); }
 .active-flip-card .flip-status { margin:.35rem 0; color:var(--good); font:600 .75rem var(--mono); }
 .active-flip-card .flip-status.waiting { color:var(--text-dim); }
-.active-flip-card .plan-actions button { padding:.24rem .45rem; font-size:.7rem; }
 .confidence { text-transform: uppercase; letter-spacing: 0.06em; }
 .confidence-high { color: var(--good); }
 .confidence-medium { color: var(--gold); }
@@ -197,56 +265,107 @@ body {
 }
 h1, h2, h3 {
   font-family: Cinzel, "Times New Roman", serif;
-  color: var(--gold);
-  text-shadow: 2px 2px 0 var(--edge);
+  color: var(--title);
+  text-shadow: 2px 2px 0 #000;
   letter-spacing: 0.03em;
   margin: 0 0 0.5rem;
 }
 h1 { font-size: clamp(1.6rem, 4vw, 2.4rem); }
 h2 { font-size: 1.3rem; }
 a { color: var(--gold); }
+/* Stone buttons: lit from the top left, and pressed in on :active by
+   swapping the bevel and dropping the label one pixel. */
 button {
-  background: linear-gradient(#4a3d2b, #382e20);
-  color: var(--gold);
-  border: 2px solid var(--edge);
-  border-radius: 3px;
-  box-shadow: inset 0 0 0 1px var(--edge-light);
+  background: var(--stone), linear-gradient(#514636, #3b3226);
+  color: var(--title);
+  border: 1px solid var(--edge);
+  border-radius: 0;
+  box-shadow: var(--raised);
+  text-shadow: 1px 1px 0 #000;
   font: inherit;
   font-weight: 600;
   padding: 0.5rem 1rem;
   cursor: pointer;
 }
-button:hover { border-color: var(--gold); color: var(--gold-bright); }
-input[type="text"], select {
-  background: var(--panel-dark);
+button:hover { background: var(--stone), linear-gradient(#5d5140, #44392b); color: var(--gold-bright); }
+button:active:not(:disabled) {
+  background: var(--stone), linear-gradient(#2f281f, #3a3125);
+  box-shadow: var(--sunken);
+  padding-top: calc(0.5rem + 1px); padding-bottom: calc(0.5rem - 1px);
+}
+button:disabled { color: var(--text-dim); cursor: default; }
+/* Inputs are wells cut into the stone: dark, lit from the bottom right. */
+input[type="text"], input[type="search"], select {
+  background: var(--well);
   color: var(--text);
-  border: 2px solid var(--edge);
-  box-shadow: inset 0 0 0 1px var(--edge-light);
-  border-radius: 3px;
+  border: 1px solid var(--edge);
+  box-shadow: var(--sunken);
+  border-radius: 0;
   font: inherit;
   padding: 0.5rem 0.7rem;
   width: 100%;
 }
-button:focus-visible, input:focus-visible, select:focus-visible, tr:focus-visible {
+input::placeholder { color: #9d8f76; opacity: 1; }
+button:focus-visible, input:focus-visible, select:focus-visible, tr:focus-visible,
+summary:focus-visible {
   outline: 3px solid var(--gold-bright); outline-offset: 2px;
 }
-input[type="range"] { width: 100%; accent-color: var(--gold); }
-input[type="checkbox"] { accent-color: var(--gold); width: 1rem; height: 1rem; }
+input[type="range"] { width: 100%; accent-color: var(--title); }
+input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; }
 .panel {
-  background: var(--panel);
+  background: var(--stone), var(--panel);
   border: 2px solid var(--edge);
-  box-shadow: inset 0 0 0 1px var(--edge-light);
-  border-radius: 4px;
+  box-shadow: var(--frame);
+  border-radius: 0;
   padding: 1rem 1.2rem;
+}
+
+/* The coin mark that replaced the emoji: the wiki's own coin-stack sprite.
+   If it does not arrive, the error handler hides it and a CSS-drawn coin
+   takes its place, so the title never loses its mark or its offset. */
+.coin-mark {
+  position: relative; flex: none; display: inline-grid; place-items: center;
+  width: 2rem; height: 2rem;
+}
+.coin-mark img { width: 100%; height: 100%; margin: 0; object-fit: contain; }
+.coin-mark:has(> img[style*="hidden"])::before {
+  content: ""; position: absolute; inset: 18%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff3a0, #e8b923 55%, #8a6410);
+  box-shadow: inset 0 0 0 1px #5a3f08;
 }
 .hidden { display: none !important; }
 .dim { color: var(--text-dim); }
 .small { font-size: 0.85rem; }
 
 /* -- budget gate -- */
-#gate { max-width: 620px; margin: 8vh auto; padding: 0 1rem; }
-#gate p { color: var(--text-dim); }
-#gate .panel { margin-top: 1.5rem; }
+/* The gate is one interface window: a title bar, a stone body, and the two
+   boxes inside it cut into the stone rather than stacked on top of it. */
+#gate { max-width: 640px; margin: 6vh auto; padding: 0 1rem; }
+.window {
+  background: var(--stone), var(--panel);
+  border: 2px solid var(--edge);
+  box-shadow: var(--frame);
+}
+.window-bar {
+  display: flex; align-items: center; gap: 0.65rem;
+  padding: 0.55rem 0.9rem 0.5rem;
+  background: linear-gradient(#4b4031, #362d22);
+  border-bottom: 2px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--bevel-hi), inset 1px 0 0 var(--edge-light),
+    inset -1px 0 0 var(--edge-light);
+}
+.window-bar h1 { margin: 0; font-size: clamp(1.25rem, 4.6vw, 1.85rem); line-height: 1.15; }
+.window-body { padding: 0.9rem 1.1rem 1.1rem; }
+#gate .window-body > p { color: var(--text); margin: 0 0 1rem; }
+#gate .window-body > p strong { color: var(--title); }
+#gate .panel {
+  margin-top: 0.9rem;
+  background: rgba(0, 0, 0, .2);
+  border: 1px solid var(--edge);
+  box-shadow: var(--sunken);
+}
+#gate footer { margin-top: 0.9rem; }
 #strategy summary {
   cursor: pointer; color: var(--gold); font-weight: 600;
   font-family: Cinzel, serif;
@@ -254,12 +373,37 @@ input[type="checkbox"] { accent-color: var(--gold); width: 1rem; height: 1rem; }
 #strategy[open] summary { margin-bottom: 0.8rem; }
 #strategy h3 { font-size: 1rem; margin: 1rem 0 0.3rem; }
 #strategy p { margin: 0 0 0.6rem; font-size: 0.92rem; }
-#gate label { display: block; font-weight: 600; margin-bottom: 0.5rem; }
-#gate .row { display: flex; gap: 0.6rem; margin-top: 0.9rem; flex-wrap: wrap; }
-#gate .row button { flex: 1; min-width: 120px; }
-.preset { font-weight: 400 !important; font-size: 0.9rem; padding: 0.35rem 0.6rem !important; }
+#gate label {
+  display: block; margin-bottom: 0.55rem;
+  font-family: Cinzel, "Times New Roman", serif; font-weight: 700;
+  font-size: 1.02rem; color: var(--title); text-shadow: 1px 1px 0 #000;
+}
+#gate .row { display: flex; gap: 0.6rem; margin-top: 0.4rem; flex-wrap: wrap; }
+#gate .row button { flex: 1; min-width: 120px; font-size: 1.05rem; padding-block: 0.6rem; }
+#gate .row button:active { padding-top: calc(0.6rem + 1px); padding-bottom: calc(0.6rem - 1px); }
+/* The amount box carries a coin stack in its well, like the GE price field. */
+.gp-input { position: relative; }
+.gp-input .coin-mark {
+  position: absolute; left: 0.45rem; top: 50%; transform: translateY(-50%);
+  width: 1.75rem; height: 1.75rem; pointer-events: none;
+}
+.gp-input input {
+  padding-left: 2.55rem; font-family: var(--mono); font-variant-numeric: tabular-nums;
+  color: var(--value); text-shadow: 1px 1px 0 #000; font-size: 1rem;
+}
+.gp-input input::placeholder { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; text-shadow: none; }
+.preset {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 0.88rem; padding: 0.35rem 0.75rem !important;
+}
+.preset:active:not(:disabled) { padding-top: calc(0.35rem + 1px) !important; padding-bottom: calc(0.35rem - 1px) !important; }
+/* Coin-stack colours, as the game draws a stack's quantity: yellow under
+   100K, white to 9.99M, green from 10M. Only ever on a gp amount. */
+.stack-low, .stack-low:hover { color: var(--stack-low); }
+.stack-mid, .stack-mid:hover { color: var(--stack-mid); }
+.stack-high, .stack-high:hover { color: var(--stack-high); }
 .presets { display: flex; gap: 0.4rem; margin-top: 0.6rem; flex-wrap: wrap; }
-#gate-error { color: #ff8a7a; margin-top: 0.7rem; min-height: 1.2rem; }
+#gate-error { color: #ff8a7a; margin-top: 0.5rem; min-height: 1.2rem; }
 
 /* -- app shell -- */
 #app { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
@@ -339,8 +483,10 @@ input[type="checkbox"] { accent-color: var(--gold); width: 1rem; height: 1rem; }
 }
 #termbar h1 {
   font-size: clamp(0.95rem, 2.2vw, 1.15rem);
-  margin: 0; text-shadow: 1px 1px 0 var(--edge);
+  margin: 0; text-shadow: 1px 1px 0 #000;
+  display: flex; align-items: center; gap: 0.45rem;
 }
+#termbar .coin-mark { width: 1.5rem; height: 1.5rem; }
 #termstat {
   display: flex; align-items: center; gap: 0.9rem;
   font-family: var(--mono); font-size: 0.78rem; color: var(--text-dim);
@@ -553,7 +699,12 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
   #termstat { font-size: 0.7rem; gap: 0.6rem; }
   .metrics { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
   #plan-cards { grid-template-columns:repeat(2,minmax(0,1fr)); gap:.35rem; }
-  .plan-name { font-size:.83rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .plan-name { font-size:.8rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .slot-item { gap:.4rem; }
+  .slot-sprite { width:36px; height:36px; }
+  .slot-side { font-size:.88rem; }
+  .plan-rank { font-size:.62rem; letter-spacing:.06em; }
+  .plan-card { padding:.35rem .45rem .45rem; }
   .plan-line { font-size:.7rem; gap:.25rem; }
   .plan-foot, .plan-warn { font-size:.64rem; }
   #flips th:nth-child(3), #flips td:nth-child(3),
@@ -561,6 +712,9 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
   #flips th:nth-child(7), #flips td:nth-child(7) { display:none; }
   #main { padding:.55rem; }
   #keys { display: none; }   /* no keyboard to hint at */
+  #gate { margin: 1rem auto; }
+  .window-body { padding: 0.75rem 0.75rem 0.85rem; }
+  #gate .panel { padding: 0.8rem 0.75rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   #tape-track, .dot { animation: none; }
@@ -571,7 +725,12 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
 
 <!-- ============ budget gate ============ -->
 <section id="gate">
-  <h1>🪙 Grand Exchange Flipper</h1>
+  <div class="window">
+  <div class="window-bar">
+    <span class="coin-mark" aria-hidden="true"><img class="item-icon" src="https://oldschool.runescape.wiki/images/Coins_10000.png" alt="" decoding="async"></span>
+    <h1>Grand Exchange Flipper</h1>
+  </div>
+  <div class="window-body">
   <!--
     JavaScript port of engine.py, stats.py and filters.py, kept deliberately in
     step with them because this page runs with no Python available. When you
@@ -661,20 +820,25 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
   </details>
   <div class="panel">
     <label for="budget">How much gp do you have to flip with?</label>
-    <input type="text" id="budget" placeholder="e.g. 250k, 1.5m or 1,000,000"
-           autocomplete="off" inputmode="text">
+    <div class="gp-input">
+      <span class="coin-mark" aria-hidden="true"><img class="item-icon" src="https://oldschool.runescape.wiki/images/Coins_10000.png" alt="" decoding="async"></span>
+      <input type="text" id="budget" placeholder="e.g. 250k, 1.5m or 1,000,000"
+             autocomplete="off" inputmode="text">
+    </div>
     <div class="presets">
-      <button class="preset" data-gp="100k">100k</button>
-      <button class="preset" data-gp="1m">1m</button>
-      <button class="preset" data-gp="10m">10m</button>
-      <button class="preset" data-gp="100m">100m</button>
+      <button class="preset stack-mid" data-gp="100k">100k</button>
+      <button class="preset stack-mid" data-gp="1m">1m</button>
+      <button class="preset stack-high" data-gp="10m">10m</button>
+      <button class="preset stack-high" data-gp="100m">100m</button>
     </div>
     <div id="gate-error" role="alert"></div>
     <div class="row"><button id="start">Start flipping</button></div>
   </div>
+  </div>
+  </div>
   <footer>
     Members and eight GE slots by default; free-to-play remains one coherent profile.
-    Not affiliated with Jagex or the OSRS Wiki.
+    A fan-made tool, not affiliated with Jagex or the OSRS Wiki.
   </footer>
 </section>
 
@@ -746,7 +910,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
 
   <main id="main">
     <div id="termbar">
-      <h1>🪙 Grand Exchange Flipper</h1>
+      <h1><span class="coin-mark" aria-hidden="true"><img class="item-icon" src="https://oldschool.runescape.wiki/images/Coins_10000.png" alt="" decoding="async"></span> Grand Exchange Flipper</h1>
       <div id="termstat">
         <span><span id="livedot" class="dot"></span><span id="livetext">CONNECTING</span></span>
         <span>QUALITY <b id="stat-scored">—</b></span>
@@ -4171,12 +4335,17 @@ function renderExecutions() {
     const targetProfit = (netRevenue(x.sell, exempt, bond) - x.buy) * x.qty;
     const timing = executionTimingNote(x, Date.now());
     return `<article class="active-flip-card" data-execution="${escapeHtml(x.key)}">
-      <div class="plan-rank">SAVED FLIP · ${new Date(x.createdAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</div>
-      <h3>${escapeHtml(x.name)}</h3>
+      <div class="slot-head"><span class="slot-side">Buy</span>
+        <span class="plan-rank">SAVED FLIP · ${new Date(x.createdAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</span></div>
+      <div class="slot-item"><span class="slot-sprite">${iconHtml(state.items?.[x.itemId]?.icon)}</span>
+        <h3>${escapeHtml(x.name)}</h3></div>
       <div class="plan-line"><span>YOUR BUY</span><strong>${num(x.qty)} @ ${num(x.buy)}</strong></div>
       <div class="plan-line"><span>TARGET SELL</span><strong>${num(x.sell)}</strong></div>
       <div class="plan-line"><span>LIVE NOW</span><strong>${liveBuy == null || liveSell == null ? "—" : `${num(liveBuy)} → ${num(liveSell)}`}</strong></div>
       <div class="plan-line"><span>TARGET PROFIT</span><strong>${formatGp(Math.round(targetProfit))} GP</strong></div>
+      <div class="ge-bar${Number(x.bought || 0) >= Number(x.qty) ? " complete" : ""}" role="progressbar"
+        aria-label="Units bought" aria-valuemin="0" aria-valuemax="${Number(x.qty)}" aria-valuenow="${Number(x.bought || 0)}"><span style="width:${Math.min(100, 100 * Number(x.bought || 0) / Number(x.qty))}%"></span></div>
+      <div class="ge-bar-label">BOUGHT ${num(Number(x.bought || 0))} / ${num(x.qty)}</div>
       <div class="flip-status${targetLive ? "" : " waiting"}">${escapeHtml(status)}</div>
       ${timing ? `<div class="flip-status waiting">${escapeHtml(timing)}</div>` : ""}
       <div class="plan-actions"><button data-edit-execution="${escapeHtml(x.key)}">Edit</button>
@@ -4558,8 +4727,10 @@ function renderPlan(config) {
       });
       return `
         <div class="plan-card locked" data-id="${lock.id}" data-slot="${entry.slot}">
-          <div class="plan-rank">SLOT ${entry.slot + 1} · LOCKED ${escapeHtml(lockedTime)}</div>
-          <div class="plan-name">${escapeHtml(lock.name)}</div>
+          <div class="slot-head"><span class="slot-side">Buy</span>
+            <span class="plan-rank">SLOT ${entry.slot + 1} · LOCKED ${escapeHtml(lockedTime)}</span></div>
+          <div class="slot-item"><span class="slot-sprite">${iconHtml(state.items?.[lock.id]?.icon)}</span>
+            <div class="plan-name">${escapeHtml(lock.name)}</div></div>
           <div class="plan-line"><span>BUY</span>
             <strong>${num(lock.qty)} @ ${num(lock.buy)}</strong></div>
           <div class="plan-line locked-sell"><span>SELL OFFER</span>
@@ -4588,8 +4759,10 @@ function renderPlan(config) {
     const confidence = confidenceLabel(r);
     return `
       <div class="plan-card${r.priceChanged ? " price-changed" : ""}" data-id="${r.id}" data-slot="${entry.slot}">
-        <div class="plan-rank">SLOT ${entry.slot + 1}</div>
-        <div class="plan-name">${escapeHtml(r.name)}</div>
+        <div class="slot-head"><span class="slot-side">Buy</span>
+          <span class="plan-rank">SLOT ${entry.slot + 1}</span></div>
+        <div class="slot-item"><span class="slot-sprite">${iconHtml(r.icon)}</span>
+          <div class="plan-name">${escapeHtml(r.name)}</div></div>
         <div class="plan-line"><span>BUY</span>
           <strong>${num(units)} @ ${num(r.buy)}</strong></div>
         <div class="plan-line"><span>LIST</span>
