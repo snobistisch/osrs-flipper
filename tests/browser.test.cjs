@@ -356,3 +356,65 @@ test('the Max profit plan card and note describe profit per flip', () => {
   assert.match(note, /replayed on the item's own last day/);
   assert.match(note, /an assumption until you log real offers/);
 });
+
+/* ---- audit 2026-11 ---- */
+
+test('the automatic plan funds on replay evidence and states its reason', async () => {
+  const { run, storage, elements } = setup();
+  const now = Math.floor(Date.now() / 1000);
+  // Steady: trades 100/110 all day. Fluke: quoted 100/110, but buyers have
+  // only been paying 102, which leaves no margin after tax.
+  const recent = (high) => Array.from({ length: 365 }, (_, i) => ({
+    timestamp: now - (365 - i) * 300, avgLowPrice: 100, lowPriceVolume: 400,
+    avgHighPrice: high, highPriceVolume: 400 }));
+  const history = Array.from({ length: 60 }, (_, i) => ({
+    timestamp: now - (60 - i) * 21600, avgLowPrice: 100, lowPriceVolume: 20000,
+    avgHighPrice: 110, highPriceVolume: 20000 }));
+  for (const [id, high] of [[1, 110], [2, 102]]) {
+    storage.set(`osrs-flipper.ts.6h.${id}`, JSON.stringify({ at: Date.now(), data: history }));
+    storage.set(`osrs-flipper.ts.5m.${id}`, JSON.stringify({ at: Date.now(), data: recent(high) }));
+  }
+  const result = await run(`(async () => {
+    const items = withExemptions({
+      1: { name: "Steady", members: true, limit: 1000, highalch: null },
+      2: { name: "Fluke", members: true, limit: 1000, highalch: null } });
+    const quote = { high: 110, low: 100, highTime: ${now} - 30, lowTime: ${now} - 30 };
+    const act = { avgHighPrice: 110, highPriceVolume: 4000, avgLowPrice: 100, lowPriceVolume: 4000 };
+    const config = { capital: 1000000, account: "members", slots: 8,
+      includeMembers: true, strategy: "active", horizonHours: 4, natureCost: 100,
+      ...automaticFilterProfile(1000000, "members", "active", 25) };
+    state.capital = config.capital; state.items = items;
+    const { rows } = screen(items, { 1: quote, 2: quote }, { 1: act, 2: act },
+                            { 1: act, 2: act }, config, ${now});
+    // Before the deep check there is no evidence, so nothing is funded.
+    state.deepReady = false;
+    const early = buildPlan(rows.map((r) => ({ ...r })), config, []);
+    await refineTopRows(rows, config, ${now});
+    state.deepReady = true;
+    show(rows, config, "");
+    const funded = state.planRows.filter((r) => r.allocatedQty > 0);
+    const fluke = state.rows.find((r) => r.name === "Fluke");
+    return { early: early.candidates.length,
+      funded: funded.map((r) => [r.name, r.buy, r.sell, r.allocatedExpected === r.replay.stableProfit]),
+      flukeFunded: fluke.allocatedQty, flukeReplay: fluke.replay && fluke.replay.stableProfit,
+      binding: state.planSelection.binding, qualified: state.planQualified,
+      listed: state.rows.find((r) => r.name === "Steady").allocatedQty > 0 };
+  })()`);
+  assert.equal(result.early, 0);
+  assert.equal(result.funded.length, 1);
+  const [name, buy, sell, expectedIsReplay] = result.funded[0];
+  assert.equal(name, 'Steady');
+  assert.ok(buy > 100 && sell < 110, 'priced inside what traded');
+  assert.ok(expectedIsReplay, 'EXPECTED is the replayed result');
+  assert.equal(result.flukeFunded, 0);
+  assert.ok(result.flukeReplay == null || result.flukeReplay <= 0);
+  assert.equal(result.binding, 'none');
+  assert.equal(result.qualified, 1);
+  assert.ok(result.listed, 'the full list shows the funded copy');
+  assert.match(elements.get('#plan-cards').innerHTML, /Steady/);
+  assert.doesNotMatch(elements.get('#plan-cards').innerHTML, /Fluke/);
+  const note = elements.get('#plan-note').textContent;
+  assert.match(note, /Neither bank nor slots ran out/);
+  assert.match(note, /made money in both halves/);
+  assert.match(elements.get('#status').textContent, /1 flip made money when replayed/);
+});
