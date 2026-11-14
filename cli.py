@@ -11,6 +11,7 @@ never reorders the ones that remain.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import sys
 import time
 
@@ -71,18 +72,29 @@ def parse_args(argv):
     p.add_argument("--no-archive", action="store_true",
                    help="ignore the tick archive even if present")
 
+    p.add_argument("--bank-risk", type=int, default=filters.DEFAULT_BANK_RISK_PERCENT,
+                   metavar="PERCENT",
+                   help="most of the bank one new offer may lock (default: 25)")
+    p.add_argument("--no-policy", action="store_true",
+                   help="rank on the rate model alone, with no quality gates, "
+                        "no replay evidence and score-proportional funding "
+                        "(the behaviour before November 2026). The backtest "
+                        "in docs/audit-2026-11.md is why this is not the "
+                        "default.")
+
     view = p.add_argument_group(
-        "display filters", "Applied after scoring. These hide rows; they do "
-                           "not change the ranking of what is left.")
+        "display filters", "Each one replaces the automatic value of the same "
+                           "gate. They hide rows and steer which rows are "
+                           "deep-checked; they do not reorder what is left.")
     view.add_argument("--max-age", type=int, default=None,
                       help="max seconds since the OLDER of the two quotes")
-    view.add_argument("--min-vol", type=int, default=0,
+    view.add_argument("--min-vol", type=int, default=None,
                       help="min units traded on the thin side per 1h")
-    view.add_argument("--min-roi", type=float, default=0.0,
+    view.add_argument("--min-roi", type=float, default=None,
                       help="min net ROI per flip, e.g. 0.01 = 1%%")
-    view.add_argument("--min-depth", type=int, default=0,
+    view.add_argument("--min-depth", type=int, default=None,
                       help="min gp of undercut room")
-    view.add_argument("--min-price", type=engine.parse_gp, default=1,
+    view.add_argument("--min-price", type=engine.parse_gp, default=None,
                       help="min buy price per item, e.g. 100 or 5k")
     view.add_argument("--max-price", type=engine.parse_gp, default=None,
                       help="max buy price per item, e.g. 10k or 1m")
@@ -96,15 +108,25 @@ def parse_args(argv):
 
 
 def config_from(opts, nature_cost: int) -> filters.FilterConfig:
-    return filters.FilterConfig(
+    """The automatic selection policy, with any explicit flag on top."""
+    if not 10 <= opts.bank_risk <= 100:
+        raise ValueError("--bank-risk must be between 10 and 100 percent")
+    config = filters.FilterConfig(
         capital=opts.capital, account=engine.AccountType(opts.account),
         trade_mode=engine.TradeMode(opts.strategy),
         overnight_hours=opts.overnight_hours,
-        nature_rune_cost=nature_cost,
-        max_quote_age=opts.max_age, min_thin_volume_1h=opts.min_vol,
-        min_roi=opts.min_roi, min_undercut_depth=opts.min_depth,
-        min_price=opts.min_price, max_price=opts.max_price,
-        tax_free_only=opts.tax_free, hide_botted=opts.no_bots)
+        nature_rune_cost=nature_cost)
+    if not opts.no_policy:
+        config = filters.automatic_profile(config, opts.bank_risk)
+    explicit = {
+        "max_quote_age": opts.max_age, "min_thin_volume_1h": opts.min_vol,
+        "min_roi": opts.min_roi, "min_undercut_depth": opts.min_depth,
+        "min_price": opts.min_price, "max_price": opts.max_price,
+        "tax_free_only": True if opts.tax_free else None,
+        "hide_botted": True if opts.no_bots else None,
+    }
+    return replace(config, **{name: value for name, value in explicit.items()
+                              if value is not None})
 
 
 def print_crash_table(result, opts):
@@ -163,8 +185,17 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
                       "gp per flip" if profit else "gp/slot/h"))
     hidden = {k: v for k, v in result.hidden.items() if v and k != "shown"}
     if hidden:
-        print("Hidden by display filters:  " + "  ".join(
+        print("Hidden by {}:  ".format(
+            "display filters" if opts.no_policy else "quality gates") + "  ".join(
             "{} {}".format(v, k) for k, v in hidden.items()))
+    if result.selection is not None:
+        funded = sum(1 for row in result.rows if row.allocated_quantity)
+        print("Plan: {} of {} slots funded, {} of {} gp committed — {}.".format(
+            funded, config.slots,
+            engine.format_gp(sum(row.allocated_capital or 0
+                                 for row in result.rows)),
+            engine.format_gp(config.capital),
+            filters.plan_reason(result.selection, config.trade_mode)))
     print()
     if not result.rows:
         print("Nothing to show. Loosen the display filters, or the market is "
@@ -195,6 +226,13 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
                   engine.format_gp(row.allocated_capital or 0),
                   timing_value,
                   row.p_fill * 100, value))
+        if row.replay is not None:
+            print("{:<24} · replayed on its last day of 5m trading: {:,.0f} gp "
+                  "per offer ({:,.0f} older half, {:,.0f} newer), completed "
+                  "{:.0%} of the time, lost money {:.0%}".format(
+                      "", row.replay.mean_profit, row.replay.older_profit,
+                      row.replay.newer_profit, row.replay.completion_rate,
+                      row.replay.loss_rate))
         if relist and (row.allocated_quantity or 0) > 0:
             print("{:<24} · 80% done by {}; nothing bought after {}? re-check "
                   "the margin and reprice. Not sold by {}? cancel the rest"
@@ -244,6 +282,17 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
               "go: leave listed sells in place; cancel Active buys that have "
               "not filled.")
         ranking_explanation = "HORIZON EV"
+    if config.replay_ranking:
+        print("Rows with a replay line are ranked on it: {} is what the exact "
+              "offer earned when replayed on the item's own recent 5-minute "
+              "buckets, taking the weaker half of that window. A buy fills "
+              "only where sellers traded below your price, a sell only where "
+              "buyers traded above it, and stock unsold at the deadline is "
+              "sold at the instant-sell price. Only such rows are funded. "
+              "This is measured on public trades, not on your fills: the "
+              "share of passing volume that reaches your offer is an "
+              "assumption until journal.py holds real offers.".format(
+                  ranking_explanation))
     print("MEASURED = the score before shrinkage; {} is after. Ranking hundreds "
           "of noisy estimates surfaces the biggest errors rather than the "
           "biggest values, so each score is pulled toward the market average "
@@ -310,7 +359,10 @@ def main(argv=None):
             items, quotes, activity_5m, activity_1h, config, now=time.time(),
             fetch_history=fetch if opts.deep > 0 else None,
             top_k=opts.deep, exempt=exempt, volume_lookup=volume_lookup,
-            fetch_recent=fetch_recent if opts.deep > 0 else None)
+            fetch_recent=fetch_recent if opts.deep > 0 else None,
+            # One 5-minute series per item serves the recent-execution
+            # evidence, the measured reach and the replay.
+            fetch_reach=fetch_recent if opts.deep > 0 else None)
         if opts.mode == "crash":
             print_crash_table(result, opts)
         else:

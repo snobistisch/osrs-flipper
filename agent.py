@@ -303,10 +303,12 @@ def rank(client: api.WikiClient, capital: int,
     activity_1h = client.interval("1h")
     exempt = exemptions.resolve(items)
     nature_cost = exemptions.nature_rune_cost(quotes)
-    config = filters.FilterConfig(
+    # The same automatic selection policy as the browser and cli.py: quality
+    # gates, replay evidence before bank, slots and bank chosen together.
+    config = filters.automatic_profile(filters.FilterConfig(
         capital=capital, account=account, trade_mode=mode,
         overnight_hours=overnight_hours,
-        nature_rune_cost=nature_cost)
+        nature_rune_cost=nature_cost))
 
     store = _open_archive()
     volume_lookup = archive.volume_lookup(store) if store is not None else None
@@ -328,7 +330,8 @@ def rank(client: api.WikiClient, capital: int,
             items, quotes, activity_5m, activity_1h, config, now=time.time(),
             fetch_history=fetch if deep > 0 else None, top_k=deep,
             exempt=exempt, volume_lookup=volume_lookup,
-            fetch_recent=fetch_recent if deep > 0 else None)
+            fetch_recent=fetch_recent if deep > 0 else None,
+            fetch_reach=fetch_recent if deep > 0 else None)
     finally:
         if store is not None:
             store.close()
@@ -393,6 +396,20 @@ def flip_to_dict(row: filters.FlipRow) -> dict:
         "bond_fee": row.bond_fee,
         "deep_checked": row.deep_checked,
         "allocated_capital": row.allocated_capital,
+        # Evidence the plan rests on. Null where the item's recent 5-minute
+        # buckets were not read; such a row is listed but never funded.
+        "replay": None if row.replay is None else {
+            "profit": round(row.replay.mean_profit),
+            "profit_older_half": round(row.replay.older_profit),
+            "profit_newer_half": round(row.replay.newer_profit),
+            "completion_rate": round(row.replay.completion_rate, 3),
+            "loss_rate": round(row.replay.loss_rate, 3),
+            "placements": row.replay.placements,
+        },
+        "buy_reach": None if row.buy_reach is None else round(row.buy_reach, 3),
+        "sell_reach": (None if row.sell_reach is None
+                       else round(row.sell_reach, 3)),
+        "plan_reason": row.plan_reason,
         "warnings": list(row.warnings),
     }
 

@@ -2208,105 +2208,9 @@ function shrinkScores(rows) {
 }
 
 /* ---- capital allocation ----
-   An equal split strands capital: a 10 gp item with a 10,000 buy limit can
-   absorb 100k and no more, so a third of a 3m bank sits idle while the 50k
-   item that could have used it is capped. */
-function allocateCapital(rows, capital, slots, reserved = [],
-                         maxPerPosition = Infinity,
-                         bankRiskPercent = DEFAULT_BANK_RISK_PERCENT) {
-  rows.forEach((r) => { r.allocated = 0; r.allocatedQty = 0; r.allocatedExpected = 0; });
-  const selected = [], categoryCount = {};
-  for (const lock of reserved) {
-    categoryCount[lock.category] = (categoryCount[lock.category] || 0) + 1;
-  }
-  let seedBank = capital;
-  for (const r of rows.slice(0, Math.max(40, slots * 6))) {
-    if (selected.length >= slots) break;
-    const ceiling = positionCapitalCeiling(r, maxPerPosition, bankRiskPercent);
-    const unit = rowUnitCapital(r);
-    if (!(r.rankingValue > 0) || !(r.expected > 0) ||
-        unit > seedBank || unit > ceiling) continue;
-    if ((categoryCount[r.category] || 0) >= 3) continue;
-    selected.push(r); categoryCount[r.category] = (categoryCount[r.category] || 0) + 1;
-    seedBank -= unit;
-  }
-  // Every amount below is a whole number of units, each costing the buy price
-  // plus the bond conversion fee where one applies.
-  let remaining = capital;
-  const seeded = [];
-  for (const r of selected) {
-    const unit = rowUnitCapital(r);
-    if (!(r.rankingValue > 0) || !(r.expected > 0) || remaining < unit) continue;
-    r.allocated = unit;
-    remaining -= unit;
-    seeded.push(r);
-  }
-  for (let pass = 0; pass < selected.length + 3; pass++) {
-    const hungry = seeded.filter((r) =>
-      r.allocated + rowUnitCapital(r) <= positionCapitalCeiling(
-        r, maxPerPosition, bankRiskPercent));
-    if (!hungry.length || remaining < Math.min(...hungry.map(rowUnitCapital))) break;
-    const weight = hungry.reduce((sum, r) => sum + r.rankingValue, 0);
-    let progressed = false;
-    for (const r of hungry) {
-      const unit = rowUnitCapital(r);
-      const ceiling = positionCapitalCeiling(r, maxPerPosition, bankRiskPercent);
-      let grant = Math.min(ceiling - r.allocated,
-        Math.floor(remaining * r.rankingValue / weight));
-      grant -= grant % unit;
-      if (grant <= 0 && remaining >= unit) grant = unit;
-      grant = Math.min(grant, remaining);
-      grant -= grant % unit;
-      if (grant > 0) { r.allocated += grant; remaining -= grant; progressed = true; }
-    }
-    if (!progressed) break;
-  }
-  const groupUsed = {};
-  for (const lock of reserved) if (lock.limitGroup) {
-    groupUsed[lock.limitGroup] = (groupUsed[lock.limitGroup] || 0) + lock.qty;
-  }
-  for (const r of selected) {
-    const unit = rowUnitCapital(r);
-    r.allocatedQty = unit > 0 ? Math.floor(r.allocated / unit) : 0;
-    if (r.limitGroup && r.limit != null) {
-      const cap = effectiveBuyLimit(r.limit, r.horizonHours, r.mode) || 0;
-      const left = Math.max(0, cap - (groupUsed[r.limitGroup] || 0));
-      r.allocatedQty = Math.min(r.allocatedQty, left);
-      groupUsed[r.limitGroup] = (groupUsed[r.limitGroup] || 0) + r.allocatedQty;
-    }
-    r.allocated = r.allocatedQty * unit;
-    if (r.allocatedQty > 0) rescoreAllocated(r);
-  }
-  const funded = selected.filter((r) => r.allocatedQty > 0)
-    .sort((a, b) => b.rankingValue - a.rankingValue);
-  const ids = new Set(funded.map((r) => r.id));
-  rows.splice(0, rows.length, ...funded, ...rows.filter((r) => !ids.has(r.id)));
-}
-
-function positionCapitalCeiling(row, maxPerPosition, bankRiskPercent) {
-  // Active flips are funded to the quantity sized for the completion target:
-  // the whole round trip done before the deadline with
-  // CAL.active_target_completion probability. Above the safe default, the
-  // user's risk setting deliberately blends toward the quantity that only
-  // fills at the MEAN rate (about one completion in three); the card then
-  // shows the lower completion odds. Away and Max profit quantity is already
-  // the expected-value choice after stranded-inventory stress, so it is not
-  // blended.
-  const baseFillBound = row.qty;
-  const riskPercent = normalizeBankRiskPercent(bankRiskPercent);
-  const riskBlend = Math.max(0, Math.min(1,
-    (riskPercent - DEFAULT_BANK_RISK_PERCENT) /
-    (MAX_BANK_RISK_PERCENT - DEFAULT_BANK_RISK_PERCENT)));
-  const baseQty = Number(baseFillBound) || 0;
-  const modelledQty = Math.max(baseQty, Number(row.mode === "active"
-    ? row.meanCapacityQty ?? row.qty : row.qty) || 1);
-  const fillBound = baseQty + (modelledQty - baseQty) * riskBlend;
-  const reachableQty = Math.max(1, Math.floor(Number.isFinite(fillBound)
-    ? fillBound : (row.qty || 1)));
-  return Math.min(row.capitalNeeded, maxPerPosition,
-    reachableQty * rowUnitCapital(row));
-}
-
+   allocatePortfolio (further down, next to the replay it sizes with) funds
+   the plan. This re-scores one row at the exact integer quantity it was
+   given, so the card shows the fill odds and timing of what is bought. */
 function rescoreAllocated(r) {
   const retained = (r.shrinkRetention ?? 1) * (r.executionFactor ?? 1);
   const b = scoreFlip({
@@ -3903,8 +3807,10 @@ function optimiseExecution(o) {
         const buy = Math.floor(o.baseBuy * (1 - depth));
         if (buy < 1 || buy >= o.baseBuy || seen.has(buy)) continue;
         seen.add(buy);
-        const share = dipFillMultiplier(Math.log(o.baseBuy / buy), priceSigma,
-          o.config.horizonHours);
+        // With measured reach the lower bid's volume is read from what traded
+        // down there; the random-walk share is the stand-in without it.
+        const share = o.reach ? 1 : dipFillMultiplier(
+          Math.log(o.baseBuy / buy), priceSigma, o.config.horizonHours);
         if (share > 0) bids.push({ buy, step: buy - o.baseBuy,
           volume: o.buyVolume1h * share, depth, kept });
       }
@@ -3920,15 +3826,27 @@ function optimiseExecution(o) {
     const margin = netMargin(bid.buy, sell, o.exempt, o.bond);
     if (affordable <= 0 || margin <= 0) return null;
     const sellImprovement = o.baseSell - listed;
-    const buyShare = aggressiveness(priceEdge(Math.max(0, bid.step), originalSpread), o.competitors);
-    const sellShare = aggressiveness(priceEdge(sellImprovement, originalSpread), o.competitors);
-    const tripRate = roundTripRate(fillRate(bid.volume, buyShare),
-      fillRate(o.sellVolume1h, sellShare));
+    // With `reach` (the item's own recent 5-minute buckets) the volume behind
+    // each candidate price is measured: a buy at B meets the instant-sell
+    // volume that traded below B, a sell at S the instant-buy volume above S.
+    // Price improvement then pays through the volume it reaches, so the
+    // invented queue-jump curve is not used.
+    let volume = bid.volume, sellVolume = o.sellVolume1h, buyShare, sellShare;
+    if (o.reach) {
+      volume = o.reach.buyVolumePerHour(bid.buy, CAL.touch_fill_weight);
+      sellVolume = o.reach.sellVolumePerHour(sell, CAL.touch_fill_weight);
+      buyShare = sellShare = aggressiveness(0, o.competitors);
+    } else {
+      buyShare = aggressiveness(priceEdge(Math.max(0, bid.step), originalSpread), o.competitors);
+      sellShare = aggressiveness(priceEdge(sellImprovement, originalSpread), o.competitors);
+    }
+    const tripRate = roundTripRate(fillRate(volume, buyShare),
+      fillRate(sellVolume, sellShare));
     const meanCapacity = flippableQty(limit,
       Math.floor(tripRate * Math.max(0, usable)), affordable);
     let qty;
     if (away) {
-      qty = flippableQty(limit, fillableQuantity(bid.volume, buyShare,
+      qty = flippableQty(limit, fillableQuantity(volume, buyShare,
         o.config.horizonHours), affordable);
       qty = Math.max(1, Math.floor(qty * fraction));
     } else if (profit) {
@@ -3938,7 +3856,8 @@ function optimiseExecution(o) {
         CAL.active_target_completion, sigma, fillLogMu()), affordable));
     }
     const breakdown = scoreFlip({ ...o, buy: bid.buy, sell, margin, qty, depth: 0,
-      buyVolume1h: bid.volume, buyImprovement: bid.step, sellImprovement,
+      buyVolume1h: volume, sellVolume1h: sellVolume,
+      buyImprovement: bid.step, sellImprovement,
       buyShare, sellShare, mode: o.config.strategy,
       horizonHours: o.config.horizonHours, capitalPerUnit, fillLogSigma: sigma });
     return { buy: bid.buy, sell, margin, qty,
@@ -3946,7 +3865,8 @@ function optimiseExecution(o) {
       // bank-risk slider can knowingly trade completion odds for size.
       meanCapacityQty: Math.max(qty, meanCapacity),
       buyImprovement: bid.step, sellImprovement, buyShare, sellShare, breakdown,
-      buyVolume1h: bid.volume, dipDepth: bid.depth, dipRetention: bid.kept };
+      buyVolume1h: volume, sellVolume1h: sellVolume,
+      dipDepth: bid.depth, dipRetention: bid.kept };
   };
   let best = null, bestBid = null, bestExtra = null;
   for (const bid of bids) {
@@ -4082,6 +4002,209 @@ function screen(items, quotes, act5m, act1h, config, now) {
   return { rows, funnel, shrinkage };
 }
 
+/* ---- replay as plan evidence ----
+   Mirrors filters._with_replay / replay_profit / replay_value. The policy
+   constants are the ones filters.automatic_profile applies in Python. */
+const REPLAY_QTY_FRACTIONS = [0.25, 0.5, 0.75, 1.0];
+
+function withReplay(row, points, config) {
+  const quantities = [...new Set(REPLAY_QTY_FRACTIONS
+    .map((fraction) => Math.max(1, Math.floor(row.qty * fraction))))]
+    .sort((a, b) => a - b);
+  const sizes = [];
+  for (const qty of quantities) {
+    const view = replayOffer(points, { buy: row.buy, sell: row.sell, qty,
+      buyShare: row.buyShare, sellShare: row.sellShare, mode: config.strategy,
+      horizonHours: config.horizonHours, exempt: row.exempt, bond: row.bond });
+    if (view) sizes.push([qty, view]);
+  }
+  if (!sizes.length) return;
+  row.replay = sizes[sizes.length - 1][1];
+  row.replaySizes = sizes;
+}
+
+/* The replayed profit the policy counts: the plain mean over all placements,
+   or the smaller of the older and newer half of the window ("stable"). */
+const replayProfit = (view, config) =>
+  config.replayStatistic === "stable" ? view.stableProfit : view.meanProfit;
+
+/* Replayed profit in the strategy's own unit: per slot-hour for Active, per
+   flip for Away and Max profit. */
+function replayValue(view, config) {
+  const profit = replayProfit(view, config);
+  if (config.strategy !== "active" || config.activeObjective === "offer") return profit;
+  const floor = LEGS_PER_ROUND_TRIP * CAL.min_leg_seconds / SECONDS_PER_HOUR;
+  return profit / Math.max(floor, view.meanSlotHours);
+}
+
+/* A copy of the row re-scored at `qty`. Same arithmetic as rescoreAllocated. */
+function rescoreQuantity(row, qty) {
+  const copy = { ...row, warnings: [...(row.warnings || [])],
+    factors: { ...(row.factors || {}) }, allocatedQty: qty };
+  rescoreAllocated(copy);
+  copy.allocatedQty = 0; copy.allocatedExpected = 0;
+  return copy;
+}
+
+/* The row at `qty` with the replayed result as its expectation. */
+function replayRow(row, qty, view, config) {
+  const sized = qty === row.qty ? { ...row } : rescoreQuantity(row, qty);
+  const value = replayValue(view, config);
+  sized.replay = view;
+  sized.expected = replayProfit(view, config);
+  sized.rawRankingValue = value;
+  sized.rankingValue = value;
+  if (config.strategy === "active") sized.perSlotHour = value;
+  return sized;
+}
+
+/* Rank and size a replayed row on what the replay measured: the size with the
+   highest value, the smaller one on a tie. */
+function rankByReplay(row, config) {
+  if (!row.replaySizes || !row.replaySizes.length) return;
+  let best = null, bestValue = -Infinity;
+  for (const [qty, view] of row.replaySizes) {
+    const value = replayValue(view, config);
+    if (value > bestValue) { best = [qty, view]; bestValue = value; }
+  }
+  Object.assign(row, replayRow(row, best[0], best[1], config));
+}
+
+/* Whether the row was checked as far as the policy demands before it may
+   receive bank. Mirrors filters.has_funding_evidence. */
+function hasFundingEvidence(row, config) {
+  if (config.fundingEvidence === "replay") {
+    return row.replay != null && replayProfit(row.replay, config) > 0;
+  }
+  if (config.fundingEvidence === "reach") return Boolean(row.deep) && row.buyReach != null;
+  if (config.fundingEvidence === "history") return Boolean(row.deep);
+  return true;
+}
+
+const meetsCompletionTarget = (row, config) => config.strategy !== "active" ||
+  row.pFill + 1e-9 >= CAL.active_target_completion;
+
+/* One sentence on which scarce resource decided the plan. */
+function planReason(selection, strategy) {
+  const objective = strategy === "active" ? "profit per slot-hour" : "profit per flip";
+  if (selection.binding === "capital" || selection.binding === "both") {
+    return `bank is the limit: chosen for ${objective} per coin locked — every ` +
+      `1m gp had to earn at least ${formatGp(Math.round(selection.capitalPrice * 1_000_000))} gp` +
+      (strategy === "active" ? " per hour" : "");
+  }
+  if (selection.binding === "slots") {
+    return `slots are the limit: chosen for the highest ${objective}`;
+  }
+  return "neither bank nor slots ran out: every candidate that passed the checks is funded";
+}
+
+const PORTFOLIO_QTY_FRACTIONS = [0.25, 0.5, 0.75, 1.0];
+const PORTFOLIO_CANDIDATES = 40;
+
+/* Fund the sizes that maximise the strategy's objective under both the slot
+   and the bank constraint. `rows` is the ranking in order; `capital` and
+   `slots` are what is still free. Mirrors filters._allocate_portfolio:
+   candidates need a positive expectation, the completion target and the
+   funding evidence the policy asks for, at most three rows per correlated
+   category and one row per connected buy-limit family. */
+function allocatePortfolio(rows, capital, slots, reserved, config) {
+  rows.forEach((r) => { r.allocated = 0; r.allocatedQty = 0; r.allocatedExpected = 0; });
+  const bank = Math.min(capital, config.maxPositionCapital ?? capital);
+  const candidates = [], categoryCount = {}, groups = new Set();
+  for (const lock of reserved) {
+    categoryCount[lock.category] = (categoryCount[lock.category] || 0) + 1;
+    if (lock.limitGroup) groups.add(lock.limitGroup);
+  }
+  for (const row of rows) {
+    if (candidates.length >= PORTFOLIO_CANDIDATES) break;
+    const unit = rowUnitCapital(row);
+    if (!(row.rankingValue > 0) || !(row.expected > 0) || !(unit > 0) || unit > bank ||
+        !meetsCompletionTarget(row, config) || !hasFundingEvidence(row, config)) continue;
+    if ((categoryCount[row.category] || 0) >= 3) continue;
+    if (row.limitGroup != null) {
+      if (groups.has(row.limitGroup)) continue;
+      groups.add(row.limitGroup);
+    }
+    categoryCount[row.category] = (categoryCount[row.category] || 0) + 1;
+    candidates.push(row);
+  }
+
+  const sized = [], options = [], cashLimited = [];
+  const cap = config.maxPositionCapital ?? capital;
+  for (const row of candidates) {
+    const unit = rowUnitCapital(row);
+    const most = Math.min(row.qty, Math.floor(bank / unit));
+    // The free coins, not the per-trade cap, are what cut this row short.
+    cashLimited.push(Math.floor(capital / unit) < row.qty &&
+      Math.floor(capital / unit) <= Math.floor(cap / unit));
+    const variants = [], values = [];
+    if (config.replayRanking && row.replaySizes && row.replaySizes.length) {
+      // Sizes the replay measured, as far as the coins reach.
+      for (const [measured, view] of row.replaySizes) {
+        if (measured > Math.max(most, row.replaySizes[0][0])) continue;
+        let qty = measured;
+        let rescored = replayRow(row, qty, view, config);
+        if (qty > most) {
+          // Fewer coins than the smallest measured size: scale it down pro
+          // rata. A smaller offer fills no worse per unit.
+          const scale = most / qty;
+          const scaled = rescoreQuantity(row, most);
+          scaled.replay = view;
+          scaled.expected = rescored.expected * scale;
+          scaled.rawRankingValue = rescored.rankingValue * scale;
+          scaled.rankingValue = rescored.rankingValue * scale;
+          rescored = scaled;
+          qty = most;
+        }
+        if (!(rescored.rankingValue > 0) || qty <= 0) continue;
+        variants.push(rescored);
+        values.push([rescored.rankingValue, qty * unit]);
+      }
+    } else {
+      const quantities = [...new Set(PORTFOLIO_QTY_FRACTIONS
+        .map((fraction) => Math.max(1, Math.floor(most * fraction))))]
+        .sort((a, b) => a - b);
+      for (const qty of quantities) {
+        const rescored = rescoreQuantity(row, qty);
+        if (!(rescored.rankingValue > 0) || !(rescored.expected > 0) ||
+            !meetsCompletionTarget(rescored, config)) continue;
+        variants.push(rescored);
+        values.push([rescored.rankingValue, qty * unit]);
+      }
+    }
+    sized.push(variants);
+    options.push(values);
+  }
+
+  const selection = selectPortfolio(options, capital, slots);
+  // A funded row the free coins cut short is the bank binding as well, even
+  // though the selection never saw the sizes it could not afford.
+  if ((selection.binding === "none" || selection.binding === "slots") &&
+      selection.choices.some((choice, i) => choice >= 0 && cashLimited[i])) {
+    const rates = [];
+    selection.choices.forEach((choice, i) => {
+      if (choice >= 0) rates.push(options[i][choice][0] / options[i][choice][1]);
+    });
+    selection.capitalPrice = Math.min(...rates);
+    selection.binding = selection.binding === "slots" ? "both" : "capital";
+  }
+  const reason = planReason(selection, config.strategy);
+  const funded = [];
+  selection.choices.forEach((choice, index) => {
+    if (choice < 0) return;
+    const row = sized[index][choice];
+    row.allocatedQty = row.qty;
+    row.allocated = row.qty * rowUnitCapital(row);
+    row.allocatedExpected = row.expected;
+    row.planReason = reason;
+    funded.push(row);
+  });
+  funded.sort((a, b) => b.rankingValue - a.rankingValue);
+  const ids = new Set(funded.map((r) => r.id));
+  rows.splice(0, rows.length, ...funded, ...rows.filter((r) => !ids.has(r.id)));
+  return selection;
+}
+
 /* Re-score the leading candidates against 14 days of history. Unlike the old
    page this recomputes the score rather than multiplying it by further sub-1.0
    factors: history replaces estimates instead of only penalising them, so an
@@ -4120,6 +4243,14 @@ async function refineTopRows(rows, config, now) {
         historyPoints = await fetchTimeseries(row.id, HISTORY_TIMESTEP);
         view = historyView(historyPoints, row.buy, row.sell);
       } catch { /* fetch failed: leave the row on intraday data */ }
+      // The item's own recent 5-minute buckets: what its prices actually
+      // reached, and what this concrete offer would have done on them.
+      let recentPoints = null;
+      if (view != null) {
+        try { recentPoints = await fetchTimeseries(row.id, REACH_TIMESTEP); }
+        catch { /* no recent series: the row stays unmeasured and unfunded */ }
+      }
+      const reach = recentPoints ? reachView(recentPoints) : null;
       if (view == null) {
         row.warnings = [...row.warnings,
           "no usable 14-day history — ranked on intraday data only"];
@@ -4136,9 +4267,13 @@ async function refineTopRows(rows, config, now) {
         ? Math.min(view.lowVolumePerHour, view.highVolumePerHour) : row.volume;
       const reachableBuy = Math.max(0, baseVolume * Math.max(view.buyFillShare, 0.01));
       const reachableSell = Math.max(0, baseVolume * Math.max(view.sellFillShare, 0.01));
+      // Measured over a full day of the item's own 5-minute buckets, which is
+      // both the daily-cycle average and the real volume for the crowd.
+      const crowdVolume = reach
+        ? Math.min(reach.lowVolumePerHour, reach.highVolumePerHour) : baseVolume;
       // Crowd from the item's REAL volume, not the reachable slice: a low fill
       // share means fewer units arrive at your price, not fewer rivals queued.
-      const crowd = touchCompetitors(baseVolume, row.limit);
+      const crowd = touchCompetitors(crowdVolume, row.limit);
       const choice = optimiseExecution({
         baseBuy: row.baseBuy, baseSell: row.baseSell, exempt: row.exempt,
         bond: row.bond,
@@ -4148,7 +4283,7 @@ async function refineTopRows(rows, config, now) {
         sigmaDaily: view.ou ? view.ou.sigma : null, ou: view.ou,
         regimeScore: view.regimeScore,
         highalch: row.alchFloorGp != null ? row.alchFloorGp + config.natureCost : null,
-        natureCost: config.natureCost, fillLogSigma: fillLogSigma(true),
+        natureCost: config.natureCost, fillLogSigma: fillLogSigma(true), reach,
       });
       if (!choice) continue;
       const { buy, sell, margin, qty, meanCapacityQty, buyImprovement,
@@ -4188,7 +4323,14 @@ async function refineTopRows(rows, config, now) {
       row.alchArbitrageGp = breakdown.alchArbitrageGp;
       row.modelBuyVolume1h = choice.buyVolume1h;
       row.dipDepth = choice.dipDepth; row.dipRetention = choice.dipRetention;
-      row.modelSellVolume1h = reachableSell;
+      row.modelSellVolume1h = choice.sellVolume1h;
+      // Share of each side's recent volume the chosen prices outranked.
+      row.buyReach = reach && reach.lowVolumePerHour > 0
+        ? choice.buyVolume1h / reach.lowVolumePerHour : null;
+      row.sellReach = reach && reach.highVolumePerHour > 0
+        ? choice.sellVolume1h / reach.highVolumePerHour : null;
+      row.replay = null; row.replaySizes = [];
+      if (row.buyReach != null) withReplay(row, recentPoints, config);
       row.competitors = crowd; row.sigmaDaily = view.ou ? view.ou.sigma : null;
       row.ou = view.ou;
       row.fillShare = view.fillShare;
@@ -4245,85 +4387,26 @@ async function refineTopRows(rows, config, now) {
   await Promise.all(recentWorkers);
   const shrinkage = shrinkScores(rows);
   rows.forEach(applyExecutionEvidence);
+  if (config.replayRanking) rows.forEach((row) => rankByReplay(row, config));
   rows.sort((a, b) => b.rankingValue - a.rankingValue);
   return { refined: targets.filter((r) => r.deep).length, shrinkage };
 }
 
-function planEvidenceConfidence(row) {
-  const [freshLimit, staleLimit] = quoteAgeLimits(row.mode);
-  if (!row.deep || row.age > staleLimit ||
-      (row.regimeScore || 0) >= CAL.regime_shift_threshold) return "speculative";
-  if (!row.pricedFromReference && (row.edgeProbability || 0) >= 0.80 &&
-      row.volume >= 200 && (row.executionQuality ?? 0.5) >= 0.62) return "high";
-  if ((row.edgeProbability || 0) >= 0.55 && row.age <= freshLimit &&
-      (row.executionQuality ?? 0.5) >= 0.45) return "medium";
-  return "speculative";
-}
-
-const ACTIVE_AUTO_MAX_ROUND_TRIP_SECONDS = 2 * SECONDS_PER_HOUR;
-
-/* P80 for one unit, not the mean-rate time: the old check passed markets
-   where even a single unit finished within two hours only a third of the
-   time. */
-function singleUnitRoundTripSeconds(row) {
-  const buyRate = fillRate(row.modelBuyVolume1h, row.buyShare);
-  const sellRate = fillRate(row.modelSellVolume1h, row.sellShare);
-  return fillTimeQuantile(legWorkSeconds(1, buyRate) + legWorkSeconds(1, sellRate),
-    0.8, row.fillLogSigma ?? fillLogSigma(false), 2 * CAL.min_leg_seconds,
-    fillLogMu());
-}
-
-function quickPlanRiskTier(row) {
-  // Safety comes before theoretical gp/h. History-backed high/medium-confidence
-  // rows should fill the plan before an eye-catching but fragile spread.
-  const confidence = row.deep ? planEvidenceConfidence(row) : "unchecked";
-  let tier = confidence === "high" ? 0 : confidence === "medium" ? 1 :
-    confidence === "unchecked" ? 2 : 4;
-  if (row.pricedFromReference) tier += 2;
-  if (row.drift <= -0.02) tier += 2;
-  if (row.pFill < 0.25) tier += 2;
-  if (row.deep && ((row.regimeScore || 0) >= CAL.regime_shift_threshold ||
-      (row.volatility || 0) >= 0.08)) tier += 2;
-  if ((row.executionQuality ?? 0.5) >= 0.72) tier -= 1;
-  if ((row.executionQuality ?? 0.5) < 0.40) tier += 2;
-  return Math.max(0, tier);
-}
-
-function isAutomaticPlanCandidate(row) {
-  if (!state.deepReady) return false;
-  const confidence = planEvidenceConfidence(row);
-  if (!row.deep || confidence === "speculative") {
-    return false;
-  }
-  // Bucket averages describe where trades happened, not a live offer you can
-  // join. Keep those rows searchable, but never auto-deploy bank into them.
-  if (row.pricedFromReference) return false;
-  if ((row.executionQuality ?? 0.5) < 0.40) return false;
-  if (row.mode === "active" &&
-      singleUnitRoundTripSeconds(row) > ACTIVE_AUTO_MAX_ROUND_TRIP_SECONDS) {
-    return false;
-  }
-  // Quantity was sized for the completion target; a row still below it is one
-  // where even a single unit is unlikely to round-trip before the deadline.
-  // Same rule as filters.meets_completion_target.
-  if (row.mode === "active" &&
-      row.pFill + 1e-9 < CAL.active_target_completion) {
-    return false;
-  }
-  // High-only made the budget a cosmetic input: in a quiet market a 10m and
-  // 100m bank could both collapse to the same single low-capacity item. Medium
-  // evidence is allowed here; the allocator separately caps active quantity
-  // at the size sized for the completion target.
-  const warnings = (row.warnings || []).join(" ").toLowerCase();
-  // Batch fill warnings describe the quantity the risk slider is choosing,
-  // not whether the market is executable at all. The single-unit round-trip
-  // gate above remains the hard safety check; lower batch completion odds stay
-  // visible on the card instead of paradoxically removing every high-risk pick.
-  if (/price falling|dumping|dump fills|don't chase|regime shift|volatile|price swings/.test(warnings)) {
-    return false;
-  }
-  const recentFalls = [...warnings.matchAll(/falling (\d+(?:\.\d+)?)% over recent days/g)];
-  return !recentFalls.some((match) => Number(match[1]) >= 5);
+/* The automatic plan. Candidates are the rows the gates allow, in rank order;
+   allocatePortfolio funds the ones with replay evidence from the bank and the
+   slots that are still free. Nothing is funded before the deep check has
+   run, because there is no evidence yet. Returns the candidate list with the
+   funded rows first, the selection and how many rows had the evidence. */
+function buildPlan(rows, config, locks = []) {
+  const lockedIds = new Set(locks.map((lock) => lock.id));
+  const lockedCommit = locks.reduce((sum, lock) => sum + lock.commit, 0);
+  const candidates = state.deepReady
+    ? rows.filter((row) => !lockedIds.has(row.id)) : [];
+  const qualified = candidates.filter((row) => hasFundingEvidence(row, config)).length;
+  const selection = allocatePortfolio(candidates,
+    Math.max(0, config.capital - lockedCommit),
+    Math.max(0, config.slots - locks.length), locks, config);
+  return { candidates, selection, qualified };
 }
 
 /* Automatic quality gates. Never reorders what remains. */
@@ -4378,6 +4461,8 @@ const state = {
   sourceRows: [],   // unallocated rows, kept so locking can re-plan without a refetch
   statusText: "",
   planRows: [],
+  planSelection: null,   // which resource decided the plan (selectPortfolio)
+  planQualified: 0,      // rows whose replay made money
   planEntries: [],
   slotLocks: [],
   deepReady: false,
@@ -4770,6 +4855,16 @@ function automaticFilterProfile(capital, account, strategy, bankRiskPercent) {
     maxPositionCapital,
     taxFreeOnly: false,
     hideBotted: true,
+    // Evidence before bank, then slots AND bank: the same policy as
+    // filters.automatic_profile. A row is funded only if its concrete offer,
+    // replayed on the item's own recent 5-minute buckets, made money in both
+    // halves of that window; the plan is the set of sizes that maximises the
+    // strategy's objective under both constraints.
+    fundingEvidence: "replay",
+    replayStatistic: "stable",
+    replayRanking: true,
+    allocation: "portfolio",
+    activeObjective: "slot_hour",
   };
 }
 
@@ -4894,24 +4989,25 @@ function show(allRows, config, statusText) {
   if (state.lastDecisionKey !== decisionKey) state.selected = null;
   state.lastDecisionKey = decisionKey;
   const locks = locksFor(config);
-  const lockedIds = new Set(locks.map((lock) => lock.id));
-  const lockedCommit = locks.reduce((sum, lock) => sum + lock.commit, 0);
   kept.forEach((row) => {
     row.allocated = 0; row.allocatedQty = 0; row.allocatedExpected = 0;
   });
-  const candidates = kept.filter((row) => !invalidStorageKeys.has(LOCK_KEY)
-    && !invalidStorageKeys.has(EXEC_KEY) && !lockedIds.has(row.id) &&
-    isAutomaticPlanCandidate(row));
-  candidates.sort((a, b) => quickPlanRiskTier(a) - quickPlanRiskTier(b) ||
-    b.rankingValue - a.rankingValue);
-  allocateCapital(candidates, Math.max(0, config.capital - lockedCommit),
-    Math.max(0, config.slots - locks.length), locks, config.maxPositionCapital,
-    config.bankRiskPercent);
+  const storageBroken = invalidStorageKeys.has(LOCK_KEY) || invalidStorageKeys.has(EXEC_KEY);
+  const { candidates, selection, qualified } = buildPlan(
+    storageBroken ? [] : kept, config, locks);
+  // The funded rows are re-scored copies; show those in the full list too.
+  const fundedById = new Map(candidates.filter((row) => row.allocatedQty > 0)
+    .map((row) => [row.id, row]));
+  kept.forEach((row, index) => {
+    if (fundedById.has(row.id)) kept[index] = fundedById.get(row.id);
+  });
   // Keep the strict automatic plan separate from the complete selectable
   // market list. The previous implementation replaced the list with the
   // shortlist, making every medium-confidence alternative disappear.
   state.rows = kept;
   state.planRows = candidates;
+  state.planSelection = selection;
+  state.planQualified = qualified;
   state.slotLocks = locks;
   state.sourceRows = allRows;
   state.statusText = statusText;
@@ -4920,7 +5016,7 @@ function show(allRows, config, statusText) {
     .map(([k, v]) => `${num(v)} ${k}`).join(", ");
   $("#status").className = "small dim";
   $("#status").textContent = state.deepReady
-    ? `${candidates.length} quality flip${candidates.length === 1 ? "" : "s"} passed the live and 14-day checks.`
+    ? `${qualified} flip${qualified === 1 ? "" : "s"} made money when replayed on their own recent trading.`
     : "Checking the strongest live candidates against 14-day history…";
   $("#status").title = statusText +
     (hiddenText ? ` · automatic quality gates removed: ${hiddenText}` : "");
@@ -5029,8 +5125,8 @@ function renderTape() {
 }
 
 function renderTerminalStats(config) {
-  $("#stat-scored").textContent = state.planRows.length
-    ? num(state.planRows.length) : "—";
+  $("#stat-scored").textContent = state.planQualified
+    ? num(state.planQualified) : "—";
   // Median ROI across what survived the filters: one number for how much edge
   // is on the board today, which the funnel line never said.
   const rois = state.rows.map((r) => r.roi).sort((a, b) => a - b);
@@ -5048,7 +5144,7 @@ function renderTerminalStats(config) {
    The table answers "what is worth flipping". This answers the question people
    actually arrive with: what do I put in my slots right now. Same rows, same
    ranking — the only thing added is the quantity and the gp to commit, which
-   allocateCapital has already worked out and which the table buries in two
+   allocatePortfolio has already worked out and which the table buries in two
    columns twelve apart. */
 
 function renderPlan(config) {
@@ -5158,18 +5254,22 @@ function renderPlan(config) {
   }
   if (slots > state.planEntries.length) {
     parts.push(`${slots - state.planEntries.length} slot${
-      slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: the remaining candidates failed the automatic confidence, trend or fill checks.`);
+      slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: no other candidate made money when its offer was replayed on its own recent trading.`);
   }
+  // Which scarce resource decided the plan: the objective is the strategy's,
+  // the bank and the slots are what it has to be bought with.
+  if (state.planSelection && rows.length) {
+    const reason = planReason(state.planSelection, config.strategy);
+    parts.push(reason.charAt(0).toUpperCase() + reason.slice(1) + ".");
+  }
+  const evidence = `A flip is funded only if its exact offer, replayed on the item's own last day of 5-minute trading, made money in both halves of that window: a buy fills only where sellers traded below your price, a sell only where buyers traded above it, and stock still unsold at the deadline is sold at the going instant-sell price. EXPECTED is that replayed result, not the quoted margin times quantity. It is measured on public trades, not on your fills — how much of the passing volume reaches your offer is an assumption until you log real offers.`;
+  const cap = `At most ${config.bankRiskPercent}% of your bank (${formatGp(config.maxPositionCapital)}) goes into one new trade.`;
   if (config.strategy === "profit") {
-    parts.push(`Automatic selection only uses direct live quotes and history-checked items. Max profit ranks risk-adjusted expected profit per flip, not per hour: each offer is at most one buy limit, sized for the best expected value after the cost of inventory still unsold at the ${Math.round(config.horizonHours)}h deadline, with a maximum of ${config.bankRiskPercent}% of your bank (${formatGp(config.maxPositionCapital)}) per new trade. A slow flip can win here; its time band and completion odds are on its card, and what is not done by the deadline is cancelled. Each card says when to re-check: if nothing has bought by then, re-check the live margin.`);
+    parts.push(`${evidence} Max profit ranks that profit per flip, not per hour, with a ${Math.round(config.horizonHours)}h deadline; a slow flip can win here and its time band is on its card. ${cap} Each card says when to re-check: if nothing has bought by then, re-check the live margin.`);
   } else if (config.strategy === "overnight") {
-    parts.push(`Automatic selection only uses direct live quotes and history-checked items. Away quantities are the expected-value choice after the cost of inventory still unsold after the ${CAL.overnight_liquidation_hours}h selling window, with a maximum of ${config.bankRiskPercent}% of your bank (${formatGp(config.maxPositionCapital)}) per new trade. Some bids sit under today's price: they only fill if the price dips while you are away, and are chosen only for items that measurably bounce back. Before you go: leave listed sell offers in place, and cancel Active buys that have not filled.`);
+    parts.push(`${evidence} Away buys for the whole absence and sells in the ${CAL.overnight_liquidation_hours}h window after you return. ${cap} Before you go: leave listed sell offers in place, and cancel Active buys that have not filled.`);
   } else {
-    const target = pctOf(CAL.active_target_completion);
-    const sizingText = config.bankRiskPercent <= DEFAULT_BANK_RISK_PERCENT
-      ? `the size whose whole round trip completes within ${Math.round(config.horizonHours)}h with ${target} probability`
-      : `a risk-adjusted size between the ${target}-completion size and the size that only clears at the average rate (lower completion odds are shown on each card)`;
-    parts.push(`Automatic selection only uses direct live quotes, requires even one unit to round-trip within 2h in four cases out of five, and funds Active trades to ${sizingText}, with a maximum of ${config.bankRiskPercent}% of your bank (${formatGp(config.maxPositionCapital)}) per new trade. Times are a band, not a promise: TYPICAL is the median, and one trip in ten takes longer than the 90% figure. Each card says when to re-check: if nothing has bought by then, the forecast has failed — re-check the live margin and reprice or cancel instead of leaving it parked. Save a flip to get that reminder on its card.`);
+    parts.push(`${evidence} Active ranks that profit per hour the slot is held. ${cap} Times are a band, not a promise: TYPICAL is the median, and one trip in ten takes longer than the 90% figure. Each card says when to re-check: if nothing has bought by then, the forecast has failed — re-check the live margin and reprice or cancel instead of leaving it parked. Save a flip to get that reminder on its card.`);
   }
   $("#plan-note").textContent = parts.join(" ");
 }

@@ -166,12 +166,15 @@ const bondRow = (extra = '') => `{id:13190, buy:9000000, sell:10000000,
 
 test('bond allocation and reservations fund the conversion fee', () => {
   const { run, storage } = setup();
-  const [qty, allocated] = run(`(() => { const rows = [${bondRow()}];
-    allocateCapital(rows, 19000000, 8, [], Infinity, 100);
-    return [rows[0].allocatedQty, rows[0].allocated]; })()`);
+  const [qty, allocated, binding] = run(`(() => { const rows = [${bondRow(
+    ', bond:true, pFill:1, deep:true')}];
+    const selection = allocatePortfolio(rows, 19000000, 8, [],
+      { strategy: "active", fundingEvidence: "history", maxPositionCapital: 19000000 });
+    return [rows[0].allocatedQty, rows[0].allocated, selection.binding]; })()`);
   // 9m + 1m fee per bond: a 19m bank holds one, not the two the buy price fits.
   assert.equal(qty, 1);
   assert.equal(allocated, 10000000);
+  assert.equal(binding, 'capital');
   storage.set('osrs-flipper.slot-locks.v1', JSON.stringify({ any: [
     { slot: 0, id: 13190, name: 'Old school bond', qty: 2, buy: 9000000,
       sell: 10000000, commit: 0, expected: 1, lockedAt: 1 },
@@ -347,5 +350,9 @@ test('the Max profit plan card and note describe profit per flip', () => {
       bankRiskPercent: 25, maxPositionCapital: 5000000 });
   })()`);
   assert.match(elements.get('#plan-cards').innerHTML, /FULL TRIP WITHIN 24H/);
-  assert.match(elements.get('#plan-note').textContent, /Max profit ranks risk-adjusted expected profit per flip/);
+  const note = elements.get('#plan-note').textContent;
+  assert.match(note, /Max profit ranks that profit per flip, not per hour/);
+  // The note says what EXPECTED rests on and what it cannot know.
+  assert.match(note, /replayed on the item's own last day/);
+  assert.match(note, /an assumption until you log real offers/);
 });

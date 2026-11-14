@@ -41,6 +41,12 @@ import merch
 from api import Activity, Item, Quote
 
 
+FUNDING_EVIDENCE = ("any", "history", "reach", "replay")
+ALLOCATIONS = ("proportional", "portfolio")
+REPLAY_STATISTICS = ("mean", "stable")
+ACTIVE_OBJECTIVES = ("slot_hour", "offer")
+
+
 @dataclass(frozen=True)
 class FilterConfig:
     # -- structural ---------------------------------------------------------
@@ -70,6 +76,35 @@ class FilterConfig:
     # still scored, and turning this on never reorders what is left.
     hide_botted: bool = False
 
+    # -- selection policy ----------------------------------------------------
+    # Most coins one offer may lock. None = the whole bank. Candidates are
+    # priced and sized inside this cap, so a row is ranked at a size that can
+    # actually be funded.
+    max_position_capital: Optional[int] = None
+    # What a row must have been checked against before it may receive bank:
+    # "any" (nothing), "history" (the 14-day check), "reach" (fill rates
+    # measured on its own recent 5-minute buckets) or "replay" (the concrete
+    # offer, replayed on those buckets, made money). Unfunded rows stay listed.
+    funding_evidence: str = "any"
+    # Which replay figure counts: the plain mean over all placements, or the
+    # smaller of the older and newer half ("stable").
+    replay_statistic: str = "mean"
+    # True: rank and size by the replayed result instead of the rate model.
+    replay_ranking: bool = False
+    # What an Active slot is asked to maximise when ranked by replay:
+    # "slot_hour" (profit per hour the slot is held) or "offer" (profit of
+    # the one offer, time ignored). Away and Max profit rank per offer.
+    active_objective: str = "slot_hour"
+    # Share of the deep-check budget kept for rows priced from bucket averages
+    # (see engine.executable_prices). They rank behind every direct quote in
+    # stage 1 and would otherwise never be checked at all.
+    deep_reference_share: float = 0.0
+    # How the bank is spread over the slots. "proportional": the ranking's top
+    # rows, coins in proportion to score. "portfolio": the sizes that maximise
+    # the strategy's objective under both the slot and the bank constraint
+    # (engine.select_portfolio).
+    allocation: str = "proportional"
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "account", engine.AccountType(self.account))
         object.__setattr__(self, "trade_mode",
@@ -79,6 +114,29 @@ class FilterConfig:
         if (isinstance(self.capital, bool) or not isinstance(self.capital, int)
                 or not 0 < self.capital <= engine.MAX_CASH_STACK):
             raise ValueError("capital must fit in the OSRS cash stack")
+        if self.active_objective not in ACTIVE_OBJECTIVES:
+            raise ValueError("active_objective must be one of {}".format(
+                ACTIVE_OBJECTIVES))
+        if self.replay_statistic not in REPLAY_STATISTICS:
+            raise ValueError("replay_statistic must be one of {}".format(
+                REPLAY_STATISTICS))
+        if self.allocation not in ALLOCATIONS:
+            raise ValueError("allocation must be one of {}".format(ALLOCATIONS))
+        if self.funding_evidence not in FUNDING_EVIDENCE:
+            raise ValueError("funding_evidence must be one of {}".format(
+                FUNDING_EVIDENCE))
+        if self.max_position_capital is not None and (
+                isinstance(self.max_position_capital, bool)
+                or not isinstance(self.max_position_capital, int)
+                or self.max_position_capital <= 0):
+            raise ValueError("max_position_capital must be a positive integer")
+
+    @property
+    def position_bank(self) -> int:
+        """Coins available to one offer."""
+        if self.max_position_capital is None:
+            return self.capital
+        return min(self.capital, self.max_position_capital)
 
     @property
     def slots(self) -> int:
@@ -207,11 +265,21 @@ class FlipRow:
     execution_quality: float = 0.5
     execution_factor: float = 1.0
     shrink_retention: float = 1.0
+    # Filled when the row's fill rates were measured on its own recent
+    # 5-minute buckets: the share of each side's volume the chosen prices
+    # outranked. None = not measured, the rates are the stage-1 assumption.
+    buy_reach: Optional[float] = None
+    sell_reach: Optional[float] = None
+    # The concrete offer replayed on the item's recent buckets, at this row's
+    # quantity, and at each size the plan may fund it at (quantity, view).
+    replay: Optional[engine.ReplayView] = None
+    replay_sizes: Tuple[Tuple[int, engine.ReplayView], ...] = ()
 
     # Capital allocation, filled by allocate()
     allocated_capital: Optional[int] = None
     allocated_quantity: Optional[int] = None
     allocated_expected_gp: Optional[float] = None
+    plan_reason: Optional[str] = None    # why this row is in the plan
 
 
 # Structural rejections, in the order the gates run. Every item in /latest
@@ -234,6 +302,8 @@ class ScreenResult:
     shrinkage: Optional[engine.ShrunkScores] = None
     deep_checked: int = 0
     hidden: Dict[str, int] = field(default_factory=dict)
+    # Set by the portfolio allocation: which resource decided the plan.
+    selection: Optional[engine.Selection] = None
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +338,8 @@ def screen(
     for item_id, quote in quotes.items():
         result = _evaluate(item_id, quote, items.get(item_id),
                            activity_5m.get(item_id), activity_1h.get(item_id),
-                           config, config.capital, now, exempt, volume_lookup)
+                           config, config.position_bank, now, exempt,
+                           volume_lookup)
         if isinstance(result, str):
             funnel[result] += 1
         else:
@@ -346,6 +417,7 @@ class ExecutionChoice(NamedTuple):
     dip_depth: float = 0.0     # fraction under the touch, Away bids only
     dip_retention: float = 0.0  # share of that dip recovered by the sale
     capacity_qty: int = 0      # Active: size that only clears at the mean rate
+    sell_volume_1h: float = 0.0   # the sell-side volume the score used
 
 
 # Away and Max profit quantity is chosen by expected value, stranded-inventory
@@ -361,6 +433,7 @@ def _optimise_execution(
     highalch: Optional[int], competitors: float, config: FilterConfig,
     sigma_daily: Optional[float] = None, ou_fit: Optional[object] = None,
     regime_score: float = 0.0, fill_log_sigma: Optional[float] = None,
+    reach: Optional[engine.ReachView] = None,
 ) -> Optional[ExecutionChoice]:
     """Choose concrete order prices and quantity as one decision.
 
@@ -384,6 +457,14 @@ def _optimise_execution(
     before its 24-hour deadline, capped at one buy-limit window. It does not
     bid under the touch: its buy is relisted at once, not left to wait for a
     dip.
+
+    With ``reach`` (the item's own recent 5-minute buckets) the volume behind
+    each candidate price is measured instead of assumed: a buy at B meets the
+    instant-sell volume that traded below B, a sell at S the instant-buy
+    volume that traded above S. Price improvement then pays through the
+    volume it reaches, so the invented queue-jump curve is not used, and an
+    offer exactly at the last traded price is credited only
+    ``touch_fill_weight`` of what traded there.
     """
     if fill_log_sigma is None:
         fill_log_sigma = engine.fill_log_sigma(config.calibration)
@@ -417,7 +498,10 @@ def _optimise_execution(
                 if bid < 1 or bid >= base_buy or bid in seen:
                     continue
                 seen.add(bid)
-                share = engine.dip_fill_multiplier(
+                # With measured reach the lower bid's volume is read from
+                # what traded down there; the random-walk share is the
+                # stand-in when there is no such measurement.
+                share = 1.0 if reach is not None else engine.dip_fill_multiplier(
                     math.log(base_buy / bid), price_sigma, config.horizon_hours)
                 if share > 0:
                     bids.append((bid, bid - base_buy, buy_volume_1h * share,
@@ -440,15 +524,23 @@ def _optimise_execution(
         if affordable <= 0 or margin <= 0:
             return None
         sell_improvement = base_sell - listed
-        buy_share = engine.aggressiveness(
-            engine.price_edge(max(0, step), original_spread),
-            calibration, competitors)
-        sell_share = engine.aggressiveness(
-            engine.price_edge(sell_improvement, original_spread),
-            calibration, competitors)
+        sell_volume = sell_volume_1h
+        if reach is not None:
+            weight = calibration.touch_fill_weight
+            volume = reach.buy_volume_per_hour(buy, weight)
+            sell_volume = reach.sell_volume_per_hour(sell, weight)
+            buy_share = sell_share = engine.aggressiveness(
+                0.0, calibration, competitors)
+        else:
+            buy_share = engine.aggressiveness(
+                engine.price_edge(max(0, step), original_spread),
+                calibration, competitors)
+            sell_share = engine.aggressiveness(
+                engine.price_edge(sell_improvement, original_spread),
+                calibration, competitors)
         trip_rate = engine.round_trip_rate(
             engine.fill_rate(volume, buy_share),
-            engine.fill_rate(sell_volume_1h, sell_share))
+            engine.fill_rate(sell_volume, sell_share))
         mean_capacity = engine.flippable_qty(
             effective_limit, int(trip_rate * max(0.0, usable)), affordable)
         if away:
@@ -466,7 +558,7 @@ def _optimise_execution(
                                               affordable))
         breakdown = engine.score_flip(
             buy=buy, sell=sell, margin=margin, qty=qty, depth=0,
-            buy_volume_1h=volume, sell_volume_1h=sell_volume_1h,
+            buy_volume_1h=volume, sell_volume_1h=sell_volume,
             quote_age=quote_age, ofi=ofi, drift=drift, now=now,
             sigma_daily=sigma_daily, ou_fit=ou_fit,
             regime_score=regime_score,
@@ -480,7 +572,7 @@ def _optimise_execution(
             calibration=calibration)
         return ExecutionChoice(buy, sell, step, sell_improvement, qty,
                                breakdown, volume, depth, kept,
-                               max(qty, mean_capacity))
+                               max(qty, mean_capacity), sell_volume)
 
     best = None
     for bid in bids:
@@ -704,8 +796,13 @@ def refine_with_history(
     top_k: int = 15,
     breadth: int = 3,
     fetch_recent: Optional[Callable[[int], Optional[List[dict]]]] = None,
+    fetch_reach: Optional[Callable[[int], Optional[List[dict]]]] = None,
 ) -> ScreenResult:
     """Re-score the leading candidates against ~14 days of 6h history.
+
+    ``fetch_reach`` returns an item's recent 5-minute buckets. When given,
+    the fill rates of every shortlisted row are measured on them
+    (engine.reach_view) instead of assumed from one hour's total volume.
 
     /timeseries is a per-item route the wiki forbids sweeping, so deep data is
     spent on a shortlist. The shortlist is deliberately wider than the number
@@ -720,9 +817,8 @@ def refine_with_history(
     can be more generous than the intraday guess as well as less.
     """
     rows = list(result.rows)
-    shortlist = min(len(rows), max(0, top_k * breadth))
     refined_count = 0
-    for index in range(shortlist):
+    for index in _deep_targets(rows, max(0, top_k * breadth), config):
         row = rows[index]
         points = fetch_history(row.item_id)
         view = (engine.history_view(points, row.buy, row.sell)
@@ -732,7 +828,13 @@ def refine_with_history(
                 "no usable 14-day history — ranked on intraday data only",))
             continue
         refined_count += 1
-        rescored = _rescore_with_history(row, view, config, now)
+        reach, recent_points = None, None
+        if fetch_reach is not None:
+            recent_points = fetch_reach(row.item_id) or []
+            reach = engine.reach_view(recent_points)
+        rescored = _rescore_with_history(row, view, config, now, reach)
+        if reach is not None and rescored.buy_reach is not None:
+            rescored = _with_replay(rescored, recent_points, config)
         long_execution = engine.execution_evidence_view(
             points, rescored.tax_exempt, rescored.margin,
             engine.HISTORY_BUCKET_HOURS,
@@ -757,9 +859,108 @@ def refine_with_history(
 
     rows, shrinkage = _apply_shrinkage(rows, config)
     rows = [_apply_execution_evidence(row) for row in rows]
+    if config.replay_ranking:
+        rows = [_rank_by_replay(row, config) for row in rows]
     rows.sort(key=lambda r: r.ranking_value, reverse=True)
     return ScreenResult(rows=rows, funnel=result.funnel,
                         shrinkage=shrinkage, deep_checked=refined_count)
+
+
+def _deep_targets(rows: List[FlipRow], count: int, config: FilterConfig
+                  ) -> List[int]:
+    """Indexes of the rows to deep-check, in the order to fetch them.
+
+    The leaders by rank among the rows the preferences allow: per-item
+    history is a scarce budget and a row that will be hidden cannot use it.
+    ``deep_reference_share`` of the budget goes to the best rows priced from
+    bucket averages. No extra requests: the budget is the same, only its
+    split changes.
+    """
+    eligible = [index for index, row in enumerate(rows)
+                if preference_stage(row, config) is None]
+    if config.deep_reference_share <= 0:
+        return eligible[:count]
+    # The reference budget, rounded down; the tiny offset keeps 45 * (1/3)
+    # at 15 rather than 14 after floating-point multiplication.
+    reference_budget = int(count * config.deep_reference_share + 1e-9)
+    direct = [i for i in eligible if not rows[i].priced_from_reference]
+    reference = [i for i in eligible if rows[i].priced_from_reference]
+    seeded = direct[:count - reference_budget] + reference[:reference_budget]
+    seen, targets = set(), []
+    for index in seeded + eligible:
+        if index in seen:
+            continue
+        seen.add(index)
+        targets.append(index)
+        if len(targets) >= count:
+            break
+    return targets
+
+
+REPLAY_QTY_FRACTIONS = (0.25, 0.5, 0.75, 1.0)
+
+
+def _with_replay(row: FlipRow, points: List[dict],
+                 config: FilterConfig) -> FlipRow:
+    """Replay the row's concrete offer at each size the plan may fund."""
+    sizes = []
+    # Smaller sizes are only needed when the replay also sizes the offer.
+    fractions = REPLAY_QTY_FRACTIONS if config.replay_ranking else (1.0,)
+    for quantity in sorted({max(1, int(row.qty_per_window * fraction))
+                            for fraction in fractions}):
+        view = engine.replay_offer(
+            points, buy=row.buy, sell=row.sell, qty=quantity,
+            buy_share=row.buy_share, sell_share=row.sell_share,
+            mode=config.trade_mode, horizon_hours=config.horizon_hours,
+            tax_exempt=row.tax_exempt, bond=row.bond,
+            calibration=config.calibration)
+        if view is not None:
+            sizes.append((quantity, view))
+    if not sizes:
+        return row
+    return replace(row, replay=sizes[-1][1], replay_sizes=tuple(sizes))
+
+
+def replay_profit(view: engine.ReplayView, config: FilterConfig) -> float:
+    """The replayed profit the policy counts, in gp per placement."""
+    return (view.stable_profit if config.replay_statistic == "stable"
+            else view.mean_profit)
+
+
+def replay_value(view: engine.ReplayView, config: FilterConfig) -> float:
+    """Replayed profit in the strategy's own unit: per slot-hour for Active,
+    per flip for Away and Max profit."""
+    profit = replay_profit(view, config)
+    if (config.trade_mode is not engine.TradeMode.ACTIVE
+            or config.active_objective == "offer"):
+        return profit
+    floor = (engine.LEGS_PER_ROUND_TRIP * config.calibration.min_leg_seconds
+             / engine.SECONDS_PER_HOUR)
+    return profit / max(floor, view.mean_slot_hours)
+
+
+def _replay_row(row: FlipRow, quantity: int, view: engine.ReplayView,
+                config: FilterConfig) -> FlipRow:
+    """The row at ``quantity`` with the replayed result as its expectation."""
+    sized = (row if quantity == row.qty_per_window
+             else _rescore_quantity(row, quantity, config))
+    value = replay_value(view, config)
+    profit = replay_profit(view, config)
+    return replace(
+        sized, replay=view, expected_gp=profit,
+        raw_ranking_value=value, ranking_value=value,
+        gp_per_slot_hour=(value if config.trade_mode is engine.TradeMode.ACTIVE
+                          else sized.gp_per_slot_hour))
+
+
+def _rank_by_replay(row: FlipRow, config: FilterConfig) -> FlipRow:
+    """Rank and size a replayed row on what the replay measured."""
+    if not row.replay_sizes:
+        return row
+    quantity, view = max(row.replay_sizes,
+                         key=lambda item: (replay_value(item[1], config),
+                                           -item[0]))
+    return _replay_row(row, quantity, view, config)
 
 
 def _apply_execution_evidence(row: FlipRow) -> FlipRow:
@@ -787,7 +988,8 @@ def _apply_execution_evidence(row: FlipRow) -> FlipRow:
 
 
 def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
-                          config: FilterConfig, now: float) -> FlipRow:
+                          config: FilterConfig, now: float,
+                          reach: Optional[engine.ReachView] = None) -> FlipRow:
     """Recompute one row with the OU fit and the reachable-volume estimate."""
     # The share of multi-day volume that traded at your prices is evidence
     # about the rate your offer fills at, not a separate penalty on profit. A
@@ -803,6 +1005,10 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         base_volume = min(view.low_volume_per_hour, view.high_volume_per_hour)
     reachable_buy = max(0.0, base_volume * max(view.buy_fill_share, 0.01))
     reachable_sell = max(0.0, base_volume * max(view.sell_fill_share, 0.01))
+    if reach is not None:
+        # Measured over a full day of the item's own 5-minute buckets, which
+        # is both the daily-cycle average and the real volume for the crowd.
+        base_volume = min(reach.low_volume_per_hour, reach.high_volume_per_hour)
 
     # Crowd from the item's REAL volume, not the reachable slice: a low fill
     # share means fewer units arrive at your price, not fewer rivals queued.
@@ -814,13 +1020,14 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
     choice = _optimise_execution(
         base_buy=row.base_buy or row.buy, base_sell=row.base_sell or row.sell,
         tax_exempt=row.tax_exempt, bond=row.bond, limit=row.limit,
-        available_capital=config.capital,
+        available_capital=config.position_bank,
         buy_volume_1h=reachable_buy, sell_volume_1h=reachable_sell,
         quote_age=row.quote_age, ofi=row.ofi, drift=row.drift, now=now,
         highalch=highalch, competitors=crowd, config=config,
         sigma_daily=sigma, ou_fit=view.ou, regime_score=view.regime_score,
         fill_log_sigma=engine.fill_log_sigma(config.calibration,
-                                             verified=True))
+                                             verified=True),
+        reach=reach)
     if choice is None:
         return replace(row, deep_checked=True, warnings=row.warnings + (
             "history left no positive concrete execution price",))
@@ -871,7 +1078,11 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         buy_share=breakdown.buy_share, sell_share=breakdown.sell_share,
         model_buy_volume_1h=choice.buy_volume_1h,
         dip_depth=choice.dip_depth, dip_retention=choice.dip_retention,
-        model_sell_volume_1h=reachable_sell,
+        model_sell_volume_1h=choice.sell_volume_1h,
+        buy_reach=(None if reach is None or reach.low_volume_per_hour <= 0
+                   else choice.buy_volume_1h / reach.low_volume_per_hour),
+        sell_reach=(None if reach is None or reach.high_volume_per_hour <= 0
+                    else choice.sell_volume_1h / reach.high_volume_per_hour),
         competitors=crowd, sigma_daily=sigma, ou_fit=view.ou, scored_at=now,
         alch_arbitrage_gp=breakdown.alch_arbitrage_gp,
         deep_checked=True, fill_share=view.fill_share, trend=view.trend,
@@ -894,35 +1105,36 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
 # Stage 5: view preferences and capital allocation
 # ---------------------------------------------------------------------------
 
+def preference_stage(row: FlipRow, config: FilterConfig) -> Optional[str]:
+    """The preference that hides this row, or None if it is shown."""
+    if (config.max_quote_age is not None
+            and row.quote_age > config.max_quote_age):
+        return "quote too old"
+    if row.thin_volume_1h < config.min_thin_volume_1h:
+        return "volume too thin"
+    if row.buy < config.min_price or (config.max_price is not None
+                                      and row.buy > config.max_price):
+        return "price out of range"
+    if config.tax_free_only and row.tax > 0:
+        return "pays tax"
+    if row.roi < config.min_roi:
+        return "roi too low"
+    if row.undercut_depth < config.min_undercut_depth:
+        return "no undercut room"
+    if config.hide_botted and merch.is_botted(row.buy, row.members, row.limit):
+        return "bot-supplied"
+    return None
+
+
 def apply_preferences(result: ScreenResult,
                       config: FilterConfig) -> ScreenResult:
     """Hide rows the user asked not to see. Never reorders what remains."""
     hidden = {stage: 0 for stage in PREFERENCE_STAGES}
     kept: List[FlipRow] = []
     for row in result.rows:
-        if (config.max_quote_age is not None
-                and row.quote_age > config.max_quote_age):
-            hidden["quote too old"] += 1
-            continue
-        if row.thin_volume_1h < config.min_thin_volume_1h:
-            hidden["volume too thin"] += 1
-            continue
-        if row.buy < config.min_price or (config.max_price is not None
-                                          and row.buy > config.max_price):
-            hidden["price out of range"] += 1
-            continue
-        if config.tax_free_only and row.tax > 0:
-            hidden["pays tax"] += 1
-            continue
-        if row.roi < config.min_roi:
-            hidden["roi too low"] += 1
-            continue
-        if row.undercut_depth < config.min_undercut_depth:
-            hidden["no undercut room"] += 1
-            continue
-        if config.hide_botted and merch.is_botted(row.buy, row.members,
-                                                  row.limit):
-            hidden["bot-supplied"] += 1
+        stage = preference_stage(row, config)
+        if stage is not None:
+            hidden[stage] += 1
             continue
         kept.append(row)
     hidden["shown"] = len(kept)
@@ -942,6 +1154,8 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
     rows = list(result.rows)
     if not rows:
         return result
+    if config.allocation == "portfolio":
+        return _allocate_portfolio(result, config)
     shortlist = rows[:min(len(rows), max(40, config.slots * 6))]
     selected: List[FlipRow] = []
     category_count: Dict[str, int] = {}
@@ -951,7 +1165,8 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
             break
         if (row.ranking_value <= 0 or row.expected_gp <= 0
                 or _unit_capital(row) > remaining_seed
-                or not meets_completion_target(row, config)):
+                or not meets_completion_target(row, config)
+                or not has_funding_evidence(row, config)):
             continue
         # Three related slots is diversification, four is a concentrated bet.
         if category_count.get(row.category, 0) >= 3:
@@ -964,7 +1179,8 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
     # completes before the deadline with the target probability, Away and Max
     # profit by expected value after stranded-inventory stress. Funding a different
     # bound here would trade that choice away again.
-    capital_caps = [row.capital_needed for row in selected]
+    capital_caps = [min(row.capital_needed, config.position_bank)
+                    for row in selected]
     amounts = engine.allocate_portfolio(
         [row.ranking_value for row in selected], config.capital,
         [_unit_capital(row) for row in selected], capital_caps,
@@ -997,6 +1213,139 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
                         deep_checked=result.deep_checked, hidden=result.hidden)
 
 
+PORTFOLIO_QTY_FRACTIONS = (0.25, 0.5, 0.75, 1.0)
+PORTFOLIO_CANDIDATES = 40
+
+
+def plan_reason(selection: engine.Selection, mode: engine.TradeMode) -> str:
+    """One sentence on which scarce resource decided the plan."""
+    objective = ("profit per slot-hour" if mode is engine.TradeMode.ACTIVE
+                 else "profit per flip")
+    if selection.binding in ("capital", "both"):
+        unit = " per hour" if mode is engine.TradeMode.ACTIVE else ""
+        return ("bank is the limit: chosen for {} per coin locked — every "
+                "1m gp had to earn at least {} gp{}".format(
+                    objective, engine.format_gp(engine.round_half_up(
+                        selection.capital_price * 1_000_000)), unit))
+    if selection.binding == "slots":
+        return ("slots are the limit: chosen for the highest {}"
+                .format(objective))
+    return ("neither bank nor slots ran out: every candidate that passed the "
+            "checks is funded")
+
+
+def _allocate_portfolio(result: ScreenResult,
+                        config: FilterConfig) -> ScreenResult:
+    """Fund the sizes that maximise the strategy's objective under both the
+    slot and the bank constraint.
+
+    Candidates come from the ranking in order, with the same guards as the
+    proportional allocation: positive expectation, the completion target, the
+    funding evidence the policy asks for, at most three rows per correlated
+    category and one row per connected buy-limit family. Each candidate is
+    offered at a quarter, half, three quarters and all of its modelled size,
+    re-scored at that exact quantity, and engine.select_portfolio picks.
+    """
+    rows = list(result.rows)
+    bank = min(config.capital, config.position_bank)
+    candidates: List[FlipRow] = []
+    category_count: Dict[str, int] = {}
+    groups = set()
+    for row in rows:
+        if len(candidates) >= PORTFOLIO_CANDIDATES:
+            break
+        unit = _unit_capital(row)
+        if (row.ranking_value <= 0 or row.expected_gp <= 0 or unit <= 0
+                or unit > bank
+                or not meets_completion_target(row, config)
+                or not has_funding_evidence(row, config)):
+            continue
+        if category_count.get(row.category, 0) >= 3:
+            continue
+        if row.limit_group is not None:
+            if row.limit_group in groups:
+                continue
+            groups.add(row.limit_group)
+        category_count[row.category] = category_count.get(row.category, 0) + 1
+        candidates.append(row)
+
+    sized: List[List[FlipRow]] = []
+    options: List[List[Tuple[float, int]]] = []
+    cash_limited: List[bool] = []
+    cap = (config.max_position_capital if config.max_position_capital
+           is not None else config.capital)
+    for row in candidates:
+        unit = _unit_capital(row)
+        most = min(row.qty_per_window, bank // unit)
+        # The free coins, not the per-trade cap, are what cut this row short.
+        cash_limited.append(config.capital // unit < row.qty_per_window
+                            and config.capital // unit <= cap // unit)
+        variants, values = [], []
+        if config.replay_ranking and row.replay_sizes:
+            # Sizes the replay measured, as far as the coins reach.
+            for quantity, view in row.replay_sizes:
+                if quantity > max(most, row.replay_sizes[0][0]):
+                    continue
+                rescored = _replay_row(row, quantity, view, config)
+                if quantity > most:
+                    # Fewer coins than the smallest measured size: scale it
+                    # down pro rata. A smaller offer fills no worse per unit.
+                    scale = most / float(quantity)
+                    rescored = replace(
+                        _rescore_quantity(row, most, config), replay=view,
+                        expected_gp=rescored.expected_gp * scale,
+                        raw_ranking_value=rescored.ranking_value * scale,
+                        ranking_value=rescored.ranking_value * scale)
+                    quantity = most
+                if rescored.ranking_value <= 0 or quantity <= 0:
+                    continue
+                variants.append(rescored)
+                values.append((rescored.ranking_value, quantity * unit))
+            sized.append(variants)
+            options.append(values)
+            continue
+        quantities = sorted({max(1, int(most * fraction))
+                             for fraction in PORTFOLIO_QTY_FRACTIONS})
+        for quantity in quantities:
+            rescored = _rescore_quantity(row, quantity, config)
+            if (rescored.ranking_value <= 0 or rescored.expected_gp <= 0
+                    or not meets_completion_target(rescored, config)):
+                continue
+            variants.append(rescored)
+            values.append((rescored.ranking_value, quantity * unit))
+        sized.append(variants)
+        options.append(values)
+
+    selection = engine.select_portfolio(options, config.capital, config.slots)
+    # A funded row the free coins cut short is the bank binding as well, even
+    # though the selection never saw the sizes it could not afford.
+    if (selection.binding in ("none", "slots") and any(
+            choice >= 0 and limited
+            for choice, limited in zip(selection.choices, cash_limited))):
+        rates = [options[i][choice][0] / options[i][choice][1]
+                 for i, choice in enumerate(selection.choices) if choice >= 0]
+        selection = selection._replace(
+            capital_price=min(rates),
+            binding="both" if selection.binding == "slots" else "capital")
+    reason = plan_reason(selection, config.trade_mode)
+    funded = []
+    for variants, choice in zip(sized, selection.choices):
+        if choice < 0:
+            continue
+        row = variants[choice]
+        funded.append(replace(
+            row, allocated_capital=row.qty_per_window * _unit_capital(row),
+            allocated_quantity=row.qty_per_window,
+            allocated_expected_gp=row.expected_gp, plan_reason=reason))
+    funded.sort(key=lambda row: row.ranking_value, reverse=True)
+    funded_ids = {row.item_id for row in funded}
+    ordered = funded + [row for row in rows if row.item_id not in funded_ids]
+    return ScreenResult(rows=ordered, funnel=result.funnel,
+                        shrinkage=result.shrinkage,
+                        deep_checked=result.deep_checked, hidden=result.hidden,
+                        selection=selection)
+
+
 def _unit_capital(row: FlipRow) -> int:
     """Cash per unit, including the bond conversion fee where it applies."""
     return row.buy + row.bond_fee
@@ -1013,6 +1362,18 @@ def _timing_fields(breakdown: engine.ScoreBreakdown) -> Dict[str, float]:
         "reprice_check_seconds": breakdown.reprice_check_seconds,
         "cancel_by_seconds": breakdown.cancel_by_seconds,
     }
+
+
+def has_funding_evidence(row: FlipRow, config: FilterConfig) -> bool:
+    """Whether the row was checked as far as the policy demands."""
+    if config.funding_evidence == "replay":
+        return (row.replay is not None
+                and replay_profit(row.replay, config) > 0)
+    if config.funding_evidence == "reach":
+        return row.deep_checked and row.buy_reach is not None
+    if config.funding_evidence == "history":
+        return row.deep_checked
+    return True
 
 
 def meets_completion_target(row: FlipRow, config: FilterConfig) -> bool:
@@ -1081,6 +1442,47 @@ def _rescore_quantity(row: FlipRow, quantity: int,
                                           config.calibration))
 
 
+DEFAULT_BANK_RISK_PERCENT = 25
+
+
+def automatic_profile(config: FilterConfig,
+                      bank_risk_percent: int = DEFAULT_BANK_RISK_PERCENT
+                      ) -> FilterConfig:
+    """The selection policy every interface applies unless told otherwise.
+
+    One policy for the browser, the CLI, the agent and the dashboard, so the
+    same market gives the same plan everywhere. It has three parts:
+
+    - quality gates on what may be considered at all: a fresh two-sided
+      quote, a minimum of traded volume and net ROI, room to price inside the
+      spread, no bot-supplied staples, and at most ``bank_risk_percent`` of
+      the bank in one offer;
+    - evidence before bank: a row is funded only if its concrete offer,
+      replayed on the item's own recent 5-minute buckets, made money in both
+      halves of that window;
+    - the plan is the set of sizes that maximises the strategy's objective
+      under both the slot and the bank constraint.
+
+    The November 2026 walk-forward backtest is what chose this over ranking
+    on the rate model alone; docs/audit-2026-11.md has the numbers and what
+    they can and cannot show. Mirrored by automaticFilterProfile in
+    docs/index.html.
+    """
+    away = config.trade_mode is engine.TradeMode.OVERNIGHT
+    active = config.trade_mode is engine.TradeMode.ACTIVE
+    low_bank = config.capital <= 10_000_000
+    cap = max(1, config.capital * int(bank_risk_percent) // 100)
+    return replace(
+        config, max_quote_age=900 if away else 600,
+        min_thin_volume_1h=((100 if low_bank else 40) if active
+                            else (40 if low_bank else 20)),
+        min_roi=0.008 if away else 0.003, min_undercut_depth=1,
+        max_price=cap, hide_botted=True, max_position_capital=cap,
+        deep_reference_share=1.0 / 3.0, funding_evidence="replay",
+        replay_statistic="stable", replay_ranking=True,
+        allocation="portfolio")
+
+
 def rank_flips(
     items: Dict[int, Item],
     quotes: Dict[int, Quote],
@@ -1093,13 +1495,20 @@ def rank_flips(
     exempt: Optional[exemptions.ExemptionSet] = None,
     volume_lookup: Optional["VolumeLookup"] = None,
     fetch_recent: Optional[Callable[[int], Optional[List[dict]]]] = None,
+    fetch_reach: Optional[Callable[[int], Optional[List[dict]]]] = None,
 ) -> ScreenResult:
-    """The whole pipeline: score, shrink, deep-check, filter, allocate."""
+    """The whole pipeline: score, shrink, deep-check, filter, allocate.
+
+    The deep check spends its per-item history budget on the leaders among
+    the rows the preferences allow; shrinkage still runs over every scored
+    row, because it is a statement about the whole cross-section.
+    """
     result = screen(items, quotes, activity_5m, activity_1h, config, now, exempt,
                     volume_lookup)
     if fetch_history is not None and top_k > 0:
         result = refine_with_history(result, fetch_history, config, now, top_k,
-                                     fetch_recent=fetch_recent)
+                                     fetch_recent=fetch_recent,
+                                     fetch_reach=fetch_reach)
     result = apply_preferences(result, config)
     return allocate(result, config)
 

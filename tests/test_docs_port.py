@@ -154,14 +154,22 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("minRoi: overnight ? 0.008 : 0.003", self.source)
         self.assertIn("maxPositionCapital", self.source)
         self.assertIn("config.maxPositionCapital", self.source)
-        self.assertIn("quickPlanRiskTier", self.source)
-        self.assertIn("function isAutomaticPlanCandidate(", self.source)
-        self.assertIn("function planEvidenceConfidence(", self.source)
-        self.assertIn("function singleUnitRoundTripSeconds(", self.source)
-        self.assertIn("ACTIVE_AUTO_MAX_ROUND_TRIP_SECONDS", self.source)
-        self.assertIn("if (row.pricedFromReference) return false", self.source)
-        self.assertIn("recentFalls.some", self.source)
+        # The plan is the shared policy, not a browser-only chain of
+        # heuristics: evidence from the replay, then slots and bank together.
+        # tests/test_parity.py runs both implementations on one market.
+        for removed in ("quickPlanRiskTier", "isAutomaticPlanCandidate",
+                        "planEvidenceConfidence", "singleUnitRoundTripSeconds",
+                        "function allocateCapital("):
+            self.assertNotIn(removed, self.source)
+        self.assertIn("function buildPlan(", self.source)
+        self.assertIn("function hasFundingEvidence(", self.source)
+        self.assertIn("function allocatePortfolio(", self.source)
+        self.assertIn('fundingEvidence: "replay"', self.source)
+        self.assertIn('replayStatistic: "stable"', self.source)
+        self.assertIn("replayRanking: true", self.source)
         self.assertIn("state.deepReady = true", self.source)
+        # Nothing is funded before the deep check has produced evidence.
+        self.assertIn("const candidates = state.deepReady", self.source)
         self.assertIn("kept: eligible", self.source)
         self.assertIn("eligible.map((row)", self.source)
         # The manual display filters were hidden and never read; they are gone
@@ -193,11 +201,11 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("const directBudget = Math.ceil(targetCount * 2 / 3)", self.source)
         self.assertIn("row.pricedFromReference", self.source)
         self.assertIn("config.maxPositionCapital", self.source)
-        self.assertIn("function positionCapitalCeiling(", self.source)
-        # Both modes fund the size their optimiser chose, not a second,
-        # more optimistic or pessimistic bound.
-        self.assertIn("const baseFillBound = row.qty;", self.source)
-        self.assertIn("reachableQty * rowUnitCapital(row)", self.source)
+        # Sizes come from the replay, inside the per-trade cap and the coins
+        # that are still free.
+        self.assertIn("const bank = Math.min(capital, config.maxPositionCapital ?? capital);",
+                      self.source)
+        self.assertIn("Math.min(row.qty, Math.floor(bank / unit))", self.source)
         self.assertIn("o.config.maxPositionCapital ?? o.config.capital", self.source)
         self.assertIn("/ ${formatGp(config.capital)} COMMITTED", self.source)
 
@@ -210,15 +218,10 @@ class PortSyncTests(unittest.TestCase):
                       self.source)
         self.assertIn("capital * riskPercent / 100", self.source)
         self.assertIn("maxPrice: maxPositionCapital", self.source)
-        self.assertIn("bankRiskPercent = DEFAULT_BANK_RISK_PERCENT", self.source)
-        self.assertIn("const riskBlend = Math.max(0, Math.min(1,", self.source)
-        self.assertIn("modelledQty - baseQty", self.source)
         self.assertIn("config.bankRiskPercent", self.source)
-        self.assertIn("Batch fill warnings describe the quantity", self.source)
-        automatic_gate = js_block(
-            self.source, "function isAutomaticPlanCandidate(row) {", "\n}\n\n/* Automatic quality gates")
-        self.assertNotIn("no realistic fill", automatic_gate)
-        self.assertNotIn("only \\d+% chance", automatic_gate)
+        # The slider sets the cap and nothing else: it no longer blends the
+        # quantity toward a size that only clears at the average rate.
+        self.assertNotIn("riskBlend", self.source)
         self.assertIn('$("#f-bank-risk").addEventListener("change", loadAndRender)',
                       self.source)
 
@@ -359,7 +362,7 @@ class PortSyncTests(unittest.TestCase):
         self.assertIn("touchCompetitors(thinVolume, item.limit)", self.source)
         # The deep check sizes the crowd on the item's real volume: the live
         # thin side, or for Away the 14-day average rate.
-        self.assertIn("touchCompetitors(baseVolume, row.limit)", self.source)
+        self.assertIn("touchCompetitors(crowdVolume, row.limit)", self.source)
         self.assertIn(": row.volume;", self.source)
 
     def test_max_profit_strategy_is_ported_everywhere(self):

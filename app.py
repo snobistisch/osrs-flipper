@@ -220,7 +220,7 @@ def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
                                     "to zero, as do ~57 exempt items "
                                     "(tax_exempt.json).")
         hide_botted = st.checkbox(
-            "Hide bot-supplied items", value=False,
+            "Hide bot-supplied items", value=True,
             help="Free-to-play, buy limit over 10,000, under 100 gp. They rank "
                  "well and clear fast; the supply curve is a script that "
                  "answers a price rise by producing more.")
@@ -238,15 +238,26 @@ def sidebar_config(capital: int) -> "tuple[filters.FilterConfig, int]":
                                .format(label, raw))
             return None
 
-    return filters.FilterConfig(
+    # The automatic selection policy (the same one the browser and the CLI
+    # apply); a control moved off its resting position replaces that gate.
+    config = filters.automatic_profile(filters.FilterConfig(
         capital=capital, account=account, trade_mode=mode,
         overnight_hours=overnight_hours,
-        nature_rune_cost=exemptions.NATURE_RUNE_FALLBACK,
-        max_quote_age=max_age or None, min_thin_volume_1h=min_vol,
-        min_roi=min_roi / 100, min_undercut_depth=min_depth,
-        min_price=parse_price(min_price_raw, "Min price") or 1,
-        max_price=parse_price(max_price_raw, "Max price"),
-        tax_free_only=tax_free, hide_botted=hide_botted), top_n
+        nature_rune_cost=exemptions.NATURE_RUNE_FALLBACK))
+    explicit = {
+        "max_quote_age": max_age or None,
+        "min_thin_volume_1h": min_vol or None,
+        "min_roi": (min_roi / 100) or None,
+        "min_undercut_depth": min_depth or None,
+        "min_price": parse_price(min_price_raw, "Min price"),
+        "max_price": parse_price(max_price_raw, "Max price"),
+        "tax_free_only": tax_free or None,
+    }
+    config = replace(config, **{name: value for name, value in explicit.items()
+                                if value is not None})
+    if hide_botted is False:
+        config = replace(config, hide_botted=False)
+    return config, top_n
 
 
 def eta_band(row) -> str:
@@ -702,7 +713,15 @@ def render_market(config, top_n):
         result = filters.rank_flips(
             items, quotes, activity_5m, activity_1h, config, now=time.time(),
             fetch_history=fetch_history, top_k=15, exempt=exempt,
-            volume_lookup=volume_lookup(), fetch_recent=fetch_recent)
+            volume_lookup=volume_lookup(), fetch_recent=fetch_recent,
+            fetch_reach=fetch_recent)
+    if result.selection is not None:
+        st.info("Plan: " + filters.plan_reason(result.selection,
+                                               config.trade_mode)
+                + ". A flip is funded only if its exact offer, replayed on "
+                "the item's own recent 5-minute trading, made money in both "
+                "halves of that window. That is measured on public trades, "
+                "not on your fills.")
 
     st.title("🪙 Grand Exchange Flipper")
     rune = quotes.get(exemptions.NATURE_RUNE_ID)

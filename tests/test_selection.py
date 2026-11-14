@@ -11,6 +11,8 @@ import itertools
 import unittest
 
 import engine
+import filters
+from api import Activity, Item, Quote
 
 NOW = 1_785_000_000
 
@@ -204,6 +206,83 @@ class SelectPortfolioTests(unittest.TestCase):
         # Exact up to the coin step: with these small banks the step is one
         # coin, so the optimum itself must be found every time.
         self.assertGreaterEqual(worst, 1.0 - 1e-12)
+
+
+class PolicyTests(unittest.TestCase):
+    """The selection policy on a hand-built two-item market."""
+
+    def market(self):
+        items = {1: Item(1, "Steady", True, 1000, 1, None),
+                 2: Item(2, "Fluke", True, 1000, 1, None)}
+        quotes = {i: Quote(110, NOW - 30, 100, NOW - 30) for i in items}
+        activity = {i: Activity(110, 4000, 100, 4000) for i in items}
+        return items, quotes, activity
+
+    def history(self, _):
+        return [{"timestamp": NOW - (60 - i) * 21600, "avgHighPrice": 110,
+                 "highPriceVolume": 20000, "avgLowPrice": 100,
+                 "lowPriceVolume": 20000} for i in range(60)]
+
+    def recent(self, item_id):
+        if item_id == 1:
+            return flat(count=365, volume=400)
+        # Buyers stopped paying the quoted price. Nothing trades high enough
+        # above what sellers accept to leave a margin after tax.
+        return [bucket(i, 100, 400, 102, 400) for i in range(365)]
+
+    def plan(self, reach=True, **overrides):
+        items, quotes, activity = self.market()
+        config = filters.FilterConfig(capital=1_000_000, **overrides)
+        result = filters.screen(items, quotes, activity, activity, config, NOW)
+        result = filters.refine_with_history(
+            result, self.history, config, NOW,
+            fetch_reach=self.recent if reach else None)
+        return filters.allocate(result, config)
+
+    def test_without_recent_buckets_both_are_funded_on_the_quoted_spread(self):
+        funded = [r for r in self.plan(reach=False).rows
+                  if r.allocated_quantity]
+        self.assertEqual({r.name for r in funded}, {"Steady", "Fluke"})
+        self.assertTrue(all(r.buy_reach is None for r in funded))
+
+    def test_reach_moves_the_prices_inside_what_traded(self):
+        rows = {r.name: r for r in self.plan().rows}
+        steady = rows["Steady"]
+        self.assertGreater(steady.buy, 100)
+        self.assertLess(steady.sell, 110)
+        self.assertEqual((steady.buy_reach, steady.sell_reach), (1.0, 1.0))
+        self.assertIsNotNone(steady.replay)
+
+    def test_replay_evidence_drops_the_offer_that_only_looked_good(self):
+        result = self.plan(funding_evidence="replay", replay_ranking=True,
+                           replay_statistic="stable", allocation="portfolio")
+        funded = [r for r in result.rows if r.allocated_quantity]
+        self.assertEqual([r.name for r in funded], ["Steady"])
+        row = funded[0]
+        self.assertGreater(row.replay.stable_profit, 0)
+        self.assertEqual(row.expected_gp, row.replay.stable_profit)
+        self.assertIn("neither bank nor slots", row.plan_reason)
+        self.assertEqual(result.selection.binding, "none")
+        fluke = next(r for r in result.rows if r.name == "Fluke")
+        self.assertIsNone(fluke.allocated_quantity)
+        self.assertTrue(fluke.replay is None
+                        or fluke.replay.stable_profit <= 0)
+
+    def test_position_cap_sizes_candidates_inside_it(self):
+        result = self.plan(max_position_capital=20_000)
+        for row in result.rows:
+            self.assertLessEqual(row.capital_needed, 20_000)
+            if row.allocated_capital:
+                self.assertLessEqual(row.allocated_capital, 20_000)
+
+    def test_invalid_policy_values_are_rejected(self):
+        for field, value in (("allocation", "greedy"),
+                             ("funding_evidence", "vibes"),
+                             ("replay_statistic", "median"),
+                             ("active_objective", "fun"),
+                             ("max_position_capital", 0)):
+            with self.assertRaises(ValueError):
+                filters.FilterConfig(**{field: value})
 
 
 if __name__ == "__main__":
