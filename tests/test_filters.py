@@ -528,8 +528,9 @@ class AllocationStageTests(unittest.TestCase):
         acts1 = {i: act_1h(avg_low=100, avg_high=q.high,
                            high_volume=500, low_volume=500)
                  for i, q in quotes.items()}
-        # Small enough that the bank, not the market, binds the funded size.
-        cfg = filters.FilterConfig(capital=5_000)
+        # Small enough that the bank, not the market, binds the funded size
+        # (the market supports 18 units of each at 100 gp: 3,600 gp).
+        cfg = filters.FilterConfig(capital=2_000)
         screened = filters.screen(items, quotes, acts5, acts1, cfg, NOW,
                                   NO_EXEMPTIONS)
         before = {r.item_id: r for r in screened.rows}

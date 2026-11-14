@@ -132,8 +132,11 @@ class ScoreFlipTimingTests(unittest.TestCase):
             buy=5, sell=6, margin=1, qty=limit, depth=0,
             buy_volume_1h=volume, sell_volume_1h=volume, quote_age=10,
             ofi=0.0, drift=0.0, now=NOW)
+        # The crowd (134) against the quiet-market floor: several times slower.
+        self.assertGreater(crowd / CAL.competitors_at_touch, 5)
         self.assertGreater(busy.round_trip_p50_seconds,
-                           10 * quiet.round_trip_p50_seconds)
+                           0.6 * crowd / CAL.competitors_at_touch
+                           * quiet.round_trip_p50_seconds)
         # A full limit per leg takes the whole window at the mean rate, so
         # even the median round trip is well past it.
         self.assertGreater(busy.round_trip_p50_seconds, engine.WINDOW_HOURS * HOUR)

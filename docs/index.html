@@ -1252,7 +1252,10 @@ const NATURE_RUNE_FALLBACK = 100;
    archive or the journal that the Python tools collect. Nothing is tuned by
    feel inside a function. */
 const CAL = {
-  competitors_at_touch: 8.0,       // CALIBRATE: offers you queue behind
+  // CALIBRATE: offers you queue behind. 16 since the November 2026 backtest:
+  // a smaller assumed share loses less when the true share is small, at no
+  // measurable cost on average. Still an assumption, not a measurement.
+  competitors_at_touch: 16.0,
   aggressiveness_scale: 0.25,      // CALIBRATE: share of spread that jumps it
   priority_capture_ceiling: 0.03,  // CALIBRATE: crowded improved-share cap
   fill_rate_log_sigma: 0.75,       // CALIBRATE: realised/predicted throughput

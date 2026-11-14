@@ -877,7 +877,13 @@ class TouchCompetitorsTests(unittest.TestCase):
             buy=5, sell=6, margin=1, qty=25_000, depth=0,
             buy_volume_1h=1_681_042, sell_volume_1h=1_681_042,
             quote_age=10, ofi=0.0, drift=0.0, now=1_700_000_000)
-        self.assertGreater(botted.total_seconds, 10 * quiet.total_seconds)
+        # 134 participants against the quiet-market floor of 16: about eight
+        # times slower, whatever the floor is set to.
+        crowd = engine.touch_competitors(1_681_042, 50_000)
+        floor = engine.DEFAULT_CALIBRATION.competitors_at_touch
+        self.assertGreater(botted.total_seconds,
+                           0.6 * crowd / floor * quiet.total_seconds)
+        self.assertGreater(crowd / floor, 5)
         self.assertLess(botted.gp_per_slot_hour, quiet.gp_per_slot_hour)
 
 

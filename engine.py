@@ -218,7 +218,17 @@ class Calibration:
     # applies where that crowd term does not bind — a quiet item nobody else is
     # watching. CALIBRATE: from the tick archive, as observed fill rate divided
     # by total volume at the touch.
-    competitors_at_touch: float = 8.0
+    #
+    # 16 since the November 2026 backtest, and still an assumption: the share
+    # of crossing volume that reaches one offer cannot be read from public
+    # trades. The backtest was run with that share at 3%, 10% and 30%. With 8
+    # (a 12.5% share) the plan lost money whenever the true share was 3%,
+    # because offers were sized for volume that never arrived and the stock
+    # had to be dumped; with 16 that loss shrank in all three strategies while
+    # the average over the six fill assumptions stayed inside the noise.
+    # Assuming too small a share leaves coins idle; assuming too large a one
+    # buys stock that does not sell. docs/audit-2026-11.md has the table.
+    competitors_at_touch: float = 16.0
 
     # How much of the spread you must concede before you have essentially
     # jumped the whole queue. Expressed as a fraction of the spread rather than
