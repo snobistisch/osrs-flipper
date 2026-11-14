@@ -4,8 +4,12 @@ permissions:
   contents: read
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, for which setup-python has no
+    # Python 3.9 build. 3.9 is still the oldest version the tools support.
+    runs-on: ubuntu-24.04
     strategy:
+      # One version failing must not hide the result of the other.
+      fail-fast: false
       matrix:
         python: ['3.9', '3.13']
     steps:
