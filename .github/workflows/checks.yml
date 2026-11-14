@@ -22,4 +22,7 @@ jobs:
       - run: ruff check .
       - run: python -m unittest -q
       - run: node --test tests/browser.test.cjs
+      # A few seconds on the committed slice of real prices: every strategy,
+      # the old pipeline and the shipped policy, end to end.
+      - run: python -m backtest smoke
       - run: python -m compileall -q -x '/\.venv/' .
