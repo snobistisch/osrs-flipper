@@ -1272,6 +1272,10 @@ const CAL = {
   // p75 10%, p90 25%. Above that it is items trading a handful of units an
   // hour, where the average rests on one or two trades. CALIBRATE.
   reference_fallback_max_divergence: 0.25,
+  // What an offer earns from volume traded at exactly its own price, where it
+  // has no price priority over older offers. 0 counts only volume that traded
+  // at a strictly worse price. CALIBRATE from journal fills.
+  touch_fill_weight: 0.0,
   min_leg_seconds: 60,             // DERIVED: human time per leg
   adverse_selection_gamma: 0.5,    // CALIBRATE
   drift_penalty_falling: 8.0,      // CALIBRATE
@@ -2356,6 +2360,244 @@ function confidenceLabel(row) {
       row.age <= freshLimit && width <= .85 &&
       (row.executionQuality ?? 0.5) >= 0.45) return "medium";
   return "speculative";
+}
+
+/* ---- reach: the volume an offer at a given price would actually have met ----
+   The quoted low and high are prices other people's instant trades went
+   through at, not places in an order book. Whether a resting offer fills
+   depends on how much trading happens at a price it beats, and that is read
+   off the item's own recent 5-minute buckets: a buy at B outranked the
+   instant-sell volume in buckets whose average price was below B. Mirrors
+   engine.reach_view. */
+const REACH_TIMESTEP = "5m";
+const REACH_WINDOW_HOURS = 24;         // one full daily cycle
+const REACH_BUCKET_HOURS = 5 / 60;
+const REACH_MIN_BUCKETS = 12;          // traded buckets per side, or no verdict
+
+function reachView(rawPoints, windowHours = REACH_WINDOW_HOURS,
+                   bucketHours = REACH_BUCKET_HOURS) {
+  const stamped = (rawPoints || []).filter((p) => p && typeof p === "object" &&
+    Number.isFinite(p.timestamp));
+  if (!stamped.length) return null;
+  let newest = -Infinity;
+  for (const p of stamped) newest = Math.max(newest, p.timestamp);
+  const start = newest - windowHours * SECONDS_PER_HOUR;
+  const windowed = stamped.filter((p) => p.timestamp > start);
+  let oldest = Infinity;
+  for (const p of windowed) oldest = Math.min(oldest, p.timestamp);
+  const hours = (newest - oldest) / SECONDS_PER_HOUR + bucketHours;
+  const lows = windowed.filter((p) => (p.avgLowPrice || 0) > 0 && (p.lowPriceVolume || 0) > 0)
+    .map((p) => [Math.floor(p.avgLowPrice + 0.5), p.lowPriceVolume]);
+  const highs = windowed.filter((p) => (p.avgHighPrice || 0) > 0 && (p.highPriceVolume || 0) > 0)
+    .map((p) => [Math.floor(p.avgHighPrice + 0.5), p.highPriceVolume]);
+  if (lows.length < REACH_MIN_BUCKETS || highs.length < REACH_MIN_BUCKETS) return null;
+  const total = (pairs) => pairs.reduce((sum, [, volume]) => sum + volume, 0);
+  // Volume at a strictly worse price counts in full; volume at exactly the
+  // offer's price only for touchWeight, because there it has no priority.
+  const reached = (pairs, beats) => (price, touchWeight = 0) => {
+    let through = 0, at = 0;
+    for (const [traded, volume] of pairs) {
+      if (beats(traded, price)) through += volume;
+      else if (traded === price) at += volume;
+    }
+    return (through + touchWeight * at) / hours;
+  };
+  return {
+    hours, lows, highs,
+    buyVolumePerHour: reached(lows, (traded, price) => traded < price),
+    sellVolumePerHour: reached(highs, (traded, price) => traded > price),
+    lowVolumePerHour: total(lows) / hours,
+    highVolumePerHour: total(highs) / hours,
+  };
+}
+
+/* ---- replay: the concrete offer, played forward on the item's own past ----
+   The rate model answers "how fast, given a rate". It cannot answer what
+   sinks flips: the buy fills because the price fell through it, and the sell
+   then waits above a market that has moved. That is a property of the price
+   path, so the offer is placed at many past start times and played forward
+   on the buckets that followed. Mirrors engine.replay_offer. */
+const REPLAY_MIN_PLACEMENTS = 8;
+const REPLAY_STRIDE_BUCKETS = 6;       // a new placement every 30 minutes
+
+function replayOffer(rawPoints, o) {
+  const bucketHours = o.bucketHours ?? REACH_BUCKET_HOURS;
+  const weight = CAL.touch_fill_weight;
+  const buckets = (rawPoints || []).filter((p) => p && typeof p === "object");
+  const horizon = Math.max(1, Math.round(o.horizonHours / bucketHours));
+  const away = o.mode === "overnight";
+  let buyUntil, sellFrom, total;
+  if (away) {
+    buyUntil = sellFrom = horizon;
+    total = horizon + Math.round(CAL.overnight_liquidation_hours / bucketHours);
+  } else {
+    buyUntil = Math.max(1, Math.floor(horizon / 2)); sellFrom = 0; total = horizon;
+  }
+  if (!(o.qty > 0) || !(o.buyShare > 0) || !(o.sellShare > 0) ||
+      buckets.length < total) return null;
+
+  const buyRoom = [], sellRoom = [], lowPrices = [];
+  for (const p of buckets) {
+    const low = p.avgLowPrice || 0, lowVolume = p.lowPriceVolume || 0;
+    const high = p.avgHighPrice || 0, highVolume = p.highPriceVolume || 0;
+    buyRoom.push(o.buyShare * lowVolume *
+      (low > 0 && low < o.buy ? 1 : low === o.buy ? weight : 0));
+    sellRoom.push(o.sellShare * highVolume *
+      (high > o.sell ? 1 : high === o.sell ? weight : 0));
+    lowPrices.push(lowVolume > 0 ? low : 0);
+  }
+
+  const unitNet = netRevenue(o.sell, o.exempt, o.bond);
+  const profits = [];
+  let completions = 0, boughtTotal = 0, soldTotal = 0, losses = 0, slotHours = 0;
+  for (let start = 0; start <= buckets.length - total; start += REPLAY_STRIDE_BUCKETS) {
+    let bought = 0, sold = 0, exitPrice = 0, occupied = total;
+    for (let step = 0; step < total; step++) {
+      const index = start + step;
+      // Sell first: only units bought in an earlier bucket are for sale.
+      if (step >= sellFrom && bought > sold) sold += Math.min(bought - sold, sellRoom[index]);
+      if (step < buyUntil && bought < o.qty) bought += Math.min(o.qty - bought, buyRoom[index]);
+      if (lowPrices[index]) exitPrice = lowPrices[index];
+      const buying = step + 1 < buyUntil && bought < o.qty;
+      if (!buying && bought - sold < 1e-9 && (!away || step + 1 >= horizon)) {
+        occupied = step + 1;
+        break;
+      }
+    }
+    const leftover = bought - sold;
+    let profit = sold * unitNet - bought * o.buy;
+    if (leftover > 1e-9) profit += leftover * netRevenue(exitPrice || o.buy, o.exempt, o.bond);
+    profits.push(profit);
+    if (sold >= o.qty - 1e-9) completions++;
+    if (profit < 0) losses++;
+    boughtTotal += bought / o.qty;
+    soldTotal += sold / o.qty;
+    slotHours += occupied * bucketHours;
+  }
+  const count = profits.length;
+  if (count < REPLAY_MIN_PLACEMENTS) return null;
+  const half = Math.floor(count / 2);
+  const sum = (values) => values.reduce((a, b) => a + b, 0);
+  const olderProfit = sum(profits.slice(0, half)) / half;
+  const newerProfit = sum(profits.slice(half)) / (count - half);
+  return {
+    placements: count, meanProfit: sum(profits) / count,
+    completionRate: completions / count,
+    boughtShare: boughtTotal / count, soldShare: soldTotal / count,
+    lossRate: losses / count, meanSlotHours: slotHours / count,
+    olderProfit, newerProfit,
+    // An edge that is real shows in both halves of the window.
+    stableProfit: Math.min(olderProfit, newerProfit),
+  };
+}
+
+/* ---- portfolio selection: slots AND bank ----
+   Ranking each item on its own and funding from the top is right only when
+   slots are the one thing that runs out. When the bank runs out first, the
+   best plan is not the top of that list: a flip that earns slightly less with
+   a tenth of the coins beats one that crowds three others out. A small
+   knapsack with two constraints, solved exactly by dynamic programming over
+   (positions used, coins used), coins counted in capital / 200 steps with
+   each cost rounded UP so the plan never overspends; what rounding leaves is
+   then spent greedily at exact cost. `binding` says which resource decided
+   the plan, by comparison with what an unlimited bank would have funded.
+   options[i] = [[value, coins], ...] smallest size first. Mirrors
+   engine.select_portfolio, including the order of every floating-point step. */
+const SELECTION_CAPITAL_STEPS = 200;
+
+function selectPortfolio(options, capital, slots) {
+  const count = options.length;
+  const choices = options.map(() => -1);
+  slots = Math.max(0, Math.floor(slots));
+  capital = Math.max(0, Math.floor(capital));
+  if (!count || slots === 0 || capital === 0) {
+    return { choices, capitalPrice: 0, binding: "none" };
+  }
+
+  const step = Math.max(1, Math.ceil(capital / SELECTION_CAPITAL_STEPS));
+  const width = Math.floor(capital / step) + 1;
+  const table = (fill) => Array.from({ length: slots + 1 }, () => new Array(width).fill(fill));
+  let values = table(0);
+  const taken = [];
+  for (const sizes of options) {
+    const usable = [];
+    sizes.forEach(([value, coins], size) => {
+      if (value > 0 && coins > 0 && coins <= capital) {
+        usable.push([size, value, Math.ceil(coins / step)]);
+      }
+    });
+    const current = values.map((row) => row.slice());
+    const mark = table(-1);
+    for (let used = 1; used <= slots; used++) {
+      const below = values[used - 1], row = current[used], chosen = mark[used];
+      for (const [size, value, cost] of usable) {
+        for (let coins = cost; coins < width; coins++) {
+          const total = below[coins - cost] + value;
+          if (total > row[coins]) { row[coins] = total; chosen[coins] = size; }
+        }
+      }
+    }
+    taken.push(mark);
+    values = current;
+  }
+  let used = slots, coins = width - 1;
+  for (let index = count - 1; index >= 0; index--) {
+    const size = taken[index][used][coins];
+    if (size >= 0) {
+      choices[index] = size;
+      coins -= Math.ceil(options[index][size][1] / step);
+      used -= 1;
+    }
+  }
+
+  let spent = 0;
+  choices.forEach((size, i) => { if (size >= 0) spent += options[i][size][1]; });
+  // Spend what rounding left: the best value per coin among growing a funded
+  // candidate one size or opening a free slot.
+  for (;;) {
+    const funded = choices.filter((size) => size >= 0).length;
+    let upgrade = null, upgradeRate = 0;
+    options.forEach((sizes, index) => {
+      const currentSize = choices[index];
+      if (currentSize < 0 && funded >= slots) return;
+      const following = currentSize + 1;
+      if (following >= sizes.length) return;
+      const gain = sizes[following][0] - (currentSize >= 0 ? sizes[currentSize][0] : 0);
+      const extra = sizes[following][1] - (currentSize >= 0 ? sizes[currentSize][1] : 0);
+      if (gain <= 0 || extra <= 0 || extra > capital - spent) return;
+      if (gain / extra > upgradeRate) {
+        upgrade = [index, following, extra]; upgradeRate = gain / extra;
+      }
+    });
+    if (!upgrade) break;
+    choices[upgrade[0]] = upgrade[1];
+    spent += upgrade[2];
+  }
+
+  // What would an unlimited bank have funded? The top `slots` candidates at
+  // their most valuable size.
+  const ideal = [];
+  options.forEach((sizes, index) => {
+    let top = -1, topValue = 0;
+    sizes.forEach(([value], size) => { if (value > topValue) { top = size; topValue = value; } });
+    if (top >= 0) ideal.push([topValue, index, top]);
+  });
+  ideal.sort((a, b) => b[0] - a[0] || a[1] - b[1]);
+  const unlimited = options.map(() => -1);
+  for (const [, index, size] of ideal.slice(0, slots)) unlimited[index] = size;
+  const shortOfCoins = unlimited.some((size, i) => size !== choices[i]);
+  const shortOfSlots = ideal.length > slots;
+  let price = 0;
+  if (shortOfCoins) {
+    const rates = [];
+    choices.forEach((size, i) => {
+      if (size >= 0) rates.push(options[i][size][0] / options[i][size][1]);
+    });
+    price = rates.length ? Math.min(...rates) : 0;
+  }
+  const binding = shortOfCoins && shortOfSlots ? "both"
+    : shortOfCoins ? "capital" : shortOfSlots ? "slots" : "none";
+  return { choices, capitalPrice: price, binding };
 }
 
 /* ---- formatting ---- */

@@ -562,6 +562,111 @@ class ParityTests(unittest.TestCase):
         self.assertEqual([engine.round_half_up(v) for v in
                           (0.5, 1.5, 2.5, 2.4999, -0.5)], [1, 2, 3, 2, 0])
 
+    def recent(self, seed: int, buckets: int = 365) -> list:
+        """A 5-minute series with gaps, drift and one-sided buckets."""
+        rng = random.Random(seed)
+        price, points = 1_000.0, []
+        for index in range(buckets):
+            price *= math.exp(rng.gauss(0.0, 0.004))
+            quiet = index % 11 == 0
+            points.append({
+                "timestamp": NOW - (buckets - index) * 300,
+                "avgHighPrice": int(price * 1.012),
+                "avgLowPrice": None if quiet else int(price * 0.99),
+                "highPriceVolume": rng.randint(0, 400),
+                "lowPriceVolume": 0 if quiet else rng.randint(1, 400)})
+        return points
+
+    def test_reach_view_matches_exactly(self):
+        expressions, expected = [], []
+        for seed in (3, 4):
+            points = self.recent(seed)
+            view = engine.reach_view(points)
+            prices = [(990, 0.0), (1_000, 0.0), (1_000, 0.5), (1_010, 1.0)]
+            expressions.append(
+                "(() => {{ const r = reachView({}); return [r.hours, "
+                "r.lows.length, r.highs.length, r.lowVolumePerHour, "
+                "r.highVolumePerHour, {}]; }})()".format(
+                    json.dumps(points), ", ".join(
+                        "r.buyVolumePerHour({0}, {1}), "
+                        "r.sellVolumePerHour({0}, {1})".format(price, weight)
+                        for price, weight in prices)))
+            row = [view.hours, len(view.lows), len(view.highs),
+                   view.low_volume_per_hour, view.high_volume_per_hour]
+            for price, weight in prices:
+                row += [view.buy_volume_per_hour(price, weight),
+                        view.sell_volume_per_hour(price, weight)]
+            expected.append(row)
+        expressions.append("reachView({})".format(json.dumps(self.recent(1, 8))))
+        expected.append(None)
+        # Sums of integers divided by the same hours: no tolerance needed.
+        self.assertEqual(js(*expressions), expected)
+
+    def test_replay_matches_exactly_in_every_strategy(self):
+        fields = (("placements", "placements"), ("mean_profit", "meanProfit"),
+                  ("completion_rate", "completionRate"),
+                  ("bought_share", "boughtShare"), ("sold_share", "soldShare"),
+                  ("loss_rate", "lossRate"),
+                  ("mean_slot_hours", "meanSlotHours"),
+                  ("older_profit", "olderProfit"),
+                  ("newer_profit", "newerProfit"),
+                  ("stable_profit", "stableProfit"))
+        cases = [dict(buy=995, sell=1_012, qty=300, buy_share=0.125,
+                      sell_share=0.1, mode=mode, hours=hours, exempt=exempt,
+                      seed=seed)
+                 for mode, hours in (("active", 4.0), ("overnight", 8.0),
+                                     ("profit", 24.0))
+                 for exempt in (False, True) for seed in (3, 4)]
+        cases.append(dict(buy=1_001, sell=1_009, qty=5, buy_share=0.5,
+                          sell_share=0.5, mode="active", hours=4.0,
+                          exempt=False, seed=9))
+        expressions = [
+            "replayOffer({points}, {{buy:{buy}, sell:{sell}, qty:{qty}, "
+            "buyShare:{buy_share}, sellShare:{sell_share}, mode:\"{mode}\", "
+            "horizonHours:{hours}, exempt:{flag}, bond:false}})".format(
+                points=json.dumps(self.recent(case["seed"])),
+                flag=str(case["exempt"]).lower(), **case)
+            for case in cases]
+        for case, browser in zip(cases, js(*expressions)):
+            python = engine.replay_offer(
+                self.recent(case["seed"]), buy=case["buy"], sell=case["sell"],
+                qty=case["qty"], buy_share=case["buy_share"],
+                sell_share=case["sell_share"], mode=case["mode"],
+                horizon_hours=case["hours"], tax_exempt=case["exempt"])
+            self.assertIsNotNone(python, case)
+            for field, key in fields:
+                # Same operations in the same order: bit-identical floats.
+                self.assertEqual(getattr(python, field), browser[key],
+                                 "{} {}".format(case, field))
+        short = js("replayOffer({}, {{buy:995, sell:1012, qty:10, buyShare:0.1, "
+                   "sellShare:0.1, mode:\"active\", horizonHours:4}})".format(
+                       json.dumps(self.recent(3, 40))))
+        self.assertEqual(short, [None])
+
+    def test_portfolio_selection_matches_exactly(self):
+        rng = random.Random(5)
+        cases = []
+        for _ in range(250):
+            options = []
+            for _ in range(rng.randint(0, 12)):
+                value = coins = 0
+                sizes = []
+                for _ in range(rng.randint(0, 4)):
+                    coins += rng.randint(1, 400_000)
+                    value += rng.uniform(-5, 60)
+                    sizes.append((value, coins))
+                options.append(sizes)
+            cases.append((options, rng.randint(0, 1_500_000),
+                          rng.randint(0, 8)))
+        browser = js(*["selectPortfolio({}, {}, {})".format(
+            json.dumps(options), capital, slots)
+            for options, capital, slots in cases])
+        for (options, capital, slots), result in zip(cases, browser):
+            python = engine.select_portfolio(options, capital, slots)
+            self.assertEqual(
+                (list(python.choices), python.capital_price, python.binding),
+                (result["choices"], result["capitalPrice"], result["binding"]))
+
 
 if __name__ == "__main__":
     unittest.main()

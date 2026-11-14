@@ -293,6 +293,16 @@ class Calibration:
     # CALIBRATE: from the journal, as the fill rate of flips admitted this way.
     reference_fallback_max_divergence: float = 0.25
 
+    # What an offer earns from volume that traded at EXACTLY its own price.
+    # There it has no price priority: the Grand Exchange serves older offers
+    # at the same price first, and how many of those there are cannot be read
+    # from executed trades. Volume that traded at a strictly worse price is
+    # different in kind, because an offer at a better price is served before
+    # the ones those trades hit. 0 counts only that second kind, the
+    # conservative end. CALIBRATE: journal fill rate of offers placed at the
+    # last traded price against offers placed one tick inside it.
+    touch_fill_weight: float = 0.0
+
     # Human time per leg. Not a market property: placing an offer, returning to
     # the GE and collecting takes a human about a minute, so no flip cycles
     # faster than this however thick the book is. It floors the mean-rate point
@@ -2057,6 +2067,134 @@ def allocate_portfolio(scores: Sequence[float], capital: int,
     return allocation
 
 
+class Selection(NamedTuple):
+    """Which size of which candidate to fund, and what made it so."""
+    choices: List[int]        # per candidate: index of the chosen size, -1 = none
+    # Value per coin of the least productive funded position, 0 when the bank
+    # did not constrain the plan: what a coin has to earn to be in it.
+    capital_price: float
+    binding: str              # "slots", "capital", "both" or "none"
+
+
+SELECTION_CAPITAL_STEPS = 200
+
+
+def select_portfolio(options: Sequence[Sequence[Tuple[float, int]]],
+                     capital: int, slots: int) -> Selection:
+    """Pick at most ``slots`` candidates, one size each, within ``capital``,
+    maximising the summed value.
+
+    ``options[i]`` lists the sizes candidate ``i`` can be funded at as
+    ``(value, coins)``, smallest first. ``value`` is in the strategy's own
+    unit — gp per slot-hour for Active, gp per flip for Away and Max profit —
+    so the strategy still chooses the objective; this only decides how the
+    two scarce resources are spent on it.
+
+    Ranking each item on its own and funding from the top is right only when
+    slots are the one thing that runs out. When the bank runs out first, the
+    best plan is not the top of that list: a flip that earns slightly less
+    with a tenth of the coins beats one that crowds three others out. This is
+    a small knapsack with two constraints, solved exactly by dynamic
+    programming over (slots used, coins used) with coins counted in
+    ``capital / SELECTION_CAPITAL_STEPS`` steps, each position's cost rounded
+    UP so the plan can never overspend. What that rounding leaves over is
+    then spent greedily at exact cost.
+
+    ``binding`` says which resource decided the plan, by comparison with the
+    plan an unlimited bank would have produced. Deterministic, and the same
+    arithmetic in the browser port.
+    """
+    count = len(options)
+    choices = [-1] * count
+    slots = max(0, int(slots))
+    capital = max(0, int(capital))
+    if count == 0 or slots == 0 or capital == 0:
+        return Selection(choices, 0.0, "none")
+
+    step = max(1, -(-capital // SELECTION_CAPITAL_STEPS))
+    width = capital // step + 1
+    # values[s][c]: most value from the candidates seen so far with at most s
+    # positions and at most c steps of coins. taken[i][s][c]: the size of
+    # candidate i used to reach it, -1 if it was left out.
+    values = [[0.0] * width for _ in range(slots + 1)]
+    taken = []
+    for sizes in options:
+        usable = [(size, value, -(-coins // step)) for size, (value, coins)
+                  in enumerate(sizes) if value > 0 and 0 < coins <= capital]
+        current = [row[:] for row in values]
+        mark = [[-1] * width for _ in range(slots + 1)]
+        for used in range(1, slots + 1):
+            below, row, chosen = values[used - 1], current[used], mark[used]
+            for size, value, cost in usable:
+                for coins in range(cost, width):
+                    total = below[coins - cost] + value
+                    if total > row[coins]:
+                        row[coins] = total
+                        chosen[coins] = size
+        taken.append(mark)
+        values = current
+    used, coins = slots, width - 1
+    for index in range(count - 1, -1, -1):
+        size = taken[index][used][coins]
+        if size >= 0:
+            choices[index] = size
+            coins -= -(-options[index][size][1] // step)
+            used -= 1
+
+    spent = sum(options[i][size][1] for i, size in enumerate(choices)
+                if size >= 0)
+    # Spend what rounding left: the best value per coin among growing a
+    # funded candidate one size or opening a free slot.
+    while True:
+        funded = sum(1 for size in choices if size >= 0)
+        upgrade, upgrade_rate = None, 0.0
+        for index, sizes in enumerate(options):
+            current_size = choices[index]
+            if current_size < 0 and funded >= slots:
+                continue
+            following = current_size + 1
+            if following >= len(sizes):
+                continue
+            gain = sizes[following][0] - (
+                sizes[current_size][0] if current_size >= 0 else 0.0)
+            extra = sizes[following][1] - (
+                sizes[current_size][1] if current_size >= 0 else 0)
+            if gain <= 0 or extra <= 0 or extra > capital - spent:
+                continue
+            if gain / extra > upgrade_rate:
+                upgrade, upgrade_rate = (index, following, extra), gain / extra
+        if upgrade is None:
+            break
+        choices[upgrade[0]] = upgrade[1]
+        spent += upgrade[2]
+
+    # What would an unlimited bank have funded? The top ``slots`` candidates
+    # at their most valuable size.
+    ideal = []
+    for index, sizes in enumerate(options):
+        top, top_value = -1, 0.0
+        for size, (value, _) in enumerate(sizes):
+            if value > top_value:
+                top, top_value = size, value
+        if top >= 0:
+            ideal.append((top_value, index, top))
+    ideal.sort(key=lambda item: (-item[0], item[1]))
+    unlimited = [-1] * count
+    for _, index, size in ideal[:slots]:
+        unlimited[index] = size
+    short_of_coins = unlimited != choices
+    short_of_slots = len(ideal) > slots
+    price = 0.0
+    if short_of_coins:
+        rates = [options[i][size][0] / options[i][size][1]
+                 for i, size in enumerate(choices) if size >= 0]
+        price = min(rates) if rates else 0.0
+    binding = ("both" if short_of_coins and short_of_slots
+               else "capital" if short_of_coins
+               else "slots" if short_of_slots else "none")
+    return Selection(choices, price, binding)
+
+
 # ---------------------------------------------------------------------------
 # Multi-day history
 # ---------------------------------------------------------------------------
@@ -2328,6 +2466,204 @@ def combined_execution_evidence(
             mode, horizon_hours)
         quality = 0.35 * long_quality + 0.65 * recent_quality
     return quality, 0.70 + 0.60 * quality
+
+
+# ---------------------------------------------------------------------------
+# Reach: the volume an offer at a given price would actually have met
+# ---------------------------------------------------------------------------
+# The quoted "low" and "high" are prices other people's instant trades went
+# through at, not places in an order book. Whether a resting offer at some
+# price fills depends on how much trading happens at a price it beats, and
+# that can be read off the item's own recent 5-minute buckets instead of
+# being assumed: for a buy at B, the instant-sell volume in buckets whose
+# average price was below B went to offers B would have outranked.
+REACH_TIMESTEP = "5m"
+REACH_WINDOW_HOURS = 24.0         # one full daily cycle
+REACH_BUCKET_HOURS = 5.0 / 60.0
+REACH_MIN_BUCKETS = 12            # traded buckets per side, or no verdict
+
+
+@dataclass(frozen=True)
+class ReachView:
+    """Recent traded prices and volumes per side, for one item."""
+    hours: float
+    lows: Tuple[Tuple[int, int], ...]     # (avg instant-sell price, units)
+    highs: Tuple[Tuple[int, int], ...]    # (avg instant-buy price, units)
+
+    def buy_volume_per_hour(self, price: int, touch_weight: float = 0.0) -> float:
+        """Instant-sell units per hour a buy offer at ``price`` outranked."""
+        through = sum(volume for traded, volume in self.lows if traded < price)
+        at = sum(volume for traded, volume in self.lows if traded == price)
+        return (through + touch_weight * at) / self.hours
+
+    def sell_volume_per_hour(self, price: int, touch_weight: float = 0.0) -> float:
+        """Instant-buy units per hour a sell offer at ``price`` undercut."""
+        through = sum(volume for traded, volume in self.highs if traded > price)
+        at = sum(volume for traded, volume in self.highs if traded == price)
+        return (through + touch_weight * at) / self.hours
+
+    @property
+    def low_volume_per_hour(self) -> float:
+        return sum(volume for _, volume in self.lows) / self.hours
+
+    @property
+    def high_volume_per_hour(self) -> float:
+        return sum(volume for _, volume in self.highs) / self.hours
+
+
+def reach_view(points: List[dict],
+               window_hours: float = REACH_WINDOW_HOURS,
+               bucket_hours: float = REACH_BUCKET_HOURS) -> Optional[ReachView]:
+    """Read recent /timeseries buckets (wiki key names) into a ReachView.
+
+    The window ends at the newest bucket and its length is what the series
+    really covers, so a short series is not diluted over hours it never saw.
+    Returns None when either side traded in fewer than REACH_MIN_BUCKETS
+    buckets: too little to say what a price would have met.
+    """
+    stamped = [point for point in points if isinstance(point, dict)
+               and isinstance(point.get("timestamp"), (int, float))]
+    if not stamped:
+        return None
+    newest = max(point["timestamp"] for point in stamped)
+    start = newest - window_hours * SECONDS_PER_HOUR
+    windowed = [point for point in stamped if point["timestamp"] > start]
+    oldest = min(point["timestamp"] for point in windowed)
+    hours = (newest - oldest) / SECONDS_PER_HOUR + bucket_hours
+    lows = tuple((round_half_up(point["avgLowPrice"]),
+                  int(point["lowPriceVolume"]))
+                 for point in windowed
+                 if (point.get("avgLowPrice") or 0) > 0
+                 and (point.get("lowPriceVolume") or 0) > 0)
+    highs = tuple((round_half_up(point["avgHighPrice"]),
+                   int(point["highPriceVolume"]))
+                  for point in windowed
+                  if (point.get("avgHighPrice") or 0) > 0
+                  and (point.get("highPriceVolume") or 0) > 0)
+    if len(lows) < REACH_MIN_BUCKETS or len(highs) < REACH_MIN_BUCKETS:
+        return None
+    return ReachView(hours=hours, lows=lows, highs=highs)
+
+
+@dataclass(frozen=True)
+class ReplayView:
+    """What one concrete offer would have done on the item's own recent past.
+
+    The offer (prices, quantity, deadline) is placed at many start times
+    inside the window and played forward on the buckets that followed each
+    one. Every figure is an average over those placements.
+    """
+    placements: int
+    mean_profit: float            # gp per placement, leftovers dumped
+    completion_rate: float        # whole quantity bought and sold in time
+    bought_share: float           # mean share of the quantity bought
+    sold_share: float             # mean share of the quantity sold
+    loss_rate: float              # placements that lost money
+    mean_slot_hours: float        # until done, or the deadline
+    # The same mean over the older and the newer half of the placements. An
+    # edge that is real shows in both; one that came from a single move of
+    # the price shows in one. The smaller of the two is the cautious figure.
+    older_profit: float = 0.0
+    newer_profit: float = 0.0
+
+    @property
+    def stable_profit(self) -> float:
+        return min(self.older_profit, self.newer_profit)
+
+
+REPLAY_MIN_PLACEMENTS = 8
+REPLAY_STRIDE_BUCKETS = 6         # a new placement every 30 minutes
+
+
+def replay_offer(points: List[dict], *, buy: int, sell: int, qty: int,
+                 buy_share: float, sell_share: float, mode: TradeMode,
+                 horizon_hours: float,
+                 tax_exempt: bool = False, bond: bool = False,
+                 bucket_hours: float = REACH_BUCKET_HOURS,
+                 calibration: Calibration = DEFAULT_CALIBRATION
+                 ) -> Optional[ReplayView]:
+    """Play one offer forward from many past start times.
+
+    The closed-form fill model answers "how fast, given a rate". It cannot
+    answer what actually sinks flips: the buy fills because the price fell
+    through it, and the sell then waits above a market that has moved. That
+    is a property of the price path, and the path is in the item's own recent
+    buckets. So the offer is replayed on them, with the same rules as the
+    rate model: a buy meets the instant-sell volume that traded below its
+    price, a sell the instant-buy volume above its price, each times its
+    queue share; a unit is sold only after it was bought; what is still unsold at
+    the deadline is sold at the last instant-sell price, less tax.
+
+    Active and Max profit keep the buy open for the first half of the
+    horizon; Away buys for the whole absence and sells in the liquidation
+    window after it. Returns None with fewer than REPLAY_MIN_PLACEMENTS
+    complete placements: too little past to judge the offer on.
+    """
+    mode = TradeMode(mode)
+    weight = calibration.touch_fill_weight
+    buckets = [point for point in points if isinstance(point, dict)]
+    horizon = max(1, round_half_up(horizon_hours / bucket_hours))
+    if mode is TradeMode.OVERNIGHT:
+        buy_until = sell_from = horizon
+        total = horizon + round_half_up(
+            calibration.overnight_liquidation_hours / bucket_hours)
+    else:
+        buy_until, sell_from, total = max(1, horizon // 2), 0, horizon
+    if qty <= 0 or buy_share <= 0 or sell_share <= 0 or len(buckets) < total:
+        return None
+
+    buy_room, sell_room, low_prices = [], [], []
+    for point in buckets:
+        low, low_volume = point.get("avgLowPrice") or 0, point.get("lowPriceVolume") or 0
+        high, high_volume = point.get("avgHighPrice") or 0, point.get("highPriceVolume") or 0
+        buy_room.append(buy_share * low_volume * (
+            1.0 if 0 < low < buy else weight if low == buy else 0.0))
+        sell_room.append(sell_share * high_volume * (
+            1.0 if high > sell else weight if high == sell else 0.0))
+        low_prices.append(low if low_volume > 0 else 0)
+
+    unit_net = net_revenue(sell, tax_exempt, bond)
+    profits, completions, bought_total, sold_total, losses = [], 0, 0.0, 0.0, 0
+    slot_hours = 0.0
+    for start in range(0, len(buckets) - total + 1, REPLAY_STRIDE_BUCKETS):
+        bought = sold = 0.0
+        exit_price = 0
+        occupied = total
+        for step in range(total):
+            index = start + step
+            # Sell first: only units bought in an earlier bucket are for sale.
+            if step >= sell_from and bought > sold:
+                sold += min(bought - sold, sell_room[index])
+            if step < buy_until and bought < qty:
+                bought += min(qty - bought, buy_room[index])
+            if low_prices[index]:
+                exit_price = low_prices[index]
+            buying = step + 1 < buy_until and bought < qty
+            if (not buying and bought - sold < 1e-9
+                    and (mode is not TradeMode.OVERNIGHT or step + 1 >= horizon)):
+                occupied = step + 1
+                break
+        leftover = bought - sold
+        profit = sold * unit_net - bought * buy
+        if leftover > 1e-9:
+            profit += leftover * net_revenue(exit_price or buy, tax_exempt, bond)
+        profits.append(profit)
+        completions += 1 if sold >= qty - 1e-9 else 0
+        losses += 1 if profit < 0 else 0
+        bought_total += bought / qty
+        sold_total += sold / qty
+        slot_hours += occupied * bucket_hours
+    count = len(profits)
+    if count < REPLAY_MIN_PLACEMENTS:
+        return None
+    half = count // 2
+    return ReplayView(
+        placements=count, mean_profit=sum(profits) / count,
+        completion_rate=completions / count,
+        bought_share=bought_total / count, sold_share=sold_total / count,
+        loss_rate=losses / count, mean_slot_hours=slot_hours / count,
+        older_profit=sum(profits[:half]) / half,
+        newer_profit=sum(profits[half:]) / (count - half))
 
 
 def gp_per_slot_hour(expected_gp: float, total_seconds: float) -> float:
