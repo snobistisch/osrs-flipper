@@ -67,9 +67,30 @@ after `reprice_check_seconds`, and to cancel what is left at
 `cancel_by_seconds`. `round_trip_seconds` equals the median and is kept only
 for older consumers.
 
-**`gp_per_slot_hour_before_shrinkage` is the raw estimate.** When the two are
-far apart, the raw number was mostly the thinness of the data. Say so rather
-than quoting the bigger one.
+**`replay` is the evidence a funded row rests on.** Before a row gets any
+bank, its exact offer (prices, quantity, deadline) is replayed on the item's
+own last day of 5-minute trading: a buy fills only where sellers traded below
+its price, a sell only where buyers traded above it, and stock unsold at the
+deadline is sold at the going instant-sell price. `replay.profit` is the mean
+result per offer, `profit_older_half` and `profit_newer_half` the same for
+the two halves of that window, `completion_rate` how often the whole quantity
+went round, `loss_rate` how often it lost money. A row is funded only when
+both halves were profitable, and for such a row `expected_profit` and the
+ranking are that replayed result (the weaker half), not margin times
+quantity. `replay: null` means the item's recent buckets were not read; such
+a row is never funded. `plan_reason` says whether slots or the bank decided
+the plan; pass it on in one sentence.
+
+Say what this is not: it is measured on public trades, not on the player's
+own fills. How much of the passing volume reaches one offer is an assumption
+(`docs/audit-2026-11.md`), so present `expected_profit` as what the offer
+would have made on recent trading under that assumption, never as a
+forecast.
+
+**`gp_per_slot_hour_before_shrinkage` is the raw estimate** of the rate
+model, and only means something on a row without `replay`. There, when the
+two are far apart, the raw number was mostly the thinness of the data. Say so
+rather than quoting the bigger one.
 
 **`edge_probability`** is the probability that the item's true score beats the
 market-wide average, after shrinkage. Below about 0.6, present it as a coin

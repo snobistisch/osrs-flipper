@@ -48,6 +48,79 @@ and nothing guarantees that. Everything here exists to turn a quoted margin
 into an expected value, and then to be honest about how far that expectation
 can be trusted.
 
+### 0. How the plan is chosen
+
+Sections 1–7 describe the *rate model*: a quoted spread, an assumed share of
+the traded volume, and the timing and risk that follow from them. It still
+scores every item and still produces the time band on each card. It no longer
+decides what gets bank on its own, because a walk-forward backtest on five
+weeks of real prices (November 2026, [audit notes](audit-2026-11.md)) showed
+that it could not tell whether the price would ever cross the offer: on the
+held-out fortnight it promised an 82–97% chance of a complete Active round
+trip and delivered 22–50%, and a bank run on its ranking lost money.
+
+The plan is now chosen by one policy, `filters.automatic_profile`, applied
+identically by the browser, the CLI, the agent and the dashboard:
+
+1. **Quality gates.** A quote no older than 10 minutes (15 for Away), a
+   minimum of traded volume and net ROI, at least one gp of room inside the
+   spread, no bot-supplied staples, and at most 25% of the bank in one new
+   offer (the bank-risk setting).
+2. **Measured reach.** For the 45 leading candidates the item's own recent
+   5-minute buckets are read. An offer is credited only with volume that
+   traded at a price it *beats*: a buy at B with the instant-sells that went
+   through below B, a sell at S with the instant-buys above S. Volume at
+   exactly the offer's price counts for nothing by default
+   (`touch_fill_weight`), because there the offer queues behind older ones
+   and the queue cannot be seen. The execution optimiser therefore prices
+   inside the spread when that reaches volume, and an item whose spread is a
+   single gp reaches none.
+3. **Replay.** The concrete offer — those prices, that quantity, the
+   strategy's deadline — is placed at many start times across the last day
+   and played forward on the buckets that followed each one: a unit is sold
+   only after it was bought, and stock unsold at the deadline is sold at the
+   going instant-sell price, less tax. This measures what a rate cannot: the
+   buy that fills because the price fell through it and the sell that then
+   waits above the market.
+4. **Evidence before bank.** A row is funded only if that replay made money
+   in *both* halves of its window. An edge that shows in one half came from
+   one move of the price; requiring both was the single largest gain in the
+   backtest. Funded rows are ranked and sized on the replayed result (the
+   weaker half), in the strategy's own unit: per slot-hour for Active, per
+   flip for Away and Max profit.
+5. **Slots and bank together.** The funded sizes are the ones that maximise
+   that objective under both constraints (`engine.select_portfolio`, an exact
+   small knapsack). Ranking each item alone and funding from the top is right
+   only when slots are what runs out; when the bank runs out first, a flip
+   that earns slightly less on a tenth of the coins beats one that crowds
+   three others out. The plan says which of the two decided it.
+
+The highest expected profit per offer is usually not the highest return on
+coins or per hour: on a live snapshot the two top-eights shared one item in
+eight. The backtest showed that this was not what made the old
+recommendations poor, though. Re-ranking the old model on EV per offer, on
+ROI, on gp per slot-hour or on gp per capital-hour changed nothing or
+deployed nothing; what mattered was whether margin and fill had been checked
+against the item's actual price path. With that in place, ranking Active on
+profit per offer or per slot-hour gave the same result within noise.
+
+**What this rests on.** The replay is measured on public trades, not on your
+fills. Two things about a private offer cannot be read from them: whether an
+offer at exactly the last traded price fills, and what share of the volume
+that crosses your price reaches you rather than someone else. The model
+assumes "no" and one sixteenth; the backtest was run with the share at 3%,
+10% and 30% under both answers to the first question. The policy beat the
+old Python ranking under most of those assumptions, and its worst case over
+them was better in every strategy; but for Max profit the old ranking earns
+more *if* offers at the traded price do fill, and the policy was not shown
+to beat the old browser plan there. For Active it beat the old browser plan
+only on the conservative assumptions: with a 30% share, or if unsold stock
+is left standing rather than sold at the deadline, the old browser plan did
+as well or better, because it puts four times as much of the bank to work.
+The amounts the backtest reports are what a deliberately conservative
+simulator allows, not a profit forecast. Logging real offers with
+`journal.py` is what turns these assumptions into measurements.
+
 ### 1. A slot is time, not a container
 
 Free-to-play has 3 GE offer slots, members 8. The binding constraint is not
@@ -220,6 +293,13 @@ What it does:
   live hour the snapshot landed in is the wrong rate.
 - **Never bids under the touch.** Dip bids are an Away tool for an offer
   nobody watches; a Max profit buy is relisted and repriced instead.
+
+Whether this strategy's picks are good depends on something public data
+cannot settle. In the November 2026 backtest the plan described in section 0
+beat the old per-flip ranking when an offer needs to beat the traded price to
+fill, and lost to it clearly when an offer at exactly the traded price fills
+as well; in the first case the old ranking drew the bank down by 29%. Treat
+Max profit as the least validated of the three.
 
 Time is information here, not the ranking. Every pick still shows the
 P50/P80/P90 band, P(full trip within 24h), the re-check and cancel-by times,
@@ -417,24 +497,19 @@ instead of ranking anyway.
 
 The browser is deliberately one-click. It derives freshness, minimum volume,
 net ROI, undercut room, maximum unit price and bot-supply gates from the bank,
-account and Active/Away strategy. The **Max bank per trade** slider sets
-how much of the total bank one new recommendation may commit, from 10% to 100%
-(25% by default). Raising it can put more cash behind the strongest opportunity,
-but also concentrates more of the bank in one item; the total plan can never
-commit more than the available bank. Above the default, quantity sizing also
-moves gradually from the 80%-completion size toward the size that only clears
-at the average rate; the card then shows the lower completion odds. The Active
-plan uses only direct live quotes: rows reconstructed from hourly averages stay
-searchable, but cannot receive bank automatically. At the default risk setting
-it funds the 80%-completion size, rejects a market where even one unit fails to
-round-trip within two hours in one case out of five, rejects a row that misses
-the completion target, and no longer assumes that moving one tick captures most
-of all traded volume. Known sharp falls,
-dumping, regime shifts, volatility spikes and poor fills are rejected too. The
-planner may leave a slot or part of the bank unused when market volume or buy
-limits cannot absorb more cash safely. Each Active card states when to re-check
-an untouched offer (its buy leg's P90, at most 45 minutes) and when to cancel
-what is left; a saved flip shows these as reminders.
+account and strategy; the Python tools apply the same profile unless a flag
+replaces one of its gates. The **Max bank per trade** slider sets how much of
+the total bank one new recommendation may commit, from 10% to 100% (25% by
+default). Raising it lets one position grow, and concentrates more of the
+bank in one item; the total plan can never commit more than the available
+bank. Nothing is funded before the deep check has run, because the evidence a
+row is funded on (section 0) does not exist until then. The planner leaves a
+slot or part of the bank unused when no further candidate made money in its
+replay; on the backtest's conservative assumptions that is most of the bank,
+and the plan note says so rather than filling slots to look busy. Each Active
+card states when to re-check an untouched offer (its buy leg's P90, at most
+45 minutes) and when to cancel what is left; a saved flip shows these as
+reminders.
 
 That strict plan is not the whole market. **All flip options** keeps every
 candidate that passed the automatic freshness, liquidity, ROI, queue-room and
@@ -540,7 +615,8 @@ The ones most worth fitting first, because they do the most work:
 
 | Parameter | What it claims | Fit it from |
 |---|---|---|
-| `competitors_at_touch` | Quiet-market floor: you are one of ~8 offers at the touch price | Journal: observed fill rate over volume at the touch |
+| `competitors_at_touch` | Quiet-market floor: you are one of 16 offers sharing the volume your price reaches (8 before November 2026; the smaller share lost less in the backtest when the true share was small) | Journal: observed fill rate over volume that crossed the offer |
+| `touch_fill_weight` | An offer at exactly the last traded price earns none of the volume traded there (0) | Journal: fill rate of offers at the traded price against offers one tick inside it |
 | `aggressiveness_scale` | How quickly price improvement reaches its capture ceiling | Journal: fill rate against distance from the touch |
 | `fill_rate_log_sigma` | Queue-position uncertainty in the fill rate, centred to mean one | `journal.py calibration`: censored fit of the log error |
 | `volume_forecast_log_sigma` | Error of forecasting the next hours' volume (0.6; measured 0.46–0.81 on cached series) | Tick archive, once it holds weeks |
@@ -553,7 +629,15 @@ The ones most worth fitting first, because they do the most work:
 | `risk_aversion_eta` | Price risk between the legs | Journal, against a target Sharpe |
 
 There is **no journal outcome data yet** (no `journal.db` existed when the
-fill-time model was revised), so none of these widths is fitted to real fills.
+fill-time model was revised, nor at the November 2026 audit), so none of
+these constants is fitted to real fills. The backtest in
+[the audit notes](audit-2026-11.md) validates the *selection* out of sample
+against public trades under stated fill assumptions; it cannot validate the
+assumptions themselves. On the held-out fortnight the funded Active rows
+realised 98% of their expected profit and the predicted chance of a complete
+trip was off by 11 points on average (56 for the rate model alone), but 70%
+of them finished inside their own 80% and 90% time bounds rather than 80%
+and 90%, and Away and Max profit realised 31% and 44% of what was expected.
 The fallback is deliberately conservative: the volume term is measured from
 public series, the unverified term widens rather than narrows, and the sizing
 policy keeps a fifth of trips as the expected miss rather than four fifths.
@@ -609,8 +693,12 @@ five extra minutes after its memory TTL. A cold start fails clearly. Concurrent
 requests are coalesced. The collector never archives stale fallbacks, records
 the API's bucket timestamp and exits nonzero when a one-shot poll fails.
 
-v1 and v2 of the API return byte-identical payloads on every route used here,
-so the client stays on v1 with the base URL configurable.
+v1 and v2 of the API are no longer interchangeable (checked 2026-11-13): the
+bulk routes still agree, but v2 `/timeseries` rejects `timestep` and wants
+`lookback`, and v2 averages carry two decimals where v1 returns whole gp. The
+client speaks v1. The bulk routes also serve any past bucket for every item
+at once (`/5m?timestamp=`, `/1h?timestamp=`); the backtest builds its history
+from those, one request at a time, and nothing in the live tools uses them.
 
 ### The 24h series does not mean what it looks like
 

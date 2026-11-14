@@ -19,8 +19,13 @@ tax, buy limits, fill estimates, and risk-aware slot allocation.
 4. Save offers to track them. Saved commitments reserve bank across strategy
    changes; keep their status up to date as you trade.
 
-The planner uses eight GE slots for Members and three for Free-to-play.
-Active ranks expected profit per occupied slot-hour while you watch. Away
+The planner uses eight GE slots for Members and three for Free-to-play. A
+flip gets bank only if its exact offer, replayed on the item's own last day
+of 5-minute trading, made money in both halves of that day; the funded sizes
+are then chosen under the slot and the bank limit together, and the plan says
+which of the two decided it. Often that leaves slots or most of the bank
+unused. Active ranks that replayed profit per occupied slot-hour while you
+watch. Away
 (next check in 1–12 hours, overnight included) estimates inventory bought
 while you are gone — including bids under today's price on items that
 measurably bounce back — and a separate selling phase after you return.
@@ -31,7 +36,10 @@ slow flip can rank first, and its time band says how slow.
 dislocations. The app provides guidance; all in-game orders are manual.
 
 Prices come from reported trades, not a public order book. Fill times,
-probabilities, and profits are estimates. An Active flip shows a time band —
+probabilities, and profits are estimates: the replay is measured on public
+trades, and how much of the passing volume reaches *your* offer is an
+assumption until you log real offers (see
+[what the backtest can and cannot show](docs/audit-2026-11.md)). An Active flip shows a time band —
 typical (median), 80% and 90% — with the chance the whole quantity is bought
 and sold within the window, and a time after which an untouched offer should
 be re-checked and repriced. None of these is a guarantee. The model includes integer GP
@@ -80,8 +88,32 @@ python3 agent.py portfolio list
 ```
 
 Use `--account free-to-play` for the F2P profile and `--help` for available
-options. The browser applies additional selection gates, while Python display
-filters default to off; their portfolios can differ despite a shared model.
+options. The CLI, the agent and the dashboard apply the same selection policy
+as the browser, so the same market gives the same plan; a display-filter flag
+replaces one of its gates, and `--no-policy` ranks on the rate model alone as
+before November 2026.
+
+### Backtest
+
+A walk-forward backtest replays the planner on real price history: decide on
+data up to a moment, realise the offers on what traded afterwards. It needs
+the dashboard requirements (numpy) and about 2.5 hours for the first
+download, which is resumable:
+
+```bash
+.venv/bin/python -m backtest fetch      # 35 days of 5m + 90 days of 1h buckets into data/
+.venv/bin/python -m backtest build      # raw buckets -> data/panel
+.venv/bin/python -m backtest run --period tune       # or: --period holdout
+.venv/bin/python -m backtest smoke      # seconds, on the committed fixture
+```
+
+`run` writes a result file and a Markdown report under `data/results/`;
+`--method`, `--strategy`, `--capital` and `--account` narrow it, and
+`--baseline-html` (a saved `docs/index.html`) adds the earlier browser plan
+as a baseline. Every result is produced under six fill assumptions, because
+public trades cannot say what a private offer would have filled. Method,
+results and limits are in the
+[November 2026 audit](docs/audit-2026-11.md) (in Dutch).
 
 For the tick collector, trade journal, watch alerts, and storage details, see
 [Local tools and storage](docs/operations.md).
@@ -95,6 +127,7 @@ For the tick collector, trade journal, watch alerts, and storage details, see
 | `api.py`, `exemptions.py`, `tax_exempt.json` | Market data and tax exemptions |
 | `app.py`, `cli.py`, `agent.py` | Dashboard, terminal, and agent interfaces |
 | `archive.py`, `collect.py`, `journal.py`, `storage.py` | Local history, outcomes, and safe persistence |
+| `backtest/` | Walk-forward backtest on real price history |
 | `tests/` | Python regression tests and executable browser tests |
 | `docs/*.md` | Model, operations, development, and historical audit notes |
 | `skills/osrs-flipper/` | Agent usage and output contract |
@@ -109,13 +142,15 @@ With the virtual environment above and Node.js 22 or later:
 .venv/bin/ruff check .
 .venv/bin/python -m unittest -q
 node --test tests/browser.test.cjs
+.venv/bin/python -m backtest smoke
 ```
 
 GitHub Actions checks Python 3.9 and 3.13. There is no npm build. Calculation
 changes need matching Python and JavaScript updates; see
 [Development](docs/development.md) for test coverage and maintenance guidance.
-The [September](docs/audit-2026-09-13.md) and
-[October 2026](docs/audit-2026-10-01.md) audits record fixes and remaining
-limitations (in Dutch).
+The [September](docs/audit-2026-09-13.md),
+[October](docs/audit-2026-10-01.md) and
+[November 2026](docs/audit-2026-11.md) audits record fixes and remaining
+limitations (in Dutch); the last one holds the backtest.
 
 Not affiliated with Jagex or the OSRS Wiki.

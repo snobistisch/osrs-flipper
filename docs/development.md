@@ -13,6 +13,7 @@ python3 -m venv .venv
 .venv/bin/ruff check .
 .venv/bin/python -m unittest -q
 node --test tests/browser.test.cjs
+.venv/bin/python -m backtest smoke
 .venv/bin/python -m compileall -q -x '/\.venv/' .
 .venv/bin/python -m pip check
 ```
@@ -43,7 +44,9 @@ working from the repository root. To run one module:
 | `test_audit.py` | Regression cases for invalid data, arithmetic, archive integrity, and persistence |
 | `test_app.py` | Streamlit landing page and dashboard smoke tests |
 | `test_docs_port.py` | Shared Python/JavaScript constants and static browser guards |
-| `test_parity.py` | Executable Python/JavaScript parity: tax, fees, fills, scores, shrinkage, history and execution choice (needs Node; skipped without it) |
+| `test_parity.py` | Executable Python/JavaScript parity: tax, fees, fills, scores, shrinkage, history, execution choice, rounding, reach, replay, portfolio selection, and the whole funded plan on a slice of real prices, equal to the gp (needs Node; skipped without it) |
+| `test_selection.py` | Measured reach, offer replay, slot-and-bank selection against brute force, the automatic profile, deep-check targeting and CLI overrides |
+| `test_backtest.py` | The backtest harness: no look-ahead, simulator rules, buy limits, balanced books, deterministic output |
 | `browser.test.cjs` | Executable browser behavior and compilation of the complete inline script |
 
 The Streamlit tests skip when dashboard dependencies are missing. Install
@@ -57,8 +60,23 @@ browser app carries its own JavaScript implementation in `docs/index.html`.
 Update both when changing formulas or shared configuration. Static guards
 check constants and key structures. `test_parity.py` runs the same inputs
 through both implementations and compares the results; extend it whenever a
-shared formula changes. Browser-only gates (automatic plan selection, bank-risk
-sizing, saved reservations) are intentionally not mirrored in Python.
+shared formula changes. Plan selection is shared too:
+`filters.automatic_profile` and `automaticFilterProfile` are one policy, and
+`PlanParityTests` runs both on the fixture (`tests/js_plan.cjs` drives the
+page's own code under Node). Two details bite when porting: Python's
+`round()` rounds halves to even where `Math.round` rounds them up, so use
+`engine.round_half_up`; and a float product such as `45 * (1 - 1/3)` is not
+30. Saved reservations and the bank-risk slider exist only in the browser;
+the CLI has `--bank-risk`.
+
+`backtest/` may import numpy; `engine.py`, `stats.py`, `filters.py`, the CLI
+and the agent stay on the standard library. `tests/fixtures/backtest_panel.npz`
+is a slice of real OSRS Wiki price history, cut with
+`python3 -m backtest fixture`; the numbers a run on it prints mean nothing.
+Before changing the selection policy, run the backtest on the tuning period
+and compare against `current` and `browser_baseline`; evaluate on the
+held-out period once, after the change is final
+([method](audit-2026-11.md)).
 
 Keep browser requests compatible with CORS: do not add a `User-Agent` header.
 The Python client supplies one; customize `USER_AGENT` in `api.py` when deploying
@@ -79,5 +97,6 @@ real browser.
 
 Model parameters remain assumptions until calibrated against recorded fills.
 See [model notes](model.md) and the historical
-repository audits of [September](audit-2026-09-13.md) and
-[October 2026](audit-2026-10-01.md) for known limitations.
+repository audits of [September](audit-2026-09-13.md),
+[October](audit-2026-10-01.md) and [November 2026](audit-2026-11.md) for
+known limitations.
