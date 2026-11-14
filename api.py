@@ -23,10 +23,11 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from storage import write_json
 
-# v1 and v2 return byte-identical payloads on every route used here (/latest,
-# /5m, /1h, /mapping, /timeseries) — checked directly, not assumed. There is
-# nothing to gain by moving, so the version stays configurable rather than
-# switched: if v2 ever grows a route worth having, pass base_url to WikiClient.
+# v1 and v2 are NOT interchangeable any more (checked 2026-11-13). The bulk
+# routes still agree, but v2 /timeseries rejects ``timestep`` and wants
+# ``lookback`` (6h, 24h, 7d, 30d, 6m, 1y), and v2 averages carry two decimals
+# where v1 returns whole gp. This client speaks v1; moving it to v2 means
+# changing the /timeseries call and every place that assumes integer prices.
 BASE_URL = "https://prices.runescape.wiki/api/v1/osrs"
 BASE_URL_V2 = "https://prices.runescape.wiki/api/v2/osrs"
 # Wiki AUP wants a way to reach whoever runs this. If you fork or deploy the
