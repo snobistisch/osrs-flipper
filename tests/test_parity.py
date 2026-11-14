@@ -668,5 +668,137 @@ class ParityTests(unittest.TestCase):
                 (result["choices"], result["capitalPrice"], result["binding"]))
 
 
+try:
+    import numpy
+except ImportError:                      # the CLI and agent stay stdlib-only
+    numpy = None
+
+FIXTURE = Path(__file__).parent / "fixtures" / "backtest_panel.npz"
+
+
+@unittest.skipIf(NODE is None or numpy is None or not FIXTURE.exists(),
+                 "Node.js, numpy and the committed fixture are required")
+class PlanParityTests(unittest.TestCase):
+    """The whole plan, both implementations, one real market.
+
+    The fixture is a slice of real OSRS Wiki price history. Each case builds
+    the market snapshot a player would have seen at one moment, runs
+    filters.rank_flips under the automatic profile, runs the browser's own
+    screen -> deep check -> buildPlan on the same snapshot under Node, and
+    requires the same items at the same prices and quantities, the same
+    expected profit to the gp, and the same stated reason.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import exemptions
+        from backtest import browser, run
+        from backtest.panel import Panel
+        cls.browser, cls.walk_forward = browser, run
+        cls.panel = Panel.load(FIXTURE)
+        cls.exempt = exemptions.resolve(cls.panel.items)
+        cls.planner = browser.BrowserPlanner()
+        cls.times = run.segments(cls.panel, "active", "all")[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.planner.close()
+
+    def plans(self, strategy, t, capital, account="members"):
+        import exemptions
+        mode, horizon, _, _ = self.walk_forward.STRATEGIES[strategy]
+        panel = self.panel
+        snapshot = panel.snapshot(t)
+        nature = exemptions.nature_rune_cost(snapshot.quotes)
+        config = filters.automatic_profile(filters.FilterConfig(
+            capital=capital, account=account, trade_mode=mode,
+            overnight_hours=horizon if mode == "overnight"
+            else engine.DEFAULT_OVERNIGHT_HOURS, nature_rune_cost=nature))
+
+        def series(item_id):
+            return panel.recent_5m(item_id, t, self.browser.RECENT_HOURS)
+        result = filters.rank_flips(
+            snapshot.items, snapshot.quotes, snapshot.activity_5m,
+            snapshot.activity_1h, config, t,
+            fetch_history=lambda item_id: panel.history_6h(item_id, t),
+            exempt=self.exempt, fetch_recent=series, fetch_reach=series)
+        python = [row for row in result.rows if row.allocated_quantity]
+        key = self.planner.prepare(panel, snapshot, capital, account, mode,
+                                   horizon, nature)
+        try:
+            javascript = self.planner.allocate(key, capital, config.slots)
+        finally:
+            self.planner.release(key)
+        return python, javascript, result
+
+    def test_python_and_browser_fund_the_same_plan_to_the_gp(self):
+        funded = 0
+        bindings = set()
+        for strategy in ("active", "overnight", "profit"):
+            for t in (self.times[3], self.times[40]):
+                for capital in (2_000_000, 150_000):
+                    python, javascript, result = self.plans(strategy, t, capital)
+                    label = "{} t={} bank={}".format(strategy, t, capital)
+                    self.assertEqual(
+                        sorted((r.item_id, r.buy, r.sell, r.allocated_quantity,
+                                r.allocated_capital) for r in python),
+                        sorted((r["id"], r["buy"], r["sell"], r["qty"],
+                                r["capital"]) for r in javascript), label)
+                    browser = {row["id"]: row for row in javascript}
+                    for row in python:
+                        other = browser[row.item_id]
+                        self.assertEqual(round(row.allocated_expected_gp),
+                                         round(other["expected"]), label)
+                        self.assertClose(row.allocated_expected_gp,
+                                         other["expected"], label, abs_tol=1e-6)
+                        self.assertClose(row.replay.stable_profit,
+                                         other["replayStable"], label,
+                                         abs_tol=1e-6)
+                        self.assertClose(row.p_fill, other["pFill"], label)
+                        self.assertEqual(row.plan_reason, other["reason"], label)
+                    self.assertLessEqual(
+                        sum(row.allocated_capital for row in python), capital)
+                    funded += len(python)
+                    if result.selection is not None:
+                        bindings.add(result.selection.binding)
+        # The cases must actually exercise the plan, not agree on nothing.
+        self.assertGreater(funded, 10)
+        self.assertGreater(len(bindings), 1)
+
+    def test_free_to_play_profile_matches_too(self):
+        python, javascript, _ = self.plans("active", self.times[20], 500_000,
+                                           account="free-to-play")
+        self.assertLessEqual(len(python), 3)
+        self.assertEqual(
+            sorted((r.item_id, r.buy, r.sell, r.allocated_quantity)
+                   for r in python),
+            sorted((r["id"], r["buy"], r["sell"], r["qty"])
+                   for r in javascript))
+
+    assertClose = ParityTests.assertClose
+
+    def test_profile_constants_are_the_same_policy(self):
+        for capital, account, mode in ((5_000_000, "members", "active"),
+                                       (20_000_000, "members", "overnight"),
+                                       (20_000_000, "free-to-play", "profit")):
+            profile = filters.automatic_profile(filters.FilterConfig(
+                capital=capital, account=account, trade_mode=mode))
+            browser = js("automaticFilterProfile({}, \"{}\", \"{}\", 25)".format(
+                capital, account, mode))[0]
+            self.assertEqual(
+                (profile.max_quote_age, profile.min_thin_volume_1h,
+                 profile.min_roi, profile.min_undercut_depth,
+                 profile.max_price, profile.max_position_capital,
+                 profile.hide_botted, profile.funding_evidence,
+                 profile.replay_statistic, profile.replay_ranking,
+                 profile.allocation, profile.active_objective),
+                (browser["maxQuoteAge"], browser["minVolume1h"],
+                 browser["minRoi"], browser["minUndercutDepth"],
+                 browser["maxPrice"], browser["maxPositionCapital"],
+                 browser["hideBotted"], browser["fundingEvidence"],
+                 browser["replayStatistic"], browser["replayRanking"],
+                 browser["allocation"], browser["activeObjective"]))
+
+
 if __name__ == "__main__":
     unittest.main()
