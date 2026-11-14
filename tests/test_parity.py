@@ -6,9 +6,8 @@ through engine/stats/filters here and through the real inline script of
 docs/index.html under Node, and the results must agree.
 
 Tolerances: integer GP arithmetic must match exactly. Probabilities use a
-relative tolerance of 1e-5, because the browser's normal CDF is the
-Abramowitz-Stegun approximation (absolute error below 1.5e-7) rather than erf;
-model gp values additionally allow 0.01 gp.
+relative tolerance of 1e-5 for the transcendental functions the two runtimes
+implement separately; model gp values additionally allow 0.01 gp.
 """
 from __future__ import annotations
 
@@ -540,6 +539,28 @@ class ParityTests(unittest.TestCase):
                              browser["breakdown"]["capitalNeeded"], label)
             self.assertClose(breakdown.ranking_value,
                              browser["breakdown"]["rankingValue"], label)
+
+    def test_half_way_values_round_the_same_way(self):
+        """Regression, audit 2026-11: Python's round() sends halves to the
+        even neighbour and Math.round sends them up, so the price grid and
+        the reference price differed by one gp on exactly these inputs. On
+        real data that changed one or two offers in a third of the simulated
+        bank histories."""
+        maxima = list(range(0, 401))
+        browser = js(*["concessionPoints({})".format(m) for m in maxima])
+        for maximum, points in zip(maxima, browser):
+            self.assertEqual(filters._concession_points(maximum), points,
+                             "concession grid for {}".format(maximum))
+        # 30 * 0.35 = 10.5: the case that used to give 10 here, 11 there.
+        self.assertIn(11, filters._concession_points(30))
+        halves = [(100, 1, 101, 1), (7, 3, 8, 3), (2, 1, 5, 1), (10, 2, 11, 6)]
+        self.assertEqual(
+            js(*["referencePrice({}, {}, {}, {})".format(*case)
+                 for case in halves]),
+            [engine.reference_price(*case) for case in halves])
+        self.assertEqual(engine.reference_price(100, 1, 101, 1), 101)
+        self.assertEqual([engine.round_half_up(v) for v in
+                          (0.5, 1.5, 2.5, 2.4999, -0.5)], [1, 2, 3, 2, 0])
 
 
 if __name__ == "__main__":

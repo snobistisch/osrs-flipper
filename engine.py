@@ -455,6 +455,17 @@ DEFAULT_CALIBRATION = Calibration()
 # gp formatting
 # ---------------------------------------------------------------------------
 
+def round_half_up(value: float) -> int:
+    """Round to the nearest integer, halves upward: JavaScript's Math.round.
+
+    Python's round() sends halves to the even neighbour, so 12.5 becomes 12
+    here and 13 in the browser. Every rounding that decides a price, a
+    quantity or a bucket count goes through this, or the two implementations
+    drift apart by one gp on exactly the inputs nobody tests by hand.
+    """
+    return int(math.floor(value + 0.5))
+
+
 def parse_gp(text: str) -> int:
     """Parse a gp amount the way players write it: '250k', '1.5m', '2b',
     '1,000,000', '500k gp'. Raises ValueError for anything else."""
@@ -523,7 +534,7 @@ def reference_price(
         # priced at some point but nothing traded in either bucket
         return avg_5m if avg_5m is not None else avg_1h
     total_volume = sum(vol for _, vol in parts)
-    return int(round(sum(avg * vol for avg, vol in parts) / total_volume))
+    return round_half_up(sum(avg * vol for avg, vol in parts) / total_volume)
 
 
 class Executable(NamedTuple):
@@ -588,8 +599,8 @@ def executable_prices(
 
     if ref_low is None or ref_high is None:
         return Executable(buy, sell, False)
-    reference_buy = int(round(ref_low))
-    reference_sell = int(round(ref_high))
+    reference_buy = round_half_up(ref_low)
+    reference_sell = round_half_up(ref_high)
     if reference_buy >= reference_sell:
         return Executable(buy, sell, False)      # not two-sided either
 
@@ -2202,12 +2213,14 @@ def history_view(points: List[dict], buy: int, sell: int,
 
     return HistoryView(
         buckets=buckets,
-        baseline_low=int(round(baseline_low)) if baseline_low is not None else None,
-        baseline_high=int(round(baseline_high)) if baseline_high is not None else None,
+        baseline_low=(round_half_up(baseline_low)
+                      if baseline_low is not None else None),
+        baseline_high=(round_half_up(baseline_high)
+                       if baseline_high is not None else None),
         buy_fill_share=buy_fill_share, sell_fill_share=sell_fill_share,
         fill_share=min(buy_fill_share, sell_fill_share), trend=trend,
         dislocation=dislocation,
-        median_mid=int(round(median_mid)) if median_mid else None,
+        median_mid=round_half_up(median_mid) if median_mid else None,
         elevation=elevation, volatility=volatility, ou=ou, regime_score=regime,
         mean_volume=(sum(volumes) / len(volumes)) if volumes else 0.0,
         low_volume_per_hour=(
@@ -2242,7 +2255,7 @@ def execution_evidence_view(
         return None
     timestamps = [float(point["timestamp"]) for point in valid
                   if isinstance(point.get("timestamp"), (int, float))]
-    expected = max(1, int(round(window_hours / bucket_hours)))
+    expected = max(1, round_half_up(window_hours / bucket_hours))
     if timestamps:
         newest = max(timestamps)
         windowed = [point for point in valid
@@ -2258,8 +2271,8 @@ def execution_evidence_view(
     if not traded:
         return None
 
-    margins = [net_margin(int(round(point["avgLowPrice"])),
-                          int(round(point["avgHighPrice"])), tax_exempt, bond)
+    margins = [net_margin(round_half_up(point["avgLowPrice"]),
+                          round_half_up(point["avgHighPrice"]), tax_exempt, bond)
                for point in traded]
     profitable = sum(margin > 0 for margin in margins)
     positive_share = (profitable + 2) / (len(traded) + 4)

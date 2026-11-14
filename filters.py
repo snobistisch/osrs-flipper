@@ -329,7 +329,7 @@ def _concession_points(maximum: int) -> List[int]:
     if maximum <= 12:
         return list(range(maximum + 1))
     values = {0, 1, 2, maximum}
-    values.update(int(round(maximum * fraction))
+    values.update(engine.round_half_up(maximum * fraction)
                   for fraction in (0.05, 0.10, 0.20, 0.35, 0.50, 0.75))
     return sorted(max(0, min(maximum, value)) for value in values)
 
@@ -879,7 +879,8 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         elevation=view.elevation, volatility=view.volatility,
         mean_reverting=view.mean_reverting,
         half_life_hours=view.half_life_hours,
-        ou_level=int(round(view.ou.level_gp)) if view.ou is not None else None,
+        ou_level=(engine.round_half_up(view.ou.level_gp)
+                  if view.ou is not None else None),
         regime_score=view.regime_score,
         volume_1h_total=row.volume_1h_total,
         history_mean_volume=view.mean_volume,
