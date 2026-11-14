@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 import unittest
+from dataclasses import replace
 
 import engine
 import filters
@@ -283,6 +284,124 @@ class PolicyTests(unittest.TestCase):
                              ("max_position_capital", 0)):
             with self.assertRaises(ValueError):
                 filters.FilterConfig(**{field: value})
+
+
+class DeepTargetTests(unittest.TestCase):
+    """Which rows the per-item history budget is spent on."""
+
+    def rows(self, count=60, reference_every=3):
+        items = {1: Item(1, "Base", True, 1000, 1, None)}
+        quotes = {1: Quote(110, NOW - 30, 100, NOW - 30)}
+        activity = {1: Activity(110, 4000, 100, 4000)}
+        base = filters.screen(items, quotes, activity, activity,
+                              filters.FilterConfig(), NOW).rows[0]
+        return [replace(base, item_id=index, name="Item {}".format(index),
+                        priced_from_reference=index % reference_every == 0,
+                        ranking_value=float(count - index))
+                for index in range(count)]
+
+    def test_a_third_of_the_budget_goes_to_reference_priced_rows(self):
+        rows = self.rows()
+        config = filters.FilterConfig(deep_reference_share=1.0 / 3.0)
+        targets = filters._deep_targets(rows, 45, config)
+        self.assertEqual(len(targets), 45)
+        reference = [i for i in targets if rows[i].priced_from_reference]
+        # Regression, audit 2026-11: 45 * (1 - 1/3) is 30.000000000000004 in
+        # floating point, and rounding that up gave 31 direct rows here where
+        # the browser's Math.ceil(45 * 2 / 3) gives 30.
+        self.assertEqual((len(targets) - len(reference), len(reference)),
+                         (30, 15))
+        self.assertEqual(targets[:3], [1, 2, 4])     # the best direct rows
+
+    def test_without_a_share_the_leaders_are_taken_in_order(self):
+        rows = self.rows()
+        self.assertEqual(filters._deep_targets(rows, 45, filters.FilterConfig()),
+                         list(range(45)))
+
+    def test_rows_the_preferences_hide_do_not_use_the_budget(self):
+        rows = self.rows(count=10)
+        rows[0] = replace(rows[0], quote_age=5_000)
+        rows[1] = replace(rows[1], thin_volume_1h=3)
+        config = filters.FilterConfig(max_quote_age=600, min_thin_volume_1h=40)
+        self.assertEqual(filters._deep_targets(rows, 4, config), [2, 3, 4, 5])
+        self.assertEqual(filters.preference_stage(rows[0], config),
+                         "quote too old")
+        self.assertEqual(filters.preference_stage(rows[1], config),
+                         "volume too thin")
+        self.assertIsNone(filters.preference_stage(rows[2], config))
+
+    def test_short_lists_are_checked_in_full(self):
+        rows = self.rows(count=7)
+        config = filters.FilterConfig(deep_reference_share=1.0 / 3.0)
+        self.assertEqual(sorted(filters._deep_targets(rows, 45, config)),
+                         list(range(7)))
+
+
+class ProfileTests(unittest.TestCase):
+    def test_profile_values_by_bank_and_strategy(self):
+        low = filters.automatic_profile(filters.FilterConfig(capital=5_000_000))
+        self.assertEqual((low.max_quote_age, low.min_thin_volume_1h,
+                          low.min_roi, low.min_undercut_depth),
+                         (600, 100, 0.003, 1))
+        self.assertEqual((low.max_price, low.max_position_capital),
+                         (1_250_000, 1_250_000))
+        self.assertTrue(low.hide_botted)
+        self.assertEqual((low.funding_evidence, low.replay_statistic,
+                          low.replay_ranking, low.allocation),
+                         ("replay", "stable", True, "portfolio"))
+        away = filters.automatic_profile(filters.FilterConfig(
+            capital=20_000_000, trade_mode="away"), bank_risk_percent=50)
+        self.assertEqual((away.max_quote_age, away.min_thin_volume_1h,
+                          away.min_roi, away.max_position_capital),
+                         (900, 20, 0.008, 10_000_000))
+        profit = filters.automatic_profile(filters.FilterConfig(
+            capital=20_000_000, trade_mode="profit"))
+        self.assertEqual((profit.max_quote_age, profit.min_thin_volume_1h,
+                          profit.min_roi), (600, 20, 0.003))
+
+    def test_default_config_is_still_the_pipeline_without_a_policy(self):
+        config = filters.FilterConfig()
+        self.assertEqual((config.funding_evidence, config.allocation,
+                          config.replay_ranking, config.max_position_capital,
+                          config.deep_reference_share),
+                         ("any", "proportional", False, None, 0.0))
+
+    def test_the_bank_binding_is_reported_when_coins_cut_a_row_short(self):
+        # The market supports 37 units of 100 gp, but other offers hold most
+        # of the bank and only 1,000 gp is free. The selection never sees the
+        # sizes it cannot afford; the plan must still say the bank decided.
+        items = {1: Item(1, "Only", True, 1000, 1, None)}
+        quotes = {1: Quote(130, NOW - 30, 100, NOW - 30)}
+        activity = {1: Activity(130, 1000, 100, 1000)}
+        config = filters.FilterConfig(capital=10_000, allocation="portfolio")
+        screened = filters.screen(items, quotes, activity, activity, config, NOW)
+        self.assertEqual(screened.rows[0].qty_per_window, 37)
+        roomy = filters.allocate(screened, config)
+        self.assertEqual(roomy.selection.binding, "none")
+        tight = filters.allocate(screened, replace(config, capital=1_000))
+        row = tight.rows[0]
+        self.assertLess(row.allocated_quantity, 37)
+        self.assertLessEqual(row.allocated_capital, 1_000)
+        self.assertEqual(tight.selection.binding, "capital")
+        self.assertGreater(tight.selection.capital_price, 0)
+        self.assertIn("bank is the limit", row.plan_reason)
+
+    def test_cli_flags_replace_single_gates_of_the_policy(self):
+        import cli
+        opts = cli.parse_args(["--capital", "20m"])
+        config = cli.config_from(opts, 100)
+        self.assertEqual(config, filters.automatic_profile(
+            filters.FilterConfig(capital=20_000_000, nature_rune_cost=100)))
+        opts = cli.parse_args(["--capital", "20m", "--min-vol", "500",
+                               "--bank-risk", "50", "--max-price", "2m"])
+        config = cli.config_from(opts, 100)
+        self.assertEqual((config.min_thin_volume_1h, config.max_price,
+                          config.max_position_capital, config.min_roi),
+                         (500, 2_000_000, 10_000_000, 0.003))
+        off = cli.config_from(cli.parse_args(["--no-policy"]), 100)
+        self.assertEqual(off, filters.FilterConfig(nature_rune_cost=100))
+        with self.assertRaises(ValueError):
+            cli.config_from(cli.parse_args(["--bank-risk", "5"]), 100)
 
 
 if __name__ == "__main__":
