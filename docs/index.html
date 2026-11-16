@@ -5380,6 +5380,14 @@ function renderTerminalStats(config) {
    allocatePortfolio has already worked out and which the table buries in two
    columns twelve apart. */
 
+/* When a careful Active plan leaves most of the bank idle, name the setting
+   that decides how much it commits. */
+const ORDER_SIZE_HINT = "Order size is set to careful. Balanced or large commit more of the bank; neither has been tested on held-out data.";
+function orderSizeHint(config, committed) {
+  return config.strategy === "active" && normalizeOrderSize(config.orderSize) === "careful"
+    && committed < 0.25 * config.capital ? ORDER_SIZE_HINT : "";
+}
+
 function renderPlan(config) {
   const cards = $("#plan-cards");
   const savedIds = new Set(loadExecutions()
@@ -5477,7 +5485,7 @@ function renderPlan(config) {
     ? entry.lock.commit : (entry.row.allocated || 0)), 0);
   const locked = state.slotLocks.length;
   if (locked) {
-    parts.push(`${locked} saved trade${locked === 1 ? " keeps" : "s keep"} its buy, quantity and sell target across refreshes. Saved commitments reserve bank until you mark the flip done or release its slot.`);
+    parts.push(`${locked} saved trade${locked === 1 ? " keeps its" : "s keep their"} buy, quantity and sell target across refreshes. Saved commitments reserve bank until you mark the flip done or release its slot.`);
   }
   if (committed > config.capital) {
     parts.push(`Locked commitments exceed the current ${formatGp(config.capital)} bank. No new trade is funded until you raise the bank or unlock a slot.`);
@@ -5487,6 +5495,8 @@ function renderPlan(config) {
       `The remainder is liquid because the quantity-aware candidates, shared limits, ` +
       `reachable volume or category concentration do not justify deploying it.`);
   }
+  const hint = orderSizeHint(config, committed);
+  if (hint) parts.push(hint);
   if (slots > state.planEntries.length) {
     parts.push(`${slots - state.planEntries.length} slot${
       slots - state.planEntries.length === 1 ? " is" : "s are"} better left open: no other candidate made money when its offer was replayed on its own recent trading.`);

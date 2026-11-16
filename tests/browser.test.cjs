@@ -415,6 +415,18 @@ test('an unknown item on both APIs keeps timeseries on v1', async () => {
   assert.ok(urls[urls.length - 1].includes('/api/v1/osrs/timeseries?id=4151&timestep=5m'));
 });
 
+test('a careful Active plan that leaves most of the bank idle names the setting', () => {
+  const { run } = setup();
+  const hint = (strategy, orderSize, committed) => run(
+    `orderSizeHint({ strategy: "${strategy}", orderSize: "${orderSize}", capital: 20000000 }, ${committed})`);
+  assert.equal(hint('active', 'careful', 1100000),
+    'Order size is set to careful. Balanced or large commit more of the bank; neither has been tested on held-out data.');
+  assert.equal(hint('active', 'careful', 6000000), '');
+  assert.equal(hint('active', 'large', 1100000), '');
+  assert.equal(hint('overnight', 'careful', 1100000), '');
+  assert.equal(hint('profit', 'careful', 1100000), '');
+});
+
 test('invalid stored records cannot crash rendering', () => {
   const { run, storage } = setup();
   storage.set('osrs-flipper.executions.v1', '{}');
