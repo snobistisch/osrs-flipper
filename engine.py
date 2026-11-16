@@ -127,35 +127,6 @@ OVERNIGHT_HORIZON_PRESETS = (1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0)
 PROFIT_HORIZON_HOURS = 24.0
 
 
-@dataclass(frozen=True)
-class TradingProfile:
-    """Player/account state shared by the CLI, Streamlit and browser ports."""
-
-    account: AccountType = DEFAULT_ACCOUNT
-    mode: TradeMode = DEFAULT_TRADE_MODE
-    overnight_hours: float = DEFAULT_OVERNIGHT_HOURS
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "account", AccountType(self.account))
-        object.__setattr__(self, "mode", TradeMode(self.mode))
-        if not 1.0 <= float(self.overnight_hours) <= 24.0:
-            raise ValueError("overnight horizon must be between 1 and 24 hours")
-
-    @property
-    def slots(self) -> int:
-        return self.account.slots
-
-    @property
-    def include_members(self) -> bool:
-        return self.account.allows_members_items
-
-    @property
-    def horizon_hours(self) -> float:
-        if self.mode is TradeMode.PROFIT:
-            return PROFIT_HORIZON_HOURS
-        return (float(self.overnight_hours)
-                if self.mode is TradeMode.OVERNIGHT else float(WINDOW_HOURS))
-
 MAX_CASH_STACK = 2_147_483_647    # the game's coin cap
 # Since 30 September 2026 the GE pays in coins plus platinum tokens (1,000 gp
 # each), so a bank can hold a full coin stack and a full token stack.
@@ -768,26 +739,6 @@ def tax_boundary_undercut(sell_price: int, tax_exempt: bool = False,
     return candidate
 
 
-def break_even_sell(buy_price: int, tax_exempt: bool = False,
-                    bond: bool = False) -> int:
-    """Cheapest sell price that clears a profit of at least 1 gp per item."""
-    if tax_exempt and not bond:
-        return buy_price + 1
-    # Net proceeds are monotone, but the gap to the buy price is not bounded by
-    # the tax cap: the bond fee is uncapped. Grow the bracket until it holds a
-    # profitable price, then binary-search inside it.
-    low, high = buy_price + 1, buy_price + 1
-    while net_revenue(high, tax_exempt, bond) <= buy_price:
-        low, high = high + 1, high * 2
-    while low < high:
-        middle = (low + high) // 2
-        if net_revenue(middle, tax_exempt, bond) > buy_price:
-            high = middle
-        else:
-            low = middle + 1
-    return low
-
-
 # ---------------------------------------------------------------------------
 # Queue position
 # ---------------------------------------------------------------------------
@@ -929,44 +880,6 @@ def fill_rate(volume_per_hour: float, share: float) -> float:
     return (volume_per_hour / SECONDS_PER_HOUR) * share
 
 
-def expected_fill_seconds(qty: int, rate: float,
-                          calibration: Calibration = DEFAULT_CALIBRATION) -> float:
-    """Time for one leg of `qty` units if the rate came in exactly at `rate`.
-
-    This is the market time at the MEAN rate, not an ETA. The realised rate is
-    uncertain (see fill_estimate), and because time is quantity divided by
-    rate, a mean-one rate multiplier gives a time whose median is longer than
-    this number: with the default width only about a third of offers finish
-    by it. It was shown as the ETA and used as the ranking denominator, which
-    is how a "69 minute" flip could have a four-hour P90. Use
-    fill_time_quantile for anything shown to a player.
-
-    Floored at min_leg_seconds: on a very liquid item the arithmetic says a
-    small offer clears in under a second, but you still have to walk to the
-    Grand Exchange and collect it.
-    """
-    if qty <= 0:
-        return calibration.min_leg_seconds
-    if rate <= 0:
-        return float("inf")
-    return max(calibration.min_leg_seconds, qty / rate)
-
-
-def fill_probability(expected_seconds: float, horizon_seconds: float) -> float:
-    """P(leg completes within the horizon), treating fill time as exponential.
-
-    Exponential because offers are matched by an arrival process we cannot
-    observe: memorylessness is the honest assumption when queue position is
-    invisible. It has the right shape — most of the probability mass early,
-    a long tail of offers that simply never fill.
-    """
-    if expected_seconds == float("inf") or expected_seconds <= 0:
-        return 0.0
-    if horizon_seconds <= 0:
-        return 0.0
-    return 1.0 - math.exp(-horizon_seconds / expected_seconds)
-
-
 @dataclass(frozen=True)
 class FillEstimate:
     """Quantity distribution implied by an uncertain realised fill rate."""
@@ -1035,8 +948,6 @@ def fill_estimate(qty: float, rate: float, horizon_seconds: float,
 # leg percentiles and every number below is a closed form both ports compute
 # identically. Treating the legs as independent would average the two errors
 # away and shorten the tail — the optimistic direction for a deadline.
-
-ETA_PERCENTILES = (0.50, 0.80, 0.90)
 
 
 def normal_quantile(probability: float) -> float:
@@ -1294,38 +1205,6 @@ def remaining_buy_limit(limit: Optional[int], used: int, horizon_hours: float,
     return max(0, effective - max(0, int(used)))
 
 
-def round_trip_probability(buy_seconds: float, sell_seconds: float,
-                           horizon_seconds: float) -> float:
-    """Probability that two sequential exponential legs finish by ``horizon``.
-
-    Multiplying two independent ``P(leg < horizon)`` values overstates the
-    result because the sell cannot start until the buy completes.  This is the
-    CDF of the sum of two exponentials (an Erlang when their rates match).
-    """
-    if (horizon_seconds <= 0 or buy_seconds <= 0 or sell_seconds <= 0
-            or not math.isfinite(buy_seconds)
-            or not math.isfinite(sell_seconds)):
-        return 0.0
-    buy_rate = 1.0 / buy_seconds
-    sell_rate = 1.0 / sell_seconds
-    if math.isclose(buy_rate, sell_rate, rel_tol=1e-9, abs_tol=1e-12):
-        x = buy_rate * horizon_seconds
-        return max(0.0, min(1.0, 1.0 - math.exp(-x) * (1.0 + x)))
-    survival = ((sell_rate * math.exp(-buy_rate * horizon_seconds)
-                 - buy_rate * math.exp(-sell_rate * horizon_seconds))
-                / (sell_rate - buy_rate))
-    return max(0.0, min(1.0, 1.0 - survival))
-
-
-def stranded_inventory_probability(buy_seconds: float, sell_seconds: float,
-                                    horizon_seconds: float) -> float:
-    """Chance the buy completes but the round trip does not before return."""
-    bought = fill_probability(buy_seconds, horizon_seconds)
-    completed = round_trip_probability(buy_seconds, sell_seconds,
-                                       horizon_seconds)
-    return max(0.0, min(1.0, bought - completed))
-
-
 def fillable_quantity(volume_per_hour: float, share: float,
                       horizon_hours: float) -> int:
     """Units the market can hand you on ONE leg inside the horizon.
@@ -1341,11 +1220,6 @@ def fillable_quantity(volume_per_hour: float, share: float,
     """
     rate = fill_rate(volume_per_hour, share)
     return max(0, int(rate * horizon_hours * SECONDS_PER_HOUR))
-
-
-def leg_horizon_hours(calibration: "Calibration") -> float:
-    """How long one leg may take if the round trip is to fit in the window."""
-    return calibration.horizon_hours / LEGS_PER_ROUND_TRIP
 
 
 def flippable_qty(buy_limit, volume: int, affordable=None) -> int:
@@ -1591,15 +1465,6 @@ def alch_bonus(distance: Optional[float],
                                               - distance) / 10.0)
 
 
-def alch_profit(highalch: Optional[int], buy_price: int,
-                nature_rune_cost: int) -> Optional[int]:
-    """Profit per item from buying on the GE and alching, or None if not alchable."""
-    floor = alch_floor(highalch, nature_rune_cost)
-    if floor is None:
-        return None
-    return floor - buy_price
-
-
 # ---------------------------------------------------------------------------
 # Weekly update risk
 # ---------------------------------------------------------------------------
@@ -1814,8 +1679,8 @@ def score_flip(
     buy_work = leg_work_seconds(qty, buy_rate)
     sell_work = leg_work_seconds(qty, sell_rate)
     trip_work = buy_work + sell_work
-    # Medians, not mean-rate times: see expected_fill_seconds for why the
-    # latter finished only a third of the time.
+    # Medians, not mean-rate times: with a mean-one rate multiplier the
+    # mean-rate time is reached only about a third of the time.
     buy_seconds = fill_time_quantile(buy_work, 0.50, sigma_fill, overhead,
                                      mu_fill)
     sell_seconds = fill_time_quantile(sell_work, 0.50, sigma_fill, overhead,
@@ -2076,58 +1941,6 @@ def shrink_scores(
 # ---------------------------------------------------------------------------
 # Capital allocation
 # ---------------------------------------------------------------------------
-
-def capital_per_slot(capital: int, slots: int) -> int:
-    """Equal split. Kept for the sidebar's headline number and as the fallback
-    when nothing has been scored yet; allocate_capital is what the ranking uses."""
-    return max(1, capital // max(1, slots))
-
-
-def allocate_capital(scores: Sequence[float], capital: int, slots: int,
-                     needs: Optional[Sequence[int]] = None) -> List[int]:
-    """Split capital across the top flips in proportion to their scores.
-
-    An equal split leaves capital stranded: a 10 gp item with a 10,000 buy
-    limit can absorb 100k gp and no more, so a third of a 3m bank sitting on it
-    is a third of the bank doing nothing, while the 50k gp item that could have
-    used it is capped at a fraction of its limit.
-
-    Allocation is proportional to score, then clipped to what each flip can
-    actually absorb (`needs`), and anything freed by the clip is redistributed.
-    Only positive scores are funded — an empty slot beats a negative-expectancy
-    flip taken to look busy.
-    """
-    count = min(len(scores), max(1, slots))
-    ranked = list(scores)[:count]
-    total = sum(s for s in ranked if s > 0)
-    if total <= 0:
-        return [0] * len(ranked)
-
-    allocation = [int(capital * (s / total)) if s > 0 else 0 for s in ranked]
-    if needs is None:
-        return allocation
-
-    caps = list(needs)[:count]
-    for _ in range(3):        # a couple of passes converge; this is not an LP
-        spare = 0
-        for i, amount in enumerate(allocation):
-            cap = caps[i] if i < len(caps) else None
-            if cap is not None and amount > cap:
-                spare += amount - cap
-                allocation[i] = cap
-        if spare <= 0:
-            break
-        hungry = [i for i, amount in enumerate(allocation)
-                  if ranked[i] > 0 and (i >= len(caps) or caps[i] > amount)]
-        if not hungry:
-            break
-        weight = sum(ranked[i] for i in hungry)
-        if weight <= 0:
-            break
-        for i in hungry:
-            allocation[i] += int(spare * (ranked[i] / weight))
-    return allocation
-
 
 def allocate_portfolio(scores: Sequence[float], capital: int,
                        unit_costs: Sequence[int], needs: Sequence[int],
@@ -2600,7 +2413,6 @@ def combined_execution_evidence(
 # that can be read off the item's own recent 5-minute buckets instead of
 # being assumed: for a buy at B, the instant-sell volume in buckets whose
 # average price was below B went to offers B would have outranked.
-REACH_TIMESTEP = "5m"
 REACH_WINDOW_HOURS = 24.0         # one full daily cycle
 REACH_BUCKET_HOURS = 5.0 / 60.0
 REACH_MIN_BUCKETS = 12            # traded buckets per side, or no verdict

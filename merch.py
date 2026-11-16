@@ -745,16 +745,6 @@ RAID_UNIQUE_IDS = frozenset({
     27277,  # Tumeken's shadow (uncharged)
 })
 
-# The subset nobody at the content they gate can do without. These hold their
-# demand when the supply dries up; a cosmetic-tier unique does not.
-PVM_MUST_HAVE_IDS = frozenset({
-    20997,  # Twisted bow
-    21034,  # Dexterous prayer scroll (Rigour)
-    21079,  # Arcane prayer scroll (Augury)
-    22486,  # Scythe of vitur
-    27277,  # Tumeken's shadow
-})
-
 SUPPLY_CRUNCH = "SUPPLY_CRUNCH"
 SUPPLY_DROP = "SUPPLY_DROP"
 
@@ -804,40 +794,6 @@ def supply_crunch_badge(relative_change: Optional[float],
     if relative_change <= calibration.supply_drop_decline:
         return SUPPLY_DROP
     return None
-
-
-def raid_cycle_score(item_id: int, price: float,
-                     relative_volume_change_6m: Optional[float],
-                     trend: Optional[Trend] = None,
-                     calibration: engine.Calibration = engine.DEFAULT_CALIBRATION
-                     ) -> float:
-    """Score a raid unique whose supply is drying up.
-
-    This is a slow thesis and it is stated as one: players stop running the old
-    raid, the drops stop entering the game, and the price of what is left grinds
-    up over months. It is not a flip and the number is not gp per hour — it is a
-    ranking within the raid uniques only.
-    """
-    if item_id not in RAID_UNIQUE_IDS:
-        return 0.0
-    if (relative_volume_change_6m is None
-            or relative_volume_change_6m > calibration.supply_drop_decline):
-        return 0.0
-
-    # A cheaper item has more buyers who can reach it. The catch-up story on a
-    # 60m weapon needs a far smaller pool of players to fund it.
-    if price < calibration.raid_catch_up_gp:
-        catch_up = 1.5
-    elif price < calibration.raid_catch_up_gp * 5:
-        catch_up = 1.0
-    else:
-        catch_up = 0.5
-
-    essential = 1.3 if item_id in PVM_MUST_HAVE_IDS else 1.0
-    base = abs(relative_volume_change_6m) * 100.0 * catch_up * essential
-    if trend is not None and trend.annualised_pct > 0:
-        base += trend.annualised_pct / 10.0
-    return base
 
 
 # ---------------------------------------------------------------------------

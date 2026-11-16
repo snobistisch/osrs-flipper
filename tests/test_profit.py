@@ -60,8 +60,6 @@ class ProfitModeNamingTests(unittest.TestCase):
 
     def test_the_deadline_is_the_longest_supported_horizon(self):
         self.assertEqual(engine.PROFIT_HORIZON_HOURS, 24.0)
-        profile = engine.TradingProfile(mode="profit")
-        self.assertEqual(profile.horizon_hours, 24.0)
         # The Away slider does not move it.
         config = filters.FilterConfig(trade_mode="profit", overnight_hours=2)
         self.assertEqual(config.horizon_hours, 24.0)

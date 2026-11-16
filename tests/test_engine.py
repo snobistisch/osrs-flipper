@@ -88,17 +88,6 @@ class TaxBoundaryTests(unittest.TestCase):
                                     engine.net_revenue(price))
 
 
-class BreakEvenTests(unittest.TestCase):
-    def test_break_even_clears_exactly_one_gp(self):
-        for buy in (50, 100, 500, 1_000, 10_000, 100_000, 1_000_000):
-            sell = engine.break_even_sell(buy)
-            self.assertGreater(engine.net_margin(buy, sell), 0, buy)
-            self.assertLessEqual(engine.net_margin(buy, sell - 1), 0, buy)
-
-    def test_exempt_items_break_even_one_gp_up(self):
-        self.assertEqual(engine.break_even_sell(1_000, tax_exempt=True), 1_001)
-
-
 class UndercutDepthTests(unittest.TestCase):
     def test_air_rune_one_tick_spread_has_no_room(self):
         self.assertEqual(engine.undercut_depth(5, 6), 0)
@@ -147,25 +136,6 @@ class FillModelTests(unittest.TestCase):
         self.assertAlmostEqual(engine.fill_rate(3_600, 1.0), 1.0)
         self.assertAlmostEqual(engine.fill_rate(3_600, 0.25), 0.25)
         self.assertEqual(engine.fill_rate(0, 1.0), 0.0)
-
-    def test_expected_fill_time_is_quantity_over_rate(self):
-        self.assertAlmostEqual(engine.expected_fill_seconds(1_000, 1.0, CAL),
-                               1_000.0)
-
-    def test_a_tiny_offer_still_costs_a_minimum_of_human_time(self):
-        self.assertEqual(engine.expected_fill_seconds(1, 1_000.0, CAL),
-                         CAL.min_leg_seconds)
-
-    def test_no_volume_means_never(self):
-        self.assertEqual(engine.expected_fill_seconds(10, 0.0, CAL),
-                         float("inf"))
-
-    def test_fill_probability_is_exponential(self):
-        # At exactly the mean fill time, an exponential has cleared 1 - 1/e.
-        self.assertAlmostEqual(engine.fill_probability(3_600, 3_600),
-                               1 - math.exp(-1), places=9)
-        self.assertEqual(engine.fill_probability(float("inf"), 3_600), 0.0)
-        self.assertEqual(engine.fill_probability(600, 0), 0.0)
 
     def test_fillable_quantity_uses_the_rate_not_a_flat_multiple(self):
         # 1,000 units/h at full queue share over 4h is 4,000 units — but at a
@@ -303,10 +273,6 @@ class AlchemyTests(unittest.TestCase):
     def test_trading_below_the_floor_is_an_arbitrage(self):
         distance = engine.alch_distance(400, engine.alch_floor(630, 150))
         self.assertLess(distance, 0)
-
-    def test_profit_from_alching(self):
-        self.assertEqual(engine.alch_profit(630, 400, 150), 80)
-        self.assertIsNone(engine.alch_profit(None, 400, 150))
 
     def test_a_floor_far_below_the_price_is_no_protection(self):
         distance = engine.alch_distance(10_000, 100)
@@ -461,29 +427,6 @@ class ShrinkageTests(unittest.TestCase):
 
 
 class AllocationTests(unittest.TestCase):
-    def test_capital_follows_the_scores(self):
-        self.assertEqual(engine.allocate_capital([300.0, 100.0], 4_000, 2),
-                         [3_000, 1_000])
-
-    def test_a_flip_that_cannot_absorb_its_share_hands_it_back(self):
-        # The exact failure of the equal split: a cheap item capped by its buy
-        # limit left a third of the bank idle while a costly one was starved.
-        allocation = engine.allocate_capital([100.0, 100.0], 1_000_000, 2,
-                                             needs=[50_000, 5_000_000])
-        self.assertEqual(allocation[0], 50_000)
-        self.assertGreater(allocation[1], 500_000)
-        self.assertLessEqual(sum(allocation), 1_000_000)
-
-    def test_negative_scores_get_nothing(self):
-        self.assertEqual(engine.allocate_capital([100.0, -5.0], 1_000, 2)[1], 0)
-
-    def test_no_positive_scores_deploys_nothing(self):
-        self.assertEqual(engine.allocate_capital([0.0, -1.0], 1_000, 2), [0, 0])
-
-    def test_equal_split_is_still_available_for_the_headline(self):
-        self.assertEqual(engine.capital_per_slot(999, 3), 333)
-        self.assertEqual(engine.capital_per_slot(1, 8), 1)
-
     def test_executable_portfolio_funds_whole_items_and_leaves_bad_slots_open(self):
         amounts = engine.allocate_portfolio(
             [100.0, 50.0, -1.0], 1_000, [100, 250, 10],
@@ -492,24 +435,6 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(amounts[1] % 250, 0)
         self.assertEqual(amounts[2], 0)
         self.assertLessEqual(sum(amounts), 1_000)
-
-
-class ProfileTests(unittest.TestCase):
-    def test_first_time_profile_is_members_with_eight_slots(self):
-        profile = engine.TradingProfile()
-        self.assertEqual(profile.account, engine.AccountType.MEMBERS)
-        self.assertEqual(profile.slots, 8)
-        self.assertTrue(profile.include_members)
-
-    def test_f2p_profile_is_coherent(self):
-        profile = engine.TradingProfile(account=engine.AccountType.FREE_TO_PLAY)
-        self.assertEqual(profile.slots, 3)
-        self.assertFalse(profile.include_members)
-
-    def test_overnight_horizon_is_validated(self):
-        with self.assertRaises(ValueError):
-            engine.TradingProfile(mode=engine.TradeMode.OVERNIGHT,
-                                  overnight_hours=30)
 
 
 class ModeTests(unittest.TestCase):
@@ -521,11 +446,6 @@ class ModeTests(unittest.TestCase):
             highalch=None, nature_rune_cost=100)
         values.update(overrides)
         return engine.score_flip(**values)
-
-    def test_round_trip_probability_respects_sequential_legs(self):
-        joint = engine.round_trip_probability(HOUR, HOUR, 2 * HOUR)
-        independent = engine.fill_probability(HOUR, 2 * HOUR) ** 2
-        self.assertLess(joint, independent)
 
     def test_active_and_overnight_rank_genuinely_different_objectives(self):
         fast_small = self.score(qty=2, margin=100, buy_volume_1h=20_000,
@@ -852,8 +772,7 @@ class TouchCompetitorsTests(unittest.TestCase):
                               (2_429_316, 30_000)):
             crowd = engine.touch_competitors(volume, limit)
             share = engine.aggressiveness(0.0, competitors=crowd)
-            seconds = engine.expected_fill_seconds(
-                limit, engine.fill_rate(volume, share))
+            seconds = limit / engine.fill_rate(volume, share)
             hours = seconds / engine.SECONDS_PER_HOUR
             self.assertAlmostEqual(hours, engine.WINDOW_HOURS, delta=0.01)
 

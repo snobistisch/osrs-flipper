@@ -438,5 +438,3 @@ DEFAULT_METHODS = [name for name in METHODS if name not in BROWSER_METHODS
                    and name not in CAPTURE_GRID]
 
 
-def register(method: Method) -> None:
-    METHODS[method.name] = method

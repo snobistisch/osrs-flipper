@@ -120,11 +120,11 @@ COLUMNS_V2 = (
 # executionExport).
 BROWSER_EXPORT_VERSION = 1
 
-# Outcome values. 'placed' is a buy offer in the book with nothing recorded as
-# bought yet; cancelling one is a censored BUY leg, cancelling an 'open' row a
-# censored SELL leg. Without 'placed', an offer that never filled could not be
-# written down at all, so the journal only ever saw buys that worked.
-OUTCOMES = ("placed", "open", "filled", "cancelled")
+# The outcome column holds 'placed', 'open', 'filled' or 'cancelled'.
+# 'placed' is a buy offer in the book with nothing recorded as bought yet;
+# cancelling one is a censored BUY leg, cancelling an 'open' row a censored
+# SELL leg. Without 'placed', an offer that never filled could not be written
+# down at all, so the journal would only ever see buys that worked.
 
 
 def recent_limit_usage(db_path=DEFAULT_DB, now: Optional[float] = None
@@ -878,14 +878,6 @@ def _row_is_exempt(row) -> bool:
 def flip_seconds(row) -> Optional[float]:
     """Total slot time: from the offer going in to the sell filling."""
     start = row["offer_placed_at"] or row["bought_at"]
-    end = row["sold_at"]
-    if not start or not end or end <= start:
-        return None
-    return float(end - start)
-
-
-def _sell_seconds(row) -> Optional[float]:
-    start = row["buy_filled_at"] or row["bought_at"]
     end = row["sold_at"]
     if not start or not end or end <= start:
         return None

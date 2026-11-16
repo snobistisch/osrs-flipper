@@ -227,16 +227,6 @@ def ev_capture(records: Sequence[dict], method: str, variant: str) -> dict:
             "capture": realised / predicted if predicted > 0 else float("nan")}
 
 
-def holm(p_values: Dict[str, float], alpha: float = 0.05) -> Dict[str, bool]:
-    """Holm step-down: which comparisons survive family-wise ``alpha``."""
-    ordered = sorted(p_values.items(), key=lambda item: item[1])
-    survives, still = {}, True
-    for index, (name, p) in enumerate(ordered):
-        still = still and p <= alpha / (len(ordered) - index)
-        survives[name] = still
-    return survives
-
-
 def fmt_gp(value: float) -> str:
     if value != value:
         return "n/a"

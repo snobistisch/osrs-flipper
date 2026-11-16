@@ -67,7 +67,7 @@ class DistributionPrimitiveTests(unittest.TestCase):
         sigma = engine.fill_log_sigma(verified=True)
         mu = engine.fill_log_mu()
         p50, p80, p90 = (engine.fill_time_quantile(1_800, p, sigma, 0, mu)
-                         for p in engine.ETA_PERCENTILES)
+                         for p in (0.50, 0.80, 0.90))
         self.assertLess(p50, p80)
         self.assertLess(p80, p90)
         self.assertAlmostEqual(p80 / p50, math.exp(

@@ -24,13 +24,6 @@ from storage import state_lock, write_json
 
 
 class ArithmeticTests(unittest.TestCase):
-    def test_minimum_profitable_sell_at_every_tax_boundary(self):
-        for buy in [*range(1, 2000), 244_999_999, 245_000_000, 250_000_000,
-                    1_000_000_000, engine.MAX_CASH_STACK]:
-            sell = engine.break_even_sell(buy)
-            self.assertEqual(engine.net_margin(buy, sell), 1)
-            self.assertLessEqual(engine.net_margin(buy, sell - 1), 0)
-
     def test_gp_input_rejects_nonfinite_and_nondecimal_values(self):
         for text in ("infm", "NaNk", "1e9m", "0x10", "-2k", "1.2"):
             with self.subTest(text=text), self.assertRaises(ValueError):
@@ -224,13 +217,6 @@ class AuditOctober2026Tests(unittest.TestCase):
         self.assertEqual(row.capital_needed, row.allocated_capital)
         self.assertLessEqual(row.allocated_capital, capital)
         self.assertEqual(row.allocated_quantity, capital // unit)
-
-    def test_break_even_covers_uncapped_bond_fee(self):
-        for buy in (1, 9, 10, 4_500_000, 45_000_000, 50_000_000,
-                    engine.MAX_CASH_STACK):
-            sell = engine.break_even_sell(buy, True, True)
-            self.assertGreater(engine.net_margin(buy, sell, True, True), 0)
-            self.assertLessEqual(engine.net_margin(buy, sell - 1, True, True), 0)
 
     def test_bond_fee_is_exact_integer_arithmetic(self):
         for sell in (9, 10, 19, 20, 4_999_999, 5_000_000, engine.MAX_CASH_STACK):

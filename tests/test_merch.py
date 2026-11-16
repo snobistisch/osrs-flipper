@@ -452,30 +452,6 @@ class CrashPrecedenceTests(unittest.TestCase):
 
 
 class RaidCycleTests(unittest.TestCase):
-    ARCANE = 21079          # in both the raid list and the must-have list
-    RAPIER = 22324          # raid unique, not a must-have
-    BLOOD_RUNE = 565        # not a raid unique at all
-
-    def test_only_raid_uniques_score(self):
-        self.assertEqual(
-            merch.raid_cycle_score(self.BLOOD_RUNE, 300, -0.9), 0.0)
-
-    def test_supply_has_to_have_actually_dropped(self):
-        self.assertEqual(
-            merch.raid_cycle_score(self.ARCANE, 5_000_000, -0.10), 0.0)
-        self.assertEqual(
-            merch.raid_cycle_score(self.ARCANE, 5_000_000, None), 0.0)
-
-    def test_must_have_items_outrank_optional_ones(self):
-        essential = merch.raid_cycle_score(self.ARCANE, 5_000_000, -0.85)
-        optional = merch.raid_cycle_score(self.RAPIER, 5_000_000, -0.85)
-        self.assertGreater(essential, optional)
-
-    def test_cheaper_items_outrank_dearer_ones_on_the_same_collapse(self):
-        cheap = merch.raid_cycle_score(self.RAPIER, 5_000_000, -0.85)
-        dear = merch.raid_cycle_score(self.RAPIER, 90_000_000, -0.85)
-        self.assertGreater(cheap, dear)
-
     def test_badges_step_with_the_decline(self):
         self.assertEqual(merch.supply_crunch_badge(-0.85), merch.SUPPLY_CRUNCH)
         self.assertEqual(merch.supply_crunch_badge(-0.60), merch.SUPPLY_DROP)
@@ -587,9 +563,6 @@ class WatchlistTests(unittest.TestCase):
         for item_id in (28534, 28540, 28545, 28549):
             self.assertNotIn(item_id, merch.RAID_UNIQUE_IDS)
             self.assertNotIn(item_id, merch.WATCHLIST_IDS)
-
-    def test_must_haves_are_a_subset_of_the_raid_uniques(self):
-        self.assertTrue(merch.PVM_MUST_HAVE_IDS <= merch.RAID_UNIQUE_IDS)
 
 
 if __name__ == "__main__":

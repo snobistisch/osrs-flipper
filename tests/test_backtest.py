@@ -284,12 +284,6 @@ class ScheduleAndMetricTests(unittest.TestCase):
         self.assertEqual((interval["diff_lo"], interval["diff_hi"]), (0.0, 0.0))
         self.assertEqual(interval["p_worse"], 1.0)
 
-    def test_holm_controls_the_family(self):
-        survives = metrics.holm({"a": 0.001, "b": 0.02, "c": 0.04}, 0.05)
-        self.assertEqual(survives, {"a": True, "b": True, "c": True})
-        survives = metrics.holm({"a": 0.001, "b": 0.03, "c": 0.04}, 0.05)
-        self.assertEqual(survives, {"a": True, "b": False, "c": False})
-
 
 @unittest.skipIf(np is None or not FIXTURE.exists(),
                  "numpy and the committed fixture are required")

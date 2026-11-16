@@ -254,12 +254,6 @@ class Panel:
                             float(self.a5["lv"][row, column]))
                 for row in range(first, closed)]
 
-    def hourly(self, item_id: int, t: int, hours: int) -> Dict[str, np.ndarray]:
-        """Closed 1h buckets before ``t`` for one item, oldest first."""
-        column = self.column[int(item_id)]
-        closed = self.closed_1h(t)
-        first = max(0, closed - int(hours))
-        return {f: np.asarray(self.a1[f][first:closed, column]) for f in FIELDS}
 
     # -- the future, for the fill simulator only ----------------------------
 

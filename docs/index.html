@@ -1222,7 +1222,6 @@ const STRATEGIES = ["active", "overnight", "profit"];
 const DEFAULT_BANK_RISK_PERCENT = 25;
 const MIN_BANK_RISK_PERCENT = 10;
 const MAX_BANK_RISK_PERCENT = 100;
-const MAX_CASH_STACK = 2_147_483_647;
 /* Since 30 September 2026 the GE pays in coins plus platinum tokens (1,000 gp
    each). Same as engine.MAX_GE_CAPITAL. */
 const MAX_GE_CAPITAL = 2_149_631_130_647;
@@ -1370,9 +1369,6 @@ const CAL = {
 
   horizon_hours: WINDOW_HOURS,
 };
-
-const legHorizonHours = (horizonHours = CAL.horizon_hours) =>
-  horizonHours / LEGS_PER_ROUND_TRIP;
 
 /* ---- tax ---- */
 
@@ -1549,25 +1545,6 @@ function crossingShare(competitors, strategy = "active",
 const fillRate = (volumePerHour, share) =>
   volumePerHour <= 0 || share <= 0 ? 0 : (volumePerHour / SECONDS_PER_HOUR) * share;
 
-/* Time for one leg if the rate came in exactly at its mean. NOT an ETA: with
-   an uncertain rate, time = qty / rate has a median above this and only about
-   a third of offers finish by it. Use fillTimeQuantile for anything shown.
-   Floored: on a very liquid item the arithmetic says a small offer clears in
-   under a second, but you still have to walk to the GE and collect it. */
-function expectedFillSeconds(qty, rate) {
-  if (qty <= 0) return CAL.min_leg_seconds;
-  if (rate <= 0) return Infinity;
-  return Math.max(CAL.min_leg_seconds, qty / rate);
-}
-
-/* Treating fill time as exponential: memorylessness is the honest assumption
-   when queue position is invisible, and it has the right shape — most of the
-   mass early, a long tail of offers that simply never fill. */
-function fillProbability(expectedSeconds, horizonSeconds) {
-  if (!isFinite(expectedSeconds) || expectedSeconds <= 0 || horizonSeconds <= 0) return 0;
-  return 1 - Math.exp(-horizonSeconds / expectedSeconds);
-}
-
 /* Standard normal CDF from a Chebyshev fit of erfc (error below 1e-15), so the
    probabilities agree with the Python engine's math.erf to the last digits
    that matter: the old five-term approximation was off by 1.5e-7, which is
@@ -1622,7 +1599,6 @@ function fillEstimate(qty, rate, horizonSeconds, sigmaIn = null, muIn = null) {
    M: a quiet evening or an under-counted crowd slows the buy and the sell of
    the same item together, and treating them as independent would shorten the
    tail — the optimistic direction for a deadline. Mirrors engine.py. */
-const ETA_PERCENTILES = [0.5, 0.8, 0.9];
 
 function normalQuantile(probability) {
   // Acklam's rational approximation, identical to engine.normal_quantile.
@@ -1762,25 +1738,6 @@ function remainingBuyLimit(limit, used, hours, mode) {
   const effective = effectiveBuyLimit(limit, hours, mode);
   if (effective == null) return null;
   return Math.max(0, effective - Math.max(0, Math.trunc(used)));
-}
-
-function roundTripProbability(buySeconds, sellSeconds, horizonSeconds) {
-  if (!(horizonSeconds > 0) || !(buySeconds > 0) || !(sellSeconds > 0) ||
-      !isFinite(buySeconds) || !isFinite(sellSeconds)) return 0;
-  const rb = 1 / buySeconds, rs = 1 / sellSeconds;
-  if (Math.abs(rb - rs) <= 1e-9 * Math.max(rb, rs)) {
-    const x = rb * horizonSeconds;
-    return Math.max(0, Math.min(1, 1 - Math.exp(-x) * (1 + x)));
-  }
-  const survival = (rs * Math.exp(-rb * horizonSeconds) -
-    rb * Math.exp(-rs * horizonSeconds)) / (rs - rb);
-  return Math.max(0, Math.min(1, 1 - survival));
-}
-
-function strandedInventoryProbability(buySeconds, sellSeconds, horizonSeconds) {
-  return Math.max(0, Math.min(1,
-    fillProbability(buySeconds, horizonSeconds) -
-    roundTripProbability(buySeconds, sellSeconds, horizonSeconds)));
 }
 
 /* Units the market can hand you on ONE leg inside the horizon. This replaces
@@ -2872,9 +2829,6 @@ function historyWarnings(view) {
   return notes;
 }
 
-const capitalPerSlot = (capital, slots) =>
-  Math.max(1, Math.floor(capital / Math.max(1, slots)));
-
 /* ==================== merch: long-horizon signals ====================
 
    Mirrors merch.py. Everything above answers "is this worth flipping in the
@@ -3029,21 +2983,6 @@ function merchScore(trend, buyLimit, botted) {
   return base * Math.max(0, 1 + entryBonus + limitBonus - penalty);
 }
 
-/* Only fires on uptrends: "cheap against its own trend" is not a reason to buy
-   something whose trend is down. */
-function entrySignal(price, trend, median14d) {
-  if (!trend || trend.direction !== UPTREND) return null;
-  if (trend.deviation < CAL.merch_entry_threshold) {
-    return { kind: "PULLBACK", strength: Math.abs(trend.deviation),
-      message: `${Math.round(-trend.deviation * 100)}% below its own trend line` };
-  }
-  if (median14d && price < median14d * 0.95) {
-    return { kind: "BELOW_MEDIAN", strength: (median14d - price) / median14d,
-      message: `${Math.round((1 - price / median14d) * 100)}% below the 14-day median` };
-  }
-  return null;
-}
-
 /* The final 24h bucket does not measure the same thing as the ones before it,
    so every volume calculation drops it.
 
@@ -3195,21 +3134,6 @@ const RAID_UNIQUE_IDS = new Set([
   20997, 21006, 21012, 21018, 21021, 21024, 21034, 21047, 21079,
   13652, 22324, 22477, 22486, 22978, 26219, 27277,
 ]);
-
-/* The subset nobody at the content they gate can do without. */
-const PVM_MUST_HAVE_IDS = new Set([20997, 21034, 21079, 22486, 27277]);
-
-function raidCycleScore(itemId, price, relativeVolumeChange6m, trend) {
-  if (!RAID_UNIQUE_IDS.has(itemId)) return 0;
-  if (relativeVolumeChange6m == null ||
-      relativeVolumeChange6m > CAL.supply_drop_decline) return 0;
-  const catchUp = price < CAL.raid_catch_up_gp ? 1.5
-    : price < CAL.raid_catch_up_gp * 5 ? 1.0 : 0.5;
-  const essential = PVM_MUST_HAVE_IDS.has(itemId) ? 1.3 : 1.0;
-  let base = Math.abs(relativeVolumeChange6m) * 100 * catchUp * essential;
-  if (trend && trend.annualisedPct > 0) base += trend.annualisedPct / 10;
-  return base;
-}
 
 /* A free-to-play item cheap enough that no human farms it for the gp, with a
    buy limit high enough that the supply is industrial. Neither condition means

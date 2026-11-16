@@ -144,8 +144,6 @@ class ParityTests(unittest.TestCase):
             ("adverseSelectionFactor(-0.4, -0.03)", engine.adverse_selection_factor(-0.4, -0.03)),
             ("holdingRisk(0.05, 7200)", engine.holding_risk(0.05, 7200)),
             ("stalenessFactor(600, 0)", engine.staleness_factor(600, 0)),
-            ("roundTripProbability(1800, 1800, 7200)", engine.round_trip_probability(1800, 1800, 7200)),
-            ("roundTripProbability(900, 3600, 14400)", engine.round_trip_probability(900, 3600, 14400)),
             ("updateRiskFactor({}, 7200)".format(NOW - 4 * 86400),
              engine.update_risk_factor(NOW - 4 * 86400, 7200)),
             ("alchBonus(0.1)", engine.alch_bonus(0.1)),
@@ -235,7 +233,7 @@ class ParityTests(unittest.TestCase):
             cases.append(("fillLogSigma({})".format(str(verified).lower()),
                           engine.fill_log_sigma(verified=verified)))
         for work in (0.0, 30.0, 1_800.0, 20_000.0):
-            for p in engine.ETA_PERCENTILES:
+            for p in (0.50, 0.80, 0.90):
                 cases.append(("fillTimeQuantile({}, {}, {}, 120, {})".format(
                     work, p, sigma, mu),
                     engine.fill_time_quantile(work, p, sigma, 120, mu)))

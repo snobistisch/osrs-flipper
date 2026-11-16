@@ -119,8 +119,7 @@ class PortSyncTests(unittest.TestCase):
         self.assertNotIn('id="f-slots"', self.source)
 
     def test_active_and_overnight_math_is_ported(self):
-        for function in ("roundTripProbability", "strandedInventoryProbability",
-                         "confidenceLabel"):
+        for function in ("confidenceLabel",):
             self.assertIn("function {}(".format(function), self.source)
         self.assertIn('mode === "overnight" ? expected : perSlotHour',
                       self.source)
@@ -291,11 +290,6 @@ class PortSyncTests(unittest.TestCase):
         block = js_block(self.source, "const RAID_UNIQUE_IDS = new Set([", "]);")
         found = {int(n) for n in re.findall(r"\d+", strip_comments(block))}
         self.assertEqual(found, set(merch.RAID_UNIQUE_IDS))
-
-    def test_the_must_have_list_matches(self):
-        block = js_block(self.source, "const PVM_MUST_HAVE_IDS = new Set([", "]);")
-        found = {int(n) for n in re.findall(r"\d+", strip_comments(block))}
-        self.assertEqual(found, set(merch.PVM_MUST_HAVE_IDS))
 
     def test_the_watchlist_matches(self):
         block = js_block(self.source, "const WATCHLIST = [", "\n];")

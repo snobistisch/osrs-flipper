@@ -30,7 +30,6 @@ from storage import write_json
 # where v1 returns whole gp. This client speaks v1; moving it to v2 means
 # changing the /timeseries call and every place that assumes integer prices.
 BASE_URL = "https://prices.runescape.wiki/api/v1/osrs"
-BASE_URL_V2 = "https://prices.runescape.wiki/api/v2/osrs"
 # Wiki AUP wants a way to reach whoever runs this. If you fork or deploy the
 # tool, put your own contact here.
 USER_AGENT = ("osrs-flipper/0.2 - GE flipping dashboard - "

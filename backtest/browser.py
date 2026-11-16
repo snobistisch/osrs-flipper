@@ -14,7 +14,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from .panel import Panel, Snapshot
 
@@ -77,22 +77,15 @@ class BrowserPlanner:
             raise RuntimeError("browser plan failed: {}".format(reply["error"]))
         return reply
 
-    def prepare_payload(self, payload: dict, history: Dict[int, list],
-                        recent: Dict[int, list]) -> int:
-        """Screen, deep-check and order one snapshot; returns its key."""
-        self._key += 1
-        self._call({"op": "targets", "key": self._key, "snapshot": payload})
-        self._call({"op": "prepare", "key": self._key,
-                    "history": {str(k): v for k, v in history.items()},
-                    "recent": {str(k): v for k, v in recent.items()}})
-        return self._key
 
     def prepare(self, panel: Panel, snapshot: Snapshot, capital: int,
                 account: str, strategy: str, horizon_hours: float,
                 nature_cost: int, bank_risk_percent: int = 25,
                 limit_used: Optional[dict] = None,
                 order_size: Optional[str] = None) -> int:
-        """As prepare_payload, fetching exactly the history the app asks for.
+        """Screen, deep-check and order one snapshot; returns its key.
+
+        Fetches exactly the history the app asks for.
 
         ``limit_used`` is the browser's usage map, ``{"items": {id: units},
         "groups": {group: units}}``; None plans on whole buy limits.
