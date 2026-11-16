@@ -4714,15 +4714,45 @@ function monitorableRow(row) {
   return copy;
 }
 
+/* Why a new offer may not be saved right now, or null. Saved offers stay
+   editable, can be marked done and removed whatever this says. */
+const STALE_PRICES_BLOCK = "Refresh prices successfully before saving a new offer.";
+const STORAGE_RECOVERY_BLOCK = "Saved reservations need recovery before more bank can be committed.";
+function newOfferBlockReason() {
+  if (state.loadFailed || state.feedStale) return STALE_PRICES_BLOCK;
+  if (invalidStorageKeys.has(LOCK_KEY) || invalidStorageKeys.has(EXEC_KEY)) return STORAGE_RECOVERY_BLOCK;
+  return null;
+}
+
+/* Tell the player why a save was refused: an alert for stale prices, the
+   storage warning for unreadable saved data. */
+function reportNewOfferBlock(reason) {
+  if (reason === STALE_PRICES_BLOCK) alert(reason);
+  else showStorageWarning(reason);
+}
+
+/* The plan card's SAVE & MONITOR: track the offer and reserve its slot, under
+   the same rule as the option table's button. */
+function savePlanOffer(slot, itemId) {
+  if (state.loadFailed || state.feedStale) { reportNewOfferBlock(STALE_PRICES_BLOCK); return false; }
+  // Reading the saved lists marks either one unreadable before the check.
+  if (state.config) locksFor(state.config);
+  loadExecutions();
+  const reason = newOfferBlockReason();
+  if (reason) { reportNewOfferBlock(reason); return false; }
+  const row = state.planRows.find((value) => value.id === itemId);
+  if (row && trackOffer(row)) lockSlot(slot, row.id);
+  return true;
+}
+
 function saveOption(itemId) {
   if (!state.config) return;
-  if (state.loadFailed || state.feedStale) { alert("Refresh prices successfully before saving a new offer."); return; }
+  if (state.loadFailed || state.feedStale) { reportNewOfferBlock(STALE_PRICES_BLOCK); return; }
   const row = state.rows.find((value) => value.id === itemId);
   if (!row) return;
   const locks = locksFor(state.config);
-  if (invalidStorageKeys.has(LOCK_KEY) || invalidStorageKeys.has(EXEC_KEY)) {
-    showStorageWarning("Saved reservations need recovery before more bank can be committed."); return;
-  }
+  const reason = newOfferBlockReason();
+  if (reason) { reportNewOfferBlock(reason); return; }
   if (locks.some((lock) => lock.id === itemId)) return;
   if (locks.length >= state.config.slots) { alert("All GE slots are reserved. Finish or remove an offer first."); return; }
   const saved = monitorableRow(row);
@@ -5326,6 +5356,8 @@ function renderPlan(config) {
     return;
   }
   $("#plan").classList.remove("hidden");
+  // New offers cannot be saved on stale prices or unreadable saved data.
+  const saveDisabled = newOfferBlockReason() ? " disabled" : "";
 
   cards.innerHTML = state.planEntries.map((entry) => {
     if (entry.locked) {
@@ -5388,7 +5420,7 @@ function renderPlan(config) {
           <span class="confidence confidence-${confidence}">${confidence}</span></div>
         ${config.strategy === "overnight" ? "" : `<div class="plan-foot">${repriceText(r)}</div>`}
         ${r.warnings.length ? `<details class="plan-warn"><summary>${r.warnings.length} risk flag${r.warnings.length === 1 ? "" : "s"}</summary>${escapeHtml(r.warnings.join(" · "))}</details>` : ""}
-        <div class="plan-actions"><button class="save-flip-btn" data-save="${r.id}" data-slot="${entry.slot}">SAVE &amp; MONITOR</button></div>
+        <div class="plan-actions"><button class="save-flip-btn" data-save="${r.id}" data-slot="${entry.slot}"${saveDisabled}>SAVE &amp; MONITOR</button></div>
       </div>`;
   }).join("");
 
@@ -6420,10 +6452,7 @@ $("#plan-cards").addEventListener("click", (event) => {
   }
   const save = event.target.closest("button[data-save]");
   if (save) {
-    const row = state.planRows.find((value) => value.id === Number(save.dataset.save));
-    if (row && trackOffer(row)) {
-      lockSlot(Number(save.dataset.slot), row.id);
-    }
+    savePlanOffer(Number(save.dataset.slot), Number(save.dataset.save));
     event.stopPropagation(); return;
   }
   const trackLock = event.target.closest("button[data-track-lock]");

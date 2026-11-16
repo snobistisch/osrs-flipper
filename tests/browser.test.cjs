@@ -260,6 +260,82 @@ test('Export offers holds the stored execution records unchanged', () => {
   assert.equal(run('executionExport(1)'), null);
 });
 
+/* A plan with one funded row in slot 0, ready to be saved from its card. */
+function planWithOneRow(run) {
+  run(`Date.now = () => 1790000000000;
+    replanFromCurrentData = () => {};
+    state.config = { slots: 8, account: "members", strategy: "active", capital: 1000000,
+      maxPositionCapital: 1000000 };
+    state.planRows = [{ id: 2, name: "Cannonball", buy: 100, sell: 110, listAt: 110,
+      allocatedQty: 50, allocated: 5000, allocatedExpected: 200, expected: 200,
+      limit: 1000, limitGroup: null, category: "other", mode: "active", horizonHours: 4 }];
+    state.planEntries = [{ slot: 0, locked: false, row: state.planRows[0] }];`);
+}
+
+test('a plan offer is not saved on stale prices or a failed load', () => {
+  for (const flag of ['feedStale', 'loadFailed']) {
+    const { run, storage, context } = setup();
+    const alerts = [];
+    context.alert = (text) => alerts.push(text);
+    planWithOneRow(run);
+    run(`state.${flag} = true`);
+    assert.equal(run('newOfferBlockReason()'), 'Refresh prices successfully before saving a new offer.');
+    assert.equal(run('savePlanOffer(0, 2)'), false, flag);
+    assert.equal(storage.get('osrs-flipper.executions.v1'), undefined, flag);
+    assert.equal(storage.get('osrs-flipper.slot-locks.v1'), undefined, flag);
+    assert.deepEqual(alerts, ['Refresh prices successfully before saving a new offer.'], flag);
+  }
+});
+
+test('a plan offer on fresh prices saves what the card always saved', () => {
+  const before = setup();
+  planWithOneRow(before.run);
+  before.run('if (trackOffer(state.planRows[0])) lockSlot(0, 2)');
+  const after = setup();
+  const alerts = [];
+  after.context.alert = (text) => alerts.push(text);
+  planWithOneRow(after.run);
+  assert.equal(after.run('newOfferBlockReason()'), null);
+  assert.equal(after.run('savePlanOffer(0, 2)'), true);
+  assert.deepEqual(alerts, []);
+  for (const key of ['osrs-flipper.executions.v1', 'osrs-flipper.slot-locks.v1']) {
+    assert.ok(after.storage.get(key), key);
+    assert.equal(after.storage.get(key), before.storage.get(key), key);
+  }
+});
+
+test('the option table and the plan card refuse unreadable saved data alike', () => {
+  for (const save of ['savePlanOffer(0, 2)', 'saveOption(2)']) {
+    const { run, storage, elements, context } = setup();
+    const alerts = [];
+    context.alert = (text) => alerts.push(text);
+    planWithOneRow(run);
+    run('state.rows = state.planRows');
+    storage.set('osrs-flipper.executions.v1', '{broken');
+    run(save);
+    assert.equal(storage.get('osrs-flipper.executions.v1'), '{broken', save);
+    assert.equal(storage.get('osrs-flipper.slot-locks.v1'), undefined, save);
+    assert.equal(elements.get('#storage-warning').textContent,
+      'Saved reservations need recovery before more bank can be committed.', save);
+    assert.deepEqual(alerts, [], save);
+  }
+});
+
+test('the option table keeps its stale-price refusal and its normal save', () => {
+  const stale = setup();
+  const alerts = [];
+  stale.context.alert = (text) => alerts.push(text);
+  planWithOneRow(stale.run);
+  stale.run('state.rows = state.planRows; state.feedStale = true; saveOption(2)');
+  assert.deepEqual(alerts, ['Refresh prices successfully before saving a new offer.']);
+  assert.equal(stale.storage.get('osrs-flipper.executions.v1'), undefined);
+  const fresh = setup();
+  planWithOneRow(fresh.run);
+  fresh.run('state.rows = state.planRows; rescoreAllocated = () => {}; saveOption(2)');
+  assert.equal(JSON.parse(fresh.storage.get('osrs-flipper.executions.v1'))[0].itemId, 2);
+  assert.ok(fresh.storage.get('osrs-flipper.slot-locks.v1'));
+});
+
 test('invalid stored records cannot crash rendering', () => {
   const { run, storage } = setup();
   storage.set('osrs-flipper.executions.v1', '{}');
