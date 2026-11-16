@@ -964,6 +964,15 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
         <option value="profit">Max profit — best flips, any duration</option>
       </select>
     </div>
+    <div class="field">
+      <label for="f-order-size">Order size (Active)</label>
+      <select id="f-order-size">
+        <option value="careful" selected>Careful</option>
+        <option value="balanced">Balanced</option>
+        <option value="large">Large</option>
+      </select>
+      <div class="small dim">Larger orders earn more if your offers fill quickly and lose more if they do not. Only 'careful' has been tested on held-out data.</div>
+    </div>
     <div class="field hidden" id="overnight-field">
       <label for="f-horizon">Next check in</label>
       <select id="f-horizon">
@@ -1197,6 +1206,10 @@ const F2P_SLOTS = 3;
 const MEMBER_SLOTS = 8;
 const DEFAULT_ACCOUNT = "members";
 const DEFAULT_STRATEGY = "active";
+/* Order size for Active: the share of crossing volume an offer is sized on.
+   Only "careful" has been tested on held-out data. Same as engine.ORDER_SIZES. */
+const ORDER_SIZES = { careful: 0.0, balanced: 0.15, large: 0.30 };
+const DEFAULT_ORDER_SIZE = "careful";
 const DEFAULT_OVERNIGHT_HOURS = 8;
 /* Max profit round-trip deadline: the longest horizon the profile accepts.
    Same as engine.PROFIT_HORIZON_HOURS. */
@@ -1292,10 +1305,10 @@ const CAL = {
   // flippers who outbid a new offer, and 5-minute averages. An ASSUMPTION and
   // a bet: in the backtest it earned 32k gp/h against 12k where the real
   // share was 30%, and lost 15k against 2k where it was 3% (docs/model.md
-  // section 0). Lower it if your offers fill slower than the time band says;
-  // 0 restores the queue share.
+  // section 0). The default is 0, the queue share ("careful" in ORDER_SIZES):
+  // the only value evaluated on held-out data. 0.15 and 0.30 are opt-in.
   // CALIBRATE from journal fills.
-  crossing_capture_share: 0.30,
+  crossing_capture_share: 0.0,
   // The same share for an offer that rests unwatched (Away, Max profit).
   // Nobody reprices it when it is outbid; every larger value earned less on
   // average in the backtest, so these keep the queue share (0).
@@ -1520,9 +1533,9 @@ function aggressiveness(edge, competitors) {
    this is the capture share and not a place in a queue. Away and Max profit
    read the resting share. 0 means the queue share. Mirrors
    engine.crossing_share. */
-function crossingShare(competitors, strategy = "active") {
-  const capture = strategy === "active"
-    ? CAL.crossing_capture_share : CAL.resting_capture_share;
+function crossingShare(competitors, strategy = "active",
+                       activeShare = CAL.crossing_capture_share) {
+  const capture = strategy === "active" ? activeShare : CAL.resting_capture_share;
   if (capture > 0) return Math.min(1, capture);
   return aggressiveness(0, competitors);
 }
@@ -3932,7 +3945,8 @@ function optimiseExecution(o) {
     if (o.reach) {
       volume = o.reach.buyVolumePerHour(bid.buy, CAL.touch_fill_weight);
       sellVolume = o.reach.sellVolumePerHour(sell, CAL.touch_fill_weight);
-      buyShare = sellShare = crossingShare(o.competitors, o.config.strategy);
+      buyShare = sellShare = crossingShare(o.competitors, o.config.strategy,
+        o.config.crossingCaptureShare ?? CAL.crossing_capture_share);
     } else {
       buyShare = aggressiveness(priceEdge(Math.max(0, bid.step), originalSpread), o.competitors);
       sellShare = aggressiveness(priceEdge(sellImprovement, originalSpread), o.competitors);
@@ -4996,7 +5010,7 @@ function savePreferences() {
     capital: state.capital, account: $("#f-account").value,
     strategy: $("#f-strategy").value, horizon: Number($("#f-horizon").value),
     bankRiskPercent: normalizeBankRiskPercent($("#f-bank-risk").value),
-    timestep: state.timestep,
+    timestep: state.timestep, orderSize: normalizeOrderSize($("#f-order-size").value),
   };
   writeDurableStorage(PREF_KEY, JSON.stringify(value));
 }
@@ -5008,8 +5022,12 @@ function normalizeBankRiskPercent(value) {
   return Math.max(MIN_BANK_RISK_PERCENT, Math.min(MAX_BANK_RISK_PERCENT, stepped));
 }
 
+const normalizeOrderSize = (value) =>
+  Object.prototype.hasOwnProperty.call(ORDER_SIZES, value) ? value : DEFAULT_ORDER_SIZE;
+
 function restorePreferences() {
   const p = loadPreferences();
+  $("#f-order-size").value = normalizeOrderSize(p.orderSize);
   $("#f-account").value = p.account === "free-to-play" ? p.account : DEFAULT_ACCOUNT;
   $("#f-strategy").value = STRATEGIES.includes(p.strategy) ? p.strategy : DEFAULT_STRATEGY;
   $("#f-horizon").value = AWAY_HORIZON_PRESETS.includes(Number(p.horizon))
@@ -5058,9 +5076,12 @@ function readConfig() {
   const bankRiskPercent = normalizeBankRiskPercent($("#f-bank-risk").value);
   const automatic = automaticFilterProfile(
     state.capital, account, strategy, bankRiskPercent);
+  const orderSize = normalizeOrderSize($("#f-order-size").value);
   return {
     capital: state.capital,
     account,
+    orderSize,
+    crossingCaptureShare: ORDER_SIZES[orderSize],
     slots: accountSlots(account),
     includeMembers: account === "members",
     strategy,
@@ -5447,7 +5468,7 @@ function renderPlan(config) {
     const reason = planReason(state.planSelection, config.strategy);
     parts.push(reason.charAt(0).toUpperCase() + reason.slice(1) + ".");
   }
-  const evidence = `A flip is funded only if its exact offer, replayed on the item's own last day of 5-minute trading, made money in both halves of that window: a buy fills only where sellers traded below your price, a sell only where buyers traded above it, and stock still unsold at the deadline is sold at the going instant-sell price. EXPECTED is that replayed result, not the quoted margin times quantity. It is measured on public trades, not on your fills — how much of the passing volume reaches your offer is an assumption until you log real offers${config.strategy === "active" && CAL.crossing_capture_share > 0 ? `: Active offers are sized on ${Math.round(CAL.crossing_capture_share * 100)}% of the volume that trades through their price, so an offer that fills slower than its time band was sized too large` : ""}.`;
+  const evidence = `A flip is funded only if its exact offer, replayed on the item's own last day of 5-minute trading, made money in both halves of that window: a buy fills only where sellers traded below your price, a sell only where buyers traded above it, and stock still unsold at the deadline is sold at the going instant-sell price. EXPECTED is that replayed result, not the quoted margin times quantity. It is measured on public trades, not on your fills — how much of the passing volume reaches your offer is an assumption until you log real offers${config.strategy === "active" && config.crossingCaptureShare > 0 ? `: Active offers are sized on ${Math.round(config.crossingCaptureShare * 100)}% of the volume that trades through their price, so an offer that fills slower than its time band was sized too large` : ""}.`;
   const cap = `At most ${config.bankRiskPercent}% of your bank (${formatGp(config.maxPositionCapital)}) goes into one new trade.`;
   if (config.strategy === "profit") {
     parts.push(`${evidence} Max profit ranks that profit per flip, not per hour, with a ${Math.round(config.horizonHours)}h deadline; a slow flip can win here and its time band is on its card. ${cap} Each card says when to re-check: if nothing has bought by then, re-check the live margin.`);
@@ -6383,6 +6404,7 @@ $("#f-strategy").addEventListener("change", () => {
   loadAndRender();
 });
 $("#f-horizon").addEventListener("change", loadAndRender);
+$("#f-order-size").addEventListener("change", loadAndRender);
 $("#f-bank-risk").addEventListener("input", syncFilterLabels);
 $("#f-bank-risk").addEventListener("change", loadAndRender);
 $("#refresh").addEventListener("click", loadAndRender);
@@ -6392,6 +6414,7 @@ $("#reset-preferences").addEventListener("click", () => {
   $("#f-strategy").value = DEFAULT_STRATEGY;
   $("#f-horizon").value = String(DEFAULT_OVERNIGHT_HOURS);
   $("#f-bank-risk").value = String(DEFAULT_BANK_RISK_PERCENT);
+  $("#f-order-size").value = DEFAULT_ORDER_SIZE;
   state.timestep = "1h";
   syncFilterLabels();
   loadAndRender();

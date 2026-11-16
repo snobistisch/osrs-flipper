@@ -296,7 +296,8 @@ def rank(client: api.WikiClient, capital: int,
          account: engine.AccountType = engine.DEFAULT_ACCOUNT,
          mode: engine.TradeMode = engine.DEFAULT_TRADE_MODE,
          overnight_hours: float = engine.DEFAULT_OVERNIGHT_HOURS,
-         deep: int = 15) -> filters.ScreenResult:
+         deep: int = 15,
+         order_size: str = engine.DEFAULT_ORDER_SIZE) -> filters.ScreenResult:
     """The flip ranking, identical to what cli.py and the browser produce."""
     items = client.mapping()
     quotes = client.latest()
@@ -309,7 +310,9 @@ def rank(client: api.WikiClient, capital: int,
     config = filters.automatic_profile(filters.FilterConfig(
         capital=capital, account=account, trade_mode=mode,
         overnight_hours=overnight_hours,
-        nature_rune_cost=nature_cost))
+        nature_rune_cost=nature_cost,
+        calibration=engine.with_order_size(engine.DEFAULT_CALIBRATION,
+                                           order_size)))
 
     store = _open_archive()
     volume_lookup = archive.volume_lookup(store) if store is not None else None
@@ -466,7 +469,8 @@ def cmd_flips(opts) -> int:
         account = engine.AccountType(opts.account)
         mode = engine.TradeMode(opts.strategy)
         result = rank(client, opts.capital, account, mode,
-                      opts.overnight_hours, deep=opts.deep)
+                      opts.overnight_hours, deep=opts.deep,
+                      order_size=opts.order_size)
     except api.ApiError as exc:
         print("API error: {}".format(exc), file=sys.stderr)
         return 1
@@ -828,6 +832,12 @@ def build_parser() -> argparse.ArgumentParser:
                        default=engine.DEFAULT_TRADE_MODE.value)
     flips.add_argument("--overnight-hours", type=float,
                        default=engine.DEFAULT_OVERNIGHT_HOURS)
+    flips.add_argument("--order-size", choices=list(engine.ORDER_SIZES),
+                       default=engine.DEFAULT_ORDER_SIZE,
+                       help="Active order size: careful (tested on held-out "
+                            "data), balanced or large. Larger orders earn "
+                            "more if offers fill quickly and lose more if "
+                            "they do not")
     flips.add_argument("--top", type=_non_negative_int, default=10)
     flips.add_argument("--deep", type=_non_negative_int, default=15,
                        help="candidates to deep-check against 14d history")

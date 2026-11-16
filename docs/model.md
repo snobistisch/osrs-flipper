@@ -75,9 +75,10 @@ identically by the browser, the CLI, the agent and the dashboard:
    and the queue cannot be seen. The execution optimiser therefore prices
    inside the spread when that reaches volume, and an item whose spread is a
    single gp reaches none. Of the volume its price does beat, an Active
-   offer is sized on 30% (`crossing_capture_share`); Away and Max profit on
-   a queue share of one sixteenth or less. "Order size" below has the
-   reason and the measurement.
+   offer is sized on the queue share by default (order size `careful`,
+   `crossing_capture_share = 0`), or on 15% or 30% if you choose `balanced`
+   or `large`; Away and Max profit on a queue share of one sixteenth or
+   less. "Order size" below has the reason and the measurement.
 3. **Replay.** The concrete offer — those prices, that quantity, the
    strategy's deadline — is placed at many start times across the last day
    and played forward on the buckets that followed each one: a unit is sold
@@ -111,9 +112,9 @@ profit per offer or per slot-hour gave the same result within noise.
 fills. Two things about a private offer cannot be read from them: whether an
 offer at exactly the last traded price fills, and what share of the volume
 that crosses your price reaches you rather than someone else. The model
-assumes "no", and for the share 30% in Active and one sixteenth in Away and
-Max profit (one sixteenth everywhere until 16 November 2026, which is the
-model the rest of this paragraph and the audit describe); the backtest was
+assumes "no", and for the share one sixteenth in every strategy by default
+(the model the rest of this paragraph and the audit describe; the order
+sizes `balanced` and `large` assume 15% and 30% in Active); the backtest was
 run with the share at 3%, 10% and 30% under both answers to the first
 question. The policy beat the
 old Python ranking under most of those assumptions, and its worst case over
@@ -154,8 +155,14 @@ again for an 80% completion, no Active offer could exceed a third of its buy
 limit however much traded, or a sixth where both sides trade alike. The crowd on an item is already in the price the
 sales went through at; it does not need counting a second time.
 
-Active offers are now sized on `crossing_capture_share = 0.30` of the volume
-that trades through their price. What keeps that below one is what public
+Commit `0520b0b` sized Active offers on `crossing_capture_share = 0.30` of the
+volume that trades through their price. That commit came after the held-out
+fortnight had been used, so 0.30 was never evaluated out of sample. Order
+size is therefore a setting: `careful` (the queue share, the default and the
+only value evaluated on held-out data), `balanced` (0.15) and `large` (0.30),
+in the browser next to the strategy and as `--order-size` in `cli.py` and
+`agent.py`. Larger orders earn more if your offers fill quickly and lose
+more if they do not. What keeps the share below one is what public
 trades cannot show: flippers who outbid a new offer once it appears, and
 5-minute averages standing in for the trades inside them. It is an
 assumption, and the backtest says what kind. Tuning period (10–29 October
@@ -166,9 +173,9 @@ the share of it that really arrives):
 
 | Active sized on | strict 3% | strict 10% | strict 30% | touch 3% | touch 10% | touch 30% | mean |
 |---|---|---|---|---|---|---|---|
-| queue share (before) | −2.4k | 3.8k | 11.6k | 3.4k | 7.2k | 16.0k | 6.6k |
-| 15% | −7.7k | 8.5k | 25.2k | −1.4k | 14.4k | 35.8k | 12.5k |
-| **30% (shipped)** | −15.1k | −1.0k | 32.3k | −6.2k | 15.1k | 51.3k | 12.7k |
+| **queue share (`careful`, default)** | −2.4k | 3.8k | 11.6k | 3.4k | 7.2k | 16.0k | 6.6k |
+| 15% (`balanced`) | −7.7k | 8.5k | 25.2k | −1.4k | 14.4k | 35.8k | 12.5k |
+| 30% (`large`, default of `0520b0b`) | −15.1k | −1.0k | 32.3k | −6.2k | 15.1k | 51.3k | 12.7k |
 | 50% | −17.0k | −4.8k | 37.8k | −13.2k | 10.6k | 46.9k | 10.0k |
 
 Read it as a bet, not as a result. Sized on 30% the plan earns about twice
@@ -179,9 +186,11 @@ exactly when the price is falling through it (17,482 Sunfire splinters
 bought and none sold, 1,864 Ascension shards likewise), and the simulator
 sells that stock at the deadline. Valued as stock a patient seller keeps
 listed, 30% earned 23.5k gp/h at `strict 10%` against 8.8k for the queue
-share. 15% has the same mean with half the worst case; 30% was chosen
-because the request was for large orders and price priority argues for the
-upper end, and one constant, mirrored in `CAL` in the browser, changes it.
+share. 15% has the same mean with half the worst case. Commit `0520b0b`
+shipped 30% because the request was for large orders and price priority
+argues for the upper end; since the audit of 16 November 2026 the default is
+`careful` until a new held-out period (starting on or after 14 November 2026)
+or recorded fills say otherwise (`docs/audit-2026-11.md`, addendum).
 These are six 3.5-day bank histories with wide intervals (30% at
 `strict 10%`: −17k to +12k), on the tuning period only: the held-out
 fortnight of the November audit was already spent and has not been used
@@ -706,7 +715,7 @@ The ones most worth fitting first, because they do the most work:
 
 | Parameter | What it claims | Fit it from |
 |---|---|---|
-| `crossing_capture_share` | An Active offer receives 30% of the volume that trades strictly through its price (price priority; the queue share below until 16 November 2026). The largest single lever on order size | Journal: units filled over units that traded through the price while the offer was open |
+| `crossing_capture_share` | The share of the volume that trades strictly through an Active offer's price that reaches it. Default 0, the queue share below (order size `careful`); `balanced` and `large` set 15% and 30% (price priority). The largest single lever on order size | Journal: units filled over units that traded through the price while the offer was open |
 | `resting_capture_share` | Away and Max profit offers, which nobody reprices, keep the queue share (0) | The same, for offers left unwatched |
 | `competitors_at_touch` | Quiet-market floor of the queue share: you are one of 16 offers sharing the volume at your price (8 before November 2026; the smaller share lost less in the backtest when the true share was small) | Journal: observed fill rate over volume at the offer's price |
 | `touch_fill_weight` | An offer at exactly the last traded price earns none of the volume traded there (0) | Journal: fill rate of offers at the traded price against offers one tick inside it |

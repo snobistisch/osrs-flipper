@@ -754,7 +754,8 @@ class PlanParityTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.planner.close()
 
-    def plans(self, strategy, t, capital, account="members", limit_used=None):
+    def plans(self, strategy, t, capital, account="members", limit_used=None,
+              order_size=None):
         import exemptions
         mode, horizon, _, _ = self.walk_forward.STRATEGIES[strategy]
         panel = self.panel
@@ -763,7 +764,10 @@ class PlanParityTests(unittest.TestCase):
         config = filters.automatic_profile(filters.FilterConfig(
             capital=capital, account=account, trade_mode=mode,
             overnight_hours=horizon if mode == "overnight"
-            else engine.DEFAULT_OVERNIGHT_HOURS, nature_rune_cost=nature))
+            else engine.DEFAULT_OVERNIGHT_HOURS, nature_rune_cost=nature,
+            calibration=engine.with_order_size(
+                engine.DEFAULT_CALIBRATION,
+                order_size or engine.DEFAULT_ORDER_SIZE)))
 
         def series(item_id):
             return panel.recent_5m(item_id, t, self.browser.RECENT_HOURS)
@@ -780,7 +784,8 @@ class PlanParityTests(unittest.TestCase):
             "items": {str(k): v for k, v in limit_used["items"].items()},
             "groups": dict(limit_used["groups"])}
         key = self.planner.prepare(panel, snapshot, capital, account, mode,
-                                   horizon, nature, limit_used=browser_usage)
+                                   horizon, nature, limit_used=browser_usage,
+                                   order_size=order_size)
         try:
             javascript = self.planner.allocate(key, capital, config.slots)
         finally:
@@ -858,6 +863,27 @@ class PlanParityTests(unittest.TestCase):
         self.assertNotEqual(
             sorted((r.item_id, r.allocated_quantity) for r in python),
             sorted((r.item_id, r.allocated_quantity) for r in base))
+
+    def test_every_order_size_plans_the_same(self):
+        sizes = {}
+        for order_size in engine.ORDER_SIZES:
+            for strategy in ("active", "overnight"):
+                python, javascript, _ = self.plans(
+                    strategy, self.times[3], 2_000_000, order_size=order_size)
+                label = "{} {}".format(order_size, strategy)
+                self.assertTrue(python, label)
+                self.assertEqual(
+                    sorted((r.item_id, r.buy, r.sell, r.allocated_quantity,
+                            r.allocated_capital) for r in python),
+                    sorted((r["id"], r["buy"], r["sell"], r["qty"],
+                            r["capital"]) for r in javascript), label)
+                sizes[order_size, strategy] = sorted(
+                    (r.item_id, r.allocated_quantity) for r in python)
+        # The setting moves Active and leaves Away alone.
+        self.assertNotEqual(sizes["careful", "active"], sizes["large", "active"])
+        self.assertEqual(sizes["careful", "overnight"],
+                         sizes["large", "overnight"])
+        self.assertEqual(js("ORDER_SIZES")[0], engine.ORDER_SIZES)
 
     def test_free_to_play_profile_matches_too(self):
         python, javascript, _ = self.plans("active", self.times[20], 500_000,

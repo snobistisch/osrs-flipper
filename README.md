@@ -25,9 +25,12 @@ of 5-minute trading, made money in both halves of that day; the funded sizes
 are then chosen under the slot and the bank limit together, and the plan says
 which of the two decided it. That can leave slots or part of the bank
 unused. Active ranks that replayed profit per occupied slot-hour while you
-watch, and sizes each offer on 30% of the volume that trades through its
-price; lower `crossing_capture_share` if your offers fill slower than the
-plan says ([order size](docs/model.md#order-size-16-november-2026)). Away
+watch. Its order size is a setting: `careful` (the default, and the only
+one tested on held-out data) sizes each offer on a queue share of the volume
+that trades through its price, `balanced` and `large` on 15% and 30%. Larger
+orders earn more if your offers fill quickly and lose more if they do not
+([order size](docs/model.md#order-size-16-november-2026); `--order-size` in
+`cli.py` and `agent.py`). Away
 (next check in 1–12 hours, overnight included) estimates inventory bought
 while you are gone — including bids under today's price on items that
 measurably bounce back (a mean-reversion test with about 5% false positives on

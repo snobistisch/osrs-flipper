@@ -187,6 +187,29 @@ test('a used buy limit caps a manually saved offer', () => {
   assert.equal(run(`monitorableRow(${row}).allocatedQty`), 3);
 });
 
+test('order size is saved and restored; old preferences load careful', () => {
+  const { run, storage, elements } = setup();
+  const PREF = 'osrs-flipper.preferences.v2';
+  storage.set(PREF, JSON.stringify({ capital: 1000000, account: 'members',
+    strategy: 'active', horizon: 8, bankRiskPercent: 25, timestep: '1h' }));
+  run('restorePreferences()');
+  assert.equal(elements.get('#f-order-size').value, 'careful');
+  run('state.capital = 1000000');
+  assert.equal(run('readConfig().crossingCaptureShare'), 0);
+  elements.get('#f-order-size').value = 'large';
+  run('savePreferences()');
+  assert.equal(JSON.parse(storage.get(PREF)).orderSize, 'large');
+  elements.get('#f-order-size').value = 'careful';
+  run('restorePreferences()');
+  assert.equal(elements.get('#f-order-size').value, 'large');
+  assert.equal(run('readConfig().crossingCaptureShare'), 0.3);
+  elements.get('#f-order-size').value = 'balanced';
+  assert.equal(run('readConfig().crossingCaptureShare'), 0.15);
+  storage.set(PREF, JSON.stringify({ orderSize: 'huge' }));
+  run('restorePreferences()');
+  assert.equal(elements.get('#f-order-size').value, 'careful');
+});
+
 test('invalid stored records cannot crash rendering', () => {
   const { run, storage } = setup();
   storage.set('osrs-flipper.executions.v1', '{}');
@@ -457,7 +480,9 @@ test('the automatic plan funds on replay evidence and states its reason', async 
     const act = { avgHighPrice: 110, highPriceVolume: 4000, avgLowPrice: 100, lowPriceVolume: 4000 };
     const config = { capital: 1000000, account: "members", slots: 8,
       includeMembers: true, strategy: "active", horizonHours: 4, natureCost: 100,
-      ...automaticFilterProfile(1000000, "members", "active", 25) };
+      ...automaticFilterProfile(1000000, "members", "active", 25),
+      // Sized on 30% of crossing volume: the "large" order size.
+      orderSize: "large", crossingCaptureShare: ORDER_SIZES.large };
     state.capital = config.capital; state.items = items;
     const { rows } = screen(items, { 1: quote, 2: quote }, { 1: act, 2: act },
                             { 1: act, 2: act }, config, ${now});

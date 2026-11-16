@@ -289,16 +289,19 @@ class PolicyTests(unittest.TestCase):
 class CrossingShareTests(unittest.TestCase):
     """Volume that trades through an offer's price reaches it by price
     priority. Sharing it out like a touch queue kept every offer at a
-    fraction of the buy limit, however much traded."""
+    fraction of the buy limit, however much traded. Since 16 November 2026
+    the default order size is "careful" (the queue share), so these select
+    "large" explicitly."""
+
+    LARGE = engine.with_order_size(engine.DEFAULT_CALIBRATION, "large")
 
     def test_the_share_is_price_priority_not_a_place_in_a_queue(self):
-        share = engine.DEFAULT_CALIBRATION.crossing_capture_share
-        self.assertGreater(share, 1.0 / engine.DEFAULT_CALIBRATION
-                           .competitors_at_touch)
+        share = self.LARGE.crossing_capture_share
+        self.assertGreater(share, 1.0 / self.LARGE.competitors_at_touch)
         self.assertLessEqual(share, 1.0)
         # A crowd of any size leaves it alone: the crowd is in the price.
-        self.assertEqual(engine.crossing_share(competitors=16), share)
-        self.assertEqual(engine.crossing_share(competitors=134), share)
+        self.assertEqual(engine.crossing_share(self.LARGE, 16), share)
+        self.assertEqual(engine.crossing_share(self.LARGE, 134), share)
 
     def test_an_offer_nobody_watches_keeps_the_queue_share(self):
         # Away and Max profit: nobody reprices the offer when it is outbid.
@@ -307,12 +310,11 @@ class CrossingShareTests(unittest.TestCase):
                 engine.crossing_share(competitors=16, mode=mode), 1 / 16)
             self.assertAlmostEqual(
                 engine.crossing_share(competitors=134, mode=mode), 1 / 134)
-        resting = replace(engine.DEFAULT_CALIBRATION,
-                          resting_capture_share=0.2)
+        resting = replace(self.LARGE, resting_capture_share=0.2)
         self.assertEqual(engine.crossing_share(
             resting, 16, engine.TradeMode.OVERNIGHT), 0.2)
         self.assertEqual(engine.crossing_share(resting, 16),
-                         engine.DEFAULT_CALIBRATION.crossing_capture_share)
+                         self.LARGE.crossing_capture_share)
 
     def test_switched_off_it_is_the_old_queue_share(self):
         queue = replace(engine.DEFAULT_CALIBRATION, crossing_capture_share=0.0)
@@ -321,8 +323,8 @@ class CrossingShareTests(unittest.TestCase):
         whole = replace(engine.DEFAULT_CALIBRATION, crossing_capture_share=3.0)
         self.assertEqual(engine.crossing_share(whole, 16), 1.0)
 
-    def plan(self, calibration=engine.DEFAULT_CALIBRATION,
-             mode=engine.TradeMode.ACTIVE):
+    def plan(self, calibration=None, mode=engine.TradeMode.ACTIVE):
+        calibration = self.LARGE if calibration is None else calibration
         # 4,000 units a side every five minutes: 192 buy limits a window.
         items = {1: Item(1, "Busy", True, 1000, 1, None)}
         quotes = {1: Quote(110, NOW - 30, 100, NOW - 30)}
@@ -340,8 +342,7 @@ class CrossingShareTests(unittest.TestCase):
 
     def test_a_busy_item_is_sized_to_its_buy_limit(self):
         row = self.plan()
-        self.assertEqual(row.buy_share,
-                         engine.DEFAULT_CALIBRATION.crossing_capture_share)
+        self.assertEqual(row.buy_share, self.LARGE.crossing_capture_share)
         self.assertEqual(row.sell_share, row.buy_share)
         self.assertEqual(row.qty_per_window, 1000)
         self.assertEqual(row.allocated_quantity, 1000)
@@ -370,6 +371,52 @@ class CrossingShareTests(unittest.TestCase):
             flat(), buy=100, sell=110, qty=50, buy_share=1.0, sell_share=1.0,
             mode=engine.TradeMode.ACTIVE, horizon_hours=4.0)
         self.assertEqual(replayed.bought_share, 0.0)
+
+
+class OrderSizeTests(unittest.TestCase):
+    """The Active order-size setting (audit F-01): careful is the default."""
+
+    def shares(self, order_size):
+        calibration = engine.with_order_size(engine.DEFAULT_CALIBRATION,
+                                             order_size)
+        return {mode: engine.crossing_share(calibration, 16, mode)
+                for mode in engine.TradeMode}
+
+    def test_default_is_careful_the_queue_share(self):
+        self.assertEqual(engine.DEFAULT_ORDER_SIZE, "careful")
+        self.assertEqual(engine.DEFAULT_CALIBRATION.crossing_capture_share, 0.0)
+        self.assertEqual(engine.DEFAULT_CALIBRATION.resting_capture_share, 0.0)
+
+    def test_careful(self):
+        shares = self.shares("careful")
+        for mode in engine.TradeMode:
+            self.assertAlmostEqual(shares[mode], 1 / 16, msg=mode)
+
+    def test_balanced(self):
+        shares = self.shares("balanced")
+        self.assertEqual(shares[engine.TradeMode.ACTIVE], 0.15)
+        self.assertAlmostEqual(shares[engine.TradeMode.OVERNIGHT], 1 / 16)
+        self.assertAlmostEqual(shares[engine.TradeMode.PROFIT], 1 / 16)
+
+    def test_large(self):
+        shares = self.shares("large")
+        self.assertEqual(shares[engine.TradeMode.ACTIVE], 0.30)
+        self.assertAlmostEqual(shares[engine.TradeMode.OVERNIGHT], 1 / 16)
+        self.assertAlmostEqual(shares[engine.TradeMode.PROFIT], 1 / 16)
+
+    def test_unknown_order_size_is_rejected(self):
+        with self.assertRaises(ValueError):
+            engine.with_order_size(engine.DEFAULT_CALIBRATION, "huge")
+
+    def test_cli_flag_sets_the_calibration(self):
+        import cli
+        for name, share in engine.ORDER_SIZES.items():
+            opts = cli.parse_args(["--order-size", name])
+            config = cli.config_from(opts, 100)
+            self.assertEqual(config.calibration.crossing_capture_share, share)
+        opts = cli.parse_args([])
+        self.assertEqual(cli.config_from(opts, 100).calibration
+                         .crossing_capture_share, 0.0)
 
 
 class LimitUsageTests(unittest.TestCase):

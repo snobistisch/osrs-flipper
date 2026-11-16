@@ -54,6 +54,13 @@ def parse_args(argv):
                    default=engine.DEFAULT_OVERNIGHT_HOURS,
                    help="hours until you next check the GE in away mode "
                         "(default: 8; presets 1, 2, 4, 6, 8, 10, 12)")
+    p.add_argument("--order-size", choices=list(engine.ORDER_SIZES),
+                   default=engine.DEFAULT_ORDER_SIZE,
+                   help="Active order size: the share of the volume trading "
+                        "through an offer's price it is sized on (careful 0, "
+                        "balanced 15%%, large 30%%). Larger orders earn more "
+                        "if your offers fill quickly and lose more if they do "
+                        "not. Only careful has been tested on held-out data")
     p.add_argument("--top", type=_non_negative_int, default=20,
                    help="rows to show")
     p.add_argument("--deep", type=_non_negative_int, default=15,
@@ -116,7 +123,9 @@ def config_from(opts, nature_cost: int) -> filters.FilterConfig:
         capital=opts.capital, account=engine.AccountType(opts.account),
         trade_mode=engine.TradeMode(opts.strategy),
         overnight_hours=opts.overnight_hours,
-        nature_rune_cost=nature_cost)
+        nature_rune_cost=nature_cost,
+        calibration=engine.with_order_size(engine.DEFAULT_CALIBRATION,
+                                           opts.order_size))
     if not opts.no_policy:
         config = filters.automatic_profile(config, opts.bank_risk)
     explicit = {

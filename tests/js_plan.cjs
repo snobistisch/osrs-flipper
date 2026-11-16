@@ -68,6 +68,11 @@ const PREPARE = `(async (snapshot) => {
     ...automaticFilterProfile(snapshot.capital, snapshot.account,
                               snapshot.strategy, risk),
   };
+  // Order size (pages from 16 November 2026 on): the Active capture share.
+  if (typeof ORDER_SIZES !== "undefined") {
+    config.orderSize = snapshot.orderSize ?? DEFAULT_ORDER_SIZE;
+    config.crossingCaptureShare = ORDER_SIZES[config.orderSize];
+  }
   state.capital = snapshot.capital;
   state.natureCost = snapshot.natureCost;
   state.items = items;

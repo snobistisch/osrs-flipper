@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
@@ -343,11 +343,15 @@ class Calibration:
     # 15k against 7k if offers at the traded price fill as well, and -1k
     # against 4k if they do not. Where it was 3% it lost 15k gp/h against 2k:
     # a larger buy fills in full exactly when the price is falling through
-    # it. docs/model.md section 0 has the table. Lower it if your offers fill
-    # slower than the time band says; 0 restores the queue share.
+    # it. docs/model.md section 0 has the table.
+    #
+    # The default is 0, the queue share ("careful" in ORDER_SIZES): it is the
+    # only value evaluated on the held-out fortnight (commit f0aaa57). 0.15
+    # ("balanced") and 0.30 ("large", the default of commit 0520b0b) were
+    # chosen on the tuning period only, so they are opt-in.
     # CALIBRATE: journal units filled / units that traded through the price
     # while the offer was open.
-    crossing_capture_share: float = 0.30
+    crossing_capture_share: float = 0.0
     # The same share for an offer that rests unwatched: Away, and Max profit
     # with its day-long deadline. Price priority has to be kept up. Nobody
     # reprices these offers when they are outbid, and behind a better bid
@@ -514,6 +518,22 @@ class Calibration:
 
 
 DEFAULT_CALIBRATION = Calibration()
+
+# Order size for Active: the share of crossing volume an offer is sized on.
+# Larger orders earn more if offers fill quickly and lose more if they do not.
+# Only "careful" has been tested on held-out data (docs/audit-2026-11.md,
+# addendum). Away and Max profit keep resting_capture_share whatever is set.
+ORDER_SIZES = {"careful": 0.0, "balanced": 0.15, "large": 0.30}
+DEFAULT_ORDER_SIZE = "careful"
+
+
+def with_order_size(calibration: Calibration, order_size: str) -> Calibration:
+    """The calibration for a plan at one of the ORDER_SIZES."""
+    if order_size not in ORDER_SIZES:
+        raise ValueError("order size must be one of {}".format(
+            sorted(ORDER_SIZES)))
+    return replace(calibration,
+                   crossing_capture_share=ORDER_SIZES[order_size])
 
 
 # ---------------------------------------------------------------------------
