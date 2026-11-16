@@ -2878,6 +2878,12 @@ const MEDIAN_WINDOW_DAYS = 14;
 const VOLUME_BASELINE_DAYS = 30;
 const VOLUME_RECENT_DAYS = 30;
 const VOLUME_LOOKBACK_DAYS = 180;
+/* The OSRS Wiki price feed changed source on 30 September 2026: before it,
+   RuneLite clients only; since, Jagex, covering every game client. Volumes on
+   the two sides are not comparable. The exact switch time on that day is not
+   published, so this is 00:00 UTC. Same as merch.FEED_SOURCE_CHANGE_TS. */
+const FEED_SOURCE_CHANGE_TS = 1790726400;
+const FEED_SOURCE_CHANGE_NOTE = "Volume comparison spans the 30 September 2026 data-source change.";
 const MIN_BASKET_FOR_DRIFT = 8;
 const DAYS_PER_YEAR = 365;
 
@@ -3080,6 +3086,22 @@ function volumeChange(points, recentDays = VOLUME_RECENT_DAYS,
   return (recent.reduce((a, b) => a + b, 0) / recent.length - pastMean) / pastMean;
 }
 
+/* Whether volumeChange compares a window before FEED_SOURCE_CHANGE_TS with
+   one after it; false whenever volumeChange gives null. Mirrors
+   merch.volume_change_spans_source_change. */
+function volumeChangeSpansSourceChange(points, recentDays = VOLUME_RECENT_DAYS,
+                                       lookbackDays = VOLUME_LOOKBACK_DAYS) {
+  if (volumeChange(points, recentDays, lookbackDays) == null) return false;
+  const usable = comparableVolumePoints(points);
+  const recent = usable.slice(-recentDays);
+  const start = Math.max(0, usable.length - lookbackDays - Math.floor(recentDays / 2));
+  const past = usable.slice(start, start + recentDays);
+  const stamps = (window) => window.map((p) => p.timestamp)
+    .filter((t) => typeof t === "number" && Number.isFinite(t));
+  return stamps(past).some((t) => t < FEED_SOURCE_CHANGE_TS) &&
+    stamps(recent).some((t) => t >= FEED_SOURCE_CHANGE_TS);
+}
+
 /* Trade volume across the game is not constant. Measured over a year on live
    data, every watchlist item — blood runes, diamonds and raid uniques alike —
    was down between 50% and 86%. Read absolutely that says the whole game is in
@@ -3219,6 +3241,7 @@ function dailyView(points, price = null) {
     median14d: median14d ? Math.round(median14d) : null,
     depth, volumeToday, volumeBaseline: baseline, volumeRatio: ratio,
     volumeChange6m: volumeChange(points),
+    volumeChangeSpansSourceChange: volumeChangeSpansSourceChange(points),
     crash: crashSignal(depth, ratio),
     // Filled by applyMarketContext: unknowable from one item alone, so it
     // stays null rather than defaulting to something reassuring.
@@ -5481,10 +5504,10 @@ function renderPlan(config) {
 }
 
 /* Badge markup, shared by the flip table and the merch/crash table. */
-function tagHtml(tags) {
+function tagHtml(tags, titles = {}) {
   if (!tags || !tags.length) return '<span class="dim">—</span>';
   return tags.map((tag) =>
-    `<span class="tag tag-${tag}">${escapeHtml(BADGE_LABELS[tag] || tag)}</span>`
+    `<span class="tag tag-${tag}"${titles[tag] ? ` title="${escapeHtml(titles[tag])}"` : ""}>${escapeHtml(BADGE_LABELS[tag] || tag)}</span>`
   ).join("");
 }
 
@@ -5616,7 +5639,9 @@ const MERCH_COLUMNS = [
       `${v.volumeChangeRelative >= 0 ? "+" : ""}${
         Math.round(v.volumeChangeRelative * 100)}%` },
   { key: "tags", label: "Type", cell: (v) => tagHtml(
-      classifyItem(v.id, v.price || 0, v.members, v.limit, v.trend, v.crash, v.supply)) },
+      classifyItem(v.id, v.price || 0, v.members, v.limit, v.trend, v.crash, v.supply),
+      v.supply && v.volumeChangeSpansSourceChange
+        ? { [v.supply]: FEED_SOURCE_CHANGE_NOTE } : {}) },
   { key: "merchScore", label: "Merch",
     title: "Annual rate discounted by how much of the movement the trend explains. Zero unless rising.",
     cell: (v) => {

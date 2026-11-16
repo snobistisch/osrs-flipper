@@ -181,6 +181,21 @@ class ParityTests(unittest.TestCase):
         self.assertEqual(python, [[category, group]
                                   for _, category, group in CATEGORY_TABLE])
 
+    def test_volume_comparison_across_the_feed_change_matches(self):
+        import merch
+        from tests.test_merch import daily_points
+        cases = [daily_points("2026-03-01", "2026-11-15"),
+                 daily_points("2026-05-01", "2027-05-15"),
+                 daily_points("2026-09-01", "2026-11-15")]
+        browser = js(*("volumeChangeSpansSourceChange({})".format(
+            json.dumps(points)) for points in cases))
+        self.assertEqual(browser, [True, False, False])
+        self.assertEqual(
+            browser, [merch.volume_change_spans_source_change(points)
+                      for points in cases])
+        self.assertEqual(js("FEED_SOURCE_CHANGE_TS")[0],
+                         merch.FEED_SOURCE_CHANGE_TS)
+
     def test_partial_fill_distribution_matches(self):
         cases = [(100, 0.05, 7200), (5_000, 0.05, 7200), (1, 0.0, 7200),
                  (250, 1.5, 60), (40_000, 2.0, 14_400)]

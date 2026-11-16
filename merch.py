@@ -84,6 +84,14 @@ VOLUME_BASELINE_DAYS = 30
 # and is the only way to compare like with like.
 VOLUME_SKIP_LAST = 1
 
+# The OSRS Wiki price feed changed source on 30 September 2026: before it,
+# data came from RuneLite clients only; since, from Jagex, covering every game
+# client. Volumes on the two sides of that day are not comparable. The exact
+# switch time on that day is not published, so this is 00:00 UTC.
+FEED_SOURCE_CHANGE_TS = 1790726400
+FEED_SOURCE_CHANGE_NOTE = ("Volume comparison spans the 30 September 2026 "
+                           "data-source change.")
+
 # A supply crunch is item-specific, so it has to be measured against the rest
 # of the market rather than in absolute terms. Below this many items in the
 # basket the median is not a market estimate, and the module refuses to badge
@@ -457,6 +465,31 @@ def volume_change(points: Sequence[dict],
     return (sum(recent) / len(recent) - past_mean) / past_mean
 
 
+def volume_change_spans_source_change(
+        points: Sequence[dict], recent_days: int = VOLUME_RECENT_DAYS,
+        lookback_days: int = VOLUME_LOOKBACK_DAYS) -> bool:
+    """Whether volume_change compares a window before FEED_SOURCE_CHANGE_TS
+    with one after it. False whenever volume_change itself gives None.
+
+    The market-median normalisation removes the part of the jump every item
+    shares, not any part that differs per item, so the badge stays and says
+    so (FEED_SOURCE_CHANGE_NOTE).
+    """
+    if volume_change(points, recent_days, lookback_days) is None:
+        return False
+    usable = _comparable_volume_points(points)
+    recent = usable[-recent_days:]
+    start = max(0, len(usable) - lookback_days - recent_days // 2)
+    past = usable[start:start + recent_days]
+
+    def stamps(window):
+        return [p.get("timestamp") for p in window
+                if isinstance(p.get("timestamp"), (int, float))
+                and not isinstance(p.get("timestamp"), bool)]
+    return (any(t < FEED_SOURCE_CHANGE_TS for t in stamps(past))
+            and any(t >= FEED_SOURCE_CHANGE_TS for t in stamps(recent)))
+
+
 CRASH = "CRASH"
 DIP = "DIP"
 DIPPED_STABLE = "DIPPED_STABLE"
@@ -574,6 +607,8 @@ class DailyView:
     volume_change_relative: Optional[float] = None
     market_drift: Optional[float] = None
     supply: Optional[str] = None
+    # The six-month volume comparison straddles FEED_SOURCE_CHANGE_TS.
+    volume_change_spans_source_change: bool = False
 
     @property
     def has_signal(self) -> bool:
@@ -612,7 +647,9 @@ def daily_view(points: Sequence[dict], price: Optional[float] = None,
         median_14d=int(round(median_14d)) if median_14d else None,
         depth=depth, volume_today=volume_today, volume_baseline=baseline,
         volume_ratio=ratio, volume_change_6m=change_6m,
-        crash=crash_signal(depth, ratio, calibration=calibration))
+        crash=crash_signal(depth, ratio, calibration=calibration),
+        volume_change_spans_source_change=volume_change_spans_source_change(
+            points))
 
 
 def apply_market_context(

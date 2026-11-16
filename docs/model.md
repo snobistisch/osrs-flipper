@@ -664,6 +664,17 @@ has doubled in a year).
   trend line is nearly yesterday's, so OLS standard errors are far too small —
   a pure random walk comes out at `|t|` of thirty. The slope's t is widened for
   AR(1) residual autocorrelation before anything is concluded from it.
+- **The feed changed source on 30 September 2026.** Before that day the
+  OSRS Wiki prices came from RuneLite clients only; since then they come from
+  Jagex and cover every game client, so volumes on the two sides of the day
+  are not comparable. The six-month volume comparison straddles it until
+  about April 2027. The market-median normalisation below removes the part of
+  the jump every item shares; it cannot remove a part that differs per item,
+  so a supply badge whose comparison spans the change carries the note
+  "Volume comparison spans the 30 September 2026 data-source change."
+  (`merch.volume_change_spans_source_change`). Calibrations measured before
+  that day (`volume_forecast_log_sigma`, `reference_fallback_max_divergence`)
+  should be re-measured on later data.
 - **A supply crunch is measured against the market, not in absolute terms.**
   Total trade volume in the game moves a long way over six months. Measured on
   live data every item on the watchlist — blood runes, diamonds and raid

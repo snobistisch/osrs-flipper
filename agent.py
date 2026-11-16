@@ -552,6 +552,11 @@ def cmd_merch(opts) -> int:
         print("Market-wide volume moved {:+.0%} over six months; VOL vs MKT "
               "has that divided out, so it shows only what belongs to the "
               "item.".format(drift))
+    spanning = [names.get(item_id, str(item_id)) for item_id, view in ranked
+                if view.supply and view.volume_change_spans_source_change]
+    if spanning:
+        print("{} ({})".format(merch.FEED_SOURCE_CHANGE_NOTE,
+                               ", ".join(spanning)))
     for problem in problems:
         print("  ! {}".format(problem), file=sys.stderr)
     return 0

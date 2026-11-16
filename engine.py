@@ -268,6 +268,7 @@ class Calibration:
     # 0.50-0.58 on the same 15 days. The two errors are independent, so they
     # add in quadrature. CALIBRATE: refit on the tick archive once it holds
     # weeks rather than hours, and split by liquidity if the tiers separate.
+    # Measured before or across the 30 September 2026 data-source change; re-measure on later data.
     volume_forecast_log_sigma: float = 0.6
     # Extra width for a rate that was never checked against 14-day history.
     # Until the deep check measures reach, every unit of side volume is assumed
@@ -304,6 +305,7 @@ class Calibration:
     # units an hour, where the average rests on one or two trades: yellow boots
     # at 1 unit/hour printed 1918/2013 against a reference of 3145/5000.
     # CALIBRATE: from the journal, as the fill rate of flips admitted this way.
+    # Measured before or across the 30 September 2026 data-source change; re-measure on later data.
     reference_fallback_max_divergence: float = 0.25
 
     # What an offer earns from volume that traded at EXACTLY its own price.
@@ -985,7 +987,7 @@ def fill_estimate(qty: float, rate: float, horizon_seconds: float,
                   mu: Optional[float] = None) -> FillEstimate:
     """Expected partial fill and an 80% interval for a timed offer.
 
-    The Wiki/RuneLite feed measures completed trades but exposes neither the
+    The Wiki feed (all game clients since 30 September 2026) measures completed trades but exposes neither the
     standing queue nor transaction batch sizes. Treating a whole batch as one
     exponential event therefore invents false precision and discards partial
     fills. Instead, realised throughput is ``rate * M`` where ``M`` is a

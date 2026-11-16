@@ -282,6 +282,46 @@ class VolumeTests(unittest.TestCase):
         self.assertGreater(merch.volume_ratio(recent, baseline), 0.7)
 
 
+def daily_points(first: str, last: str, volume: int = 500):
+    """One 24h bucket per day from ``first`` to ``last`` inclusive (UTC)."""
+    from datetime import datetime, timezone
+    start = int(datetime.strptime(first, "%Y-%m-%d")
+                .replace(tzinfo=timezone.utc).timestamp())
+    end = int(datetime.strptime(last, "%Y-%m-%d")
+              .replace(tzinfo=timezone.utc).timestamp())
+    return [{"timestamp": t, "avgHighPrice": 1005, "avgLowPrice": 995,
+             "highPriceVolume": volume, "lowPriceVolume": volume}
+            for t in range(start, end + 1, 86400)]
+
+
+class FeedSourceChangeTests(unittest.TestCase):
+    """The price feed switched from RuneLite to Jagex on 30 September 2026."""
+
+    def test_constant_is_midnight_utc_on_30_september_2026(self):
+        from datetime import datetime, timezone
+        self.assertEqual(
+            datetime.fromtimestamp(merch.FEED_SOURCE_CHANGE_TS, timezone.utc),
+            datetime(2026, 9, 30, tzinfo=timezone.utc))
+
+    def test_a_comparison_across_the_change_is_flagged(self):
+        points = daily_points("2026-03-01", "2026-11-15")
+        self.assertIsNotNone(merch.volume_change(points))
+        self.assertTrue(merch.volume_change_spans_source_change(points))
+        self.assertTrue(merch.daily_view(points)
+                        .volume_change_spans_source_change)
+
+    def test_a_comparison_after_the_change_is_not(self):
+        points = daily_points("2026-05-01", "2027-05-15")
+        self.assertIsNotNone(merch.volume_change(points))
+        self.assertFalse(merch.volume_change_spans_source_change(points))
+
+    def test_no_comparison_means_no_flag(self):
+        points = daily_points("2026-09-01", "2026-11-15")
+        self.assertIsNone(merch.volume_change(points))
+        self.assertFalse(merch.volume_change_spans_source_change(points))
+        self.assertFalse(merch.volume_change_spans_source_change([]))
+
+
 class MarketContextTests(unittest.TestCase):
     """The regression that live data exposed.
 
