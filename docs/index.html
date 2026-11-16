@@ -1279,6 +1279,24 @@ const CAL = {
   // has no price priority over older offers. 0 counts only volume that traded
   // at a strictly worse price. CALIBRATE from journal fills.
   touch_fill_weight: 0.0,
+  // Share of the volume that traded strictly THROUGH an Active offer's price
+  // that reaches the offer. Not a queue share: the Grand Exchange matches on
+  // price first, and age only decides between offers at the same price, so
+  // units that traded below a buy at B went to offers B would have been
+  // served before. The crowd is already in that price. Until 16 November
+  // 2026 this volume was shared out like a touch queue, and no offer could
+  // approach a buy limit. Below one for what public trades cannot show:
+  // flippers who outbid a new offer, and 5-minute averages. An ASSUMPTION and
+  // a bet: in the backtest it earned 32k gp/h against 12k where the real
+  // share was 30%, and lost 15k against 2k where it was 3% (docs/model.md
+  // section 0). Lower it if your offers fill slower than the time band says;
+  // 0 restores the queue share.
+  // CALIBRATE from journal fills.
+  crossing_capture_share: 0.30,
+  // The same share for an offer that rests unwatched (Away, Max profit).
+  // Nobody reprices it when it is outbid; every larger value earned less on
+  // average in the backtest, so these keep the queue share (0).
+  resting_capture_share: 0.0,
   min_leg_seconds: 60,             // DERIVED: human time per leg
   adverse_selection_gamma: 0.5,    // CALIBRATE
   drift_penalty_falling: 8.0,      // CALIBRATE
@@ -1491,6 +1509,19 @@ function aggressiveness(edge, competitors) {
   const ceiling = Math.max(share, Math.min(1, CAL.priority_capture_ceiling));
   return share + (ceiling - share) *
     (1 - Math.exp(-edge / Math.max(CAL.aggressiveness_scale, 1e-9)));
+}
+
+/* Share of the volume trading THROUGH your price that reaches you, where that
+   volume is measured (reachView, replayOffer). An offer at a better price is
+   matched before the offers the trades actually hit, so for an Active offer
+   this is the capture share and not a place in a queue. Away and Max profit
+   read the resting share. 0 means the queue share. Mirrors
+   engine.crossing_share. */
+function crossingShare(competitors, strategy = "active") {
+  const capture = strategy === "active"
+    ? CAL.crossing_capture_share : CAL.resting_capture_share;
+  if (capture > 0) return Math.min(1, capture);
+  return aggressiveness(0, competitors);
 }
 
 /* ---- fill time ---- */
@@ -3833,12 +3864,13 @@ function optimiseExecution(o) {
     // each candidate price is measured: a buy at B meets the instant-sell
     // volume that traded below B, a sell at S the instant-buy volume above S.
     // Price improvement then pays through the volume it reaches, so the
-    // invented queue-jump curve is not used.
+    // invented queue-jump curve is not used. For Active the offer's share of
+    // that measured volume is price priority, not a place in the touch queue.
     let volume = bid.volume, sellVolume = o.sellVolume1h, buyShare, sellShare;
     if (o.reach) {
       volume = o.reach.buyVolumePerHour(bid.buy, CAL.touch_fill_weight);
       sellVolume = o.reach.sellVolumePerHour(sell, CAL.touch_fill_weight);
-      buyShare = sellShare = aggressiveness(0, o.competitors);
+      buyShare = sellShare = crossingShare(o.competitors, o.config.strategy);
     } else {
       buyShare = aggressiveness(priceEdge(Math.max(0, bid.step), originalSpread), o.competitors);
       sellShare = aggressiveness(priceEdge(sellImprovement, originalSpread), o.competitors);
@@ -4104,6 +4136,15 @@ function planReason(selection, strategy) {
 const PORTFOLIO_QTY_FRACTIONS = [0.25, 0.5, 0.75, 1.0];
 const PORTFOLIO_CANDIDATES = 40;
 
+/* At most this many funded rows from one family of items that move together
+   (potions, runes, food, ...). "other" is not a family: it is every item no
+   family claims, most of the game, and counting it as one capped the whole
+   plan at three such items. Mirrors filters.category_full. */
+const CATEGORY_CAP = 3;
+const UNCATEGORISED = "other";
+const categoryFull = (counts, category) =>
+  category !== UNCATEGORISED && (counts[category] || 0) >= CATEGORY_CAP;
+
 /* Fund the sizes that maximise the strategy's objective under both the slot
    and the bank constraint. `rows` is the ranking in order; `capital` and
    `slots` are what is still free. Mirrors filters._allocate_portfolio:
@@ -4123,7 +4164,7 @@ function allocatePortfolio(rows, capital, slots, reserved, config) {
     const unit = rowUnitCapital(row);
     if (!(row.rankingValue > 0) || !(row.expected > 0) || !(unit > 0) || unit > bank ||
         !meetsCompletionTarget(row, config) || !hasFundingEvidence(row, config)) continue;
-    if ((categoryCount[row.category] || 0) >= 3) continue;
+    if (categoryFull(categoryCount, row.category)) continue;
     if (row.limitGroup != null) {
       if (groups.has(row.limitGroup)) continue;
       groups.add(row.limitGroup);
@@ -5265,7 +5306,7 @@ function renderPlan(config) {
     const reason = planReason(state.planSelection, config.strategy);
     parts.push(reason.charAt(0).toUpperCase() + reason.slice(1) + ".");
   }
-  const evidence = `A flip is funded only if its exact offer, replayed on the item's own last day of 5-minute trading, made money in both halves of that window: a buy fills only where sellers traded below your price, a sell only where buyers traded above it, and stock still unsold at the deadline is sold at the going instant-sell price. EXPECTED is that replayed result, not the quoted margin times quantity. It is measured on public trades, not on your fills — how much of the passing volume reaches your offer is an assumption until you log real offers.`;
+  const evidence = `A flip is funded only if its exact offer, replayed on the item's own last day of 5-minute trading, made money in both halves of that window: a buy fills only where sellers traded below your price, a sell only where buyers traded above it, and stock still unsold at the deadline is sold at the going instant-sell price. EXPECTED is that replayed result, not the quoted margin times quantity. It is measured on public trades, not on your fills — how much of the passing volume reaches your offer is an assumption until you log real offers${config.strategy === "active" && CAL.crossing_capture_share > 0 ? `: Active offers are sized on ${Math.round(CAL.crossing_capture_share * 100)}% of the volume that trades through their price, so an offer that fills slower than its time band was sized too large` : ""}.`;
   const cap = `At most ${config.bankRiskPercent}% of your bank (${formatGp(config.maxPositionCapital)}) goes into one new trade.`;
   if (config.strategy === "profit") {
     parts.push(`${evidence} Max profit ranks that profit per flip, not per hour, with a ${Math.round(config.horizonHours)}h deadline; a slow flip can win here and its time band is on its card. ${cap} Each card says when to re-check: if nothing has bought by then, re-check the live margin.`);

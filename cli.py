@@ -129,6 +129,16 @@ def config_from(opts, nature_cost: int) -> filters.FilterConfig:
                               if value is not None})
 
 
+def _capture_note(config) -> str:
+    """What an Active offer's size rests on, for the note under the table."""
+    share = config.calibration.crossing_capture_share
+    if config.trade_mode is not engine.TradeMode.ACTIVE or share <= 0:
+        return ""
+    return (" (Active offers are sized on {:.0%} of the volume that trades "
+            "through their price; an offer that fills slower than its time "
+            "band was sized too large)".format(share))
+
+
 def print_crash_table(result, opts):
     """The same rows, read for dislocation instead of for throughput."""
     crashed = [(row, merch.crash_context(row)) for row in result.rows]
@@ -291,8 +301,8 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
               "sold at the instant-sell price. Only such rows are funded. "
               "This is measured on public trades, not on your fills: the "
               "share of passing volume that reaches your offer is an "
-              "assumption until journal.py holds real offers.".format(
-                  ranking_explanation))
+              "assumption until journal.py holds real offers{}.".format(
+                  ranking_explanation, _capture_note(config)))
     print("MEASURED = the score before shrinkage; {} is after. Ranking hundreds "
           "of noisy estimates surfaces the biggest errors rather than the "
           "biggest values, so each score is pulled toward the market average "

@@ -313,6 +313,48 @@ class Calibration:
     # last traded price against offers placed one tick inside it.
     touch_fill_weight: float = 0.0
 
+    # Share of the volume that traded strictly THROUGH an Active offer's price
+    # that reaches the offer. This is not the queue share at the top of this
+    # class, and until 16 November 2026 it was wrongly taken to be: crossing
+    # volume was shared out like a touch queue, one sixteenth of it, or one
+    # buy limit per window on a busy item. The Grand Exchange matches on
+    # price first. A sale executes against the highest buy offer and a
+    # purchase against the lowest sell offer; age only decides between offers
+    # at the SAME price (OSRS Wiki, "Grand Exchange", read 2026-11-16). Units
+    # that traded below a buy at B therefore went to offers B would have been
+    # served before, however many of them there were. The crowd is already in
+    # that price: the more flippers work an item, the higher the bid the
+    # sales went through at, and the less volume is left below B.
+    #
+    # With the queue share an Active offer could never approach a buy limit:
+    # sized for an 80% round trip it came to about 1% of the volume crossing
+    # its price in a window, 6% of the limit on an item trading five limits
+    # a window, and the plan put 1.1m of a 20m bank to work.
+    #
+    # What keeps the share below one is what public trades cannot show:
+    # flippers who outbid a new offer after it appears, and 5-minute averages
+    # that stand in for the trades inside them. It stays an ASSUMPTION, and
+    # a bet. On the tuning period (10-29 Oct 2026, 925 decisions, 20m bank)
+    # the Active plan sized on 30% earned 32k gp/h where the real share was
+    # 30%, against 12k sized on the queue share. Where it was 10% it earned
+    # 15k against 7k if offers at the traded price fill as well, and -1k
+    # against 4k if they do not. Where it was 3% it lost 15k gp/h against 2k:
+    # a larger buy fills in full exactly when the price is falling through
+    # it. docs/model.md section 0 has the table. Lower it if your offers fill
+    # slower than the time band says; 0 restores the queue share.
+    # CALIBRATE: journal units filled / units that traded through the price
+    # while the offer was open.
+    crossing_capture_share: float = 0.30
+    # The same share for an offer that rests unwatched: Away, and Max profit
+    # with its day-long deadline. Price priority has to be kept up. Nobody
+    # reprices these offers when they are outbid, and behind a better bid
+    # they fill only when the price falls through it. Measured on the same
+    # period, every larger value (15%, 30%, 50%) earned less than the queue
+    # share on average over the six fill assumptions, and under at least
+    # four of them, for Away and for Max profit alike. So they keep it.
+    # 0 = the queue share.
+    resting_capture_share: float = 0.0
+
     # Human time per leg. Not a market property: placing an offer, returning to
     # the GE and collecting takes a human about a minute, so no flip cycles
     # faster than this however thick the book is. It floors the mean-rate point
@@ -821,6 +863,27 @@ def aggressiveness(edge: float,
     scale = max(calibration.aggressiveness_scale, 1e-9)
     ceiling = max(share, min(1.0, calibration.priority_capture_ceiling))
     return share + (ceiling - share) * (1.0 - math.exp(-edge / scale))
+
+
+def crossing_share(calibration: Calibration = DEFAULT_CALIBRATION,
+                   competitors: Optional[float] = None,
+                   mode: TradeMode = TradeMode.ACTIVE) -> float:
+    """Share of the volume trading THROUGH your price that reaches you.
+
+    Used where that volume is measured (ReachView, replay_offer). An offer at
+    a better price is matched before the offers the trades actually hit, so
+    for an Active offer this is ``crossing_capture_share`` and not a place
+    in a queue: the queue share of ``aggressiveness`` is for volume at
+    exactly your price. Away and Max profit read ``resting_capture_share``.
+    A share of 0 means the queue share, which is what every strategy used
+    before 16 November 2026.
+    """
+    capture = float(calibration.crossing_capture_share
+                    if TradeMode(mode) is TradeMode.ACTIVE
+                    else calibration.resting_capture_share)
+    if capture > 0:
+        return min(1.0, capture)
+    return aggressiveness(0.0, calibration, competitors)
 
 
 def price_edge(depth: int, spread: float) -> float:

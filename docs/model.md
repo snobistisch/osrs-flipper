@@ -74,7 +74,10 @@ identically by the browser, the CLI, the agent and the dashboard:
    (`touch_fill_weight`), because there the offer queues behind older ones
    and the queue cannot be seen. The execution optimiser therefore prices
    inside the spread when that reaches volume, and an item whose spread is a
-   single gp reaches none.
+   single gp reaches none. Of the volume its price does beat, an Active
+   offer is sized on 30% (`crossing_capture_share`); Away and Max profit on
+   a queue share of one sixteenth or less. "Order size" below has the
+   reason and the measurement.
 3. **Replay.** The concrete offer — those prices, that quantity, the
    strategy's deadline — is placed at many start times across the last day
    and played forward on the buckets that followed each one: a unit is sold
@@ -108,8 +111,11 @@ profit per offer or per slot-hour gave the same result within noise.
 fills. Two things about a private offer cannot be read from them: whether an
 offer at exactly the last traded price fills, and what share of the volume
 that crosses your price reaches you rather than someone else. The model
-assumes "no" and one sixteenth; the backtest was run with the share at 3%,
-10% and 30% under both answers to the first question. The policy beat the
+assumes "no", and for the share 30% in Active and one sixteenth in Away and
+Max profit (one sixteenth everywhere until 16 November 2026, which is the
+model the rest of this paragraph and the audit describe); the backtest was
+run with the share at 3%, 10% and 30% under both answers to the first
+question. The policy beat the
 old Python ranking under most of those assumptions, and its worst case over
 them was better in every strategy; but for Max profit the old ranking earns
 more *if* offers at the traded price do fill, and the policy was not shown
@@ -120,6 +126,87 @@ as well or better, because it puts four times as much of the bank to work.
 The amounts the backtest reports are what a deliberately conservative
 simulator allows, not a profit forecast. Logging real offers with
 `journal.py` is what turns these assumptions into measurements.
+
+#### Order size (16 November 2026)
+
+The complaint was that a 20m bank got offers of a few hundred thousand gp:
+on a live snapshot the Active plan put 1.1m of 20m to work, 889 Teleport to
+house tablets against a buy limit of 15,000 while about 19,000 an hour traded
+through the bid. Two things caused it.
+
+**A bug.** The plan allows three rows from one family of items that move
+together (potions, runes, food). Every item no family claims is filed under
+"other", and "other" was counted as a family too. The whole plan was capped
+at three uncategorised items, which is most of the game, and slots stayed
+empty beside rows that had passed every check. `filters.category_full` no
+longer counts it.
+
+**An assumption that contradicts the game.** The Grand Exchange matches on
+price first: a sale executes against the highest buy offer, a purchase
+against the lowest sell offer, and age only decides between offers at the
+*same* price (OSRS Wiki, *Grand Exchange*, read 2026-11-16). The reach in
+step 2 already counts only volume that traded at a strictly worse price than
+the offer, so those units went to offers this one would have been served
+before. The model nevertheless shared them out like a queue at the touch: one
+sixteenth, or `buy limit / volume per window` on a busy item, which caps the
+mean rate at one buy limit per window. Halved for the round trip and cut
+again for an 80% completion, no Active offer could exceed a third of its buy
+limit however much traded, or a sixth where both sides trade alike. The crowd on an item is already in the price the
+sales went through at; it does not need counting a second time.
+
+Active offers are now sized on `crossing_capture_share = 0.30` of the volume
+that trades through their price. What keeps that below one is what public
+trades cannot show: flippers who outbid a new offer once it appears, and
+5-minute averages standing in for the trades inside them. It is an
+assumption, and the backtest says what kind. Tuning period (10–29 October
+2026, 925 decisions, 20m bank, members), bank gp per hour, the plan sized on
+each share against the six fill assumptions of the simulator (`strict`: only
+volume through the price fills; `touch`: volume at the price as well; then
+the share of it that really arrives):
+
+| Active sized on | strict 3% | strict 10% | strict 30% | touch 3% | touch 10% | touch 30% | mean |
+|---|---|---|---|---|---|---|---|
+| queue share (before) | −2.4k | 3.8k | 11.6k | 3.4k | 7.2k | 16.0k | 6.6k |
+| 15% | −7.7k | 8.5k | 25.2k | −1.4k | 14.4k | 35.8k | 12.5k |
+| **30% (shipped)** | −15.1k | −1.0k | 32.3k | −6.2k | 15.1k | 51.3k | 12.7k |
+| 50% | −17.0k | −4.8k | 37.8k | −13.2k | 10.6k | 46.9k | 10.0k |
+
+Read it as a bet, not as a result. Sized on 30% the plan earns about twice
+as much on average and three times as much if 30% is what really arrives,
+and it loses money where the real share is 3%, or 10% with nothing filling
+at the traded price. The loss has one cause: a larger buy fills in full
+exactly when the price is falling through it (17,482 Sunfire splinters
+bought and none sold, 1,864 Ascension shards likewise), and the simulator
+sells that stock at the deadline. Valued as stock a patient seller keeps
+listed, 30% earned 23.5k gp/h at `strict 10%` against 8.8k for the queue
+share. 15% has the same mean with half the worst case; 30% was chosen
+because the request was for large orders and price priority argues for the
+upper end, and one constant, mirrored in `CAL` in the browser, changes it.
+These are six 3.5-day bank histories with wide intervals (30% at
+`strict 10%`: −17k to +12k), on the tuning period only: the held-out
+fortnight of the November audit was already spent and has not been used
+again, so none of this is out-of-sample evidence.
+
+Away and Max profit keep the queue share (`resting_capture_share = 0`).
+Price priority has to be kept up, and nobody reprices an offer that rests
+unwatched. Measured the same way, every larger share earned less on average:
+
+| sized on | Away, mean of six | Max profit, mean of six |
+|---|---|---|
+| queue share (shipped) | 2.0k | 13.5k |
+| 15% | 0.2k | 7.9k |
+| 30% | −1.9k | 6.4k |
+| 50% | −1.5k | 9.2k |
+
+The category fix reaches all three strategies, and it is not free either:
+more funded rows are more chances of the rare bad one. In that run the
+queue-share Active plan came to 3.8k gp/h at `strict 10%` against 8.2k in
+the audit's run of the same period, and most of the difference is one flip:
+two Elemental amulets bought at 1.76m each, shortly before the item fell to
+1.0m.
+`python3 -m backtest run --method policy_x00 --method policy_x15 --method
+policy_x30 --method policy_x50` reproduces the tables; logging real offers
+with `journal.py` is what replaces the assumption with a measurement.
 
 ### 1. A slot is time, not a container
 
@@ -505,8 +592,7 @@ bank in one item; the total plan can never commit more than the available
 bank. Nothing is funded before the deep check has run, because the evidence a
 row is funded on (section 0) does not exist until then. The planner leaves a
 slot or part of the bank unused when no further candidate made money in its
-replay; on the backtest's conservative assumptions that is most of the bank,
-and the plan note says so rather than filling slots to look busy. Each Active
+replay, and the plan note says so rather than filling slots to look busy. Each Active
 card states when to re-check an untouched offer (its buy leg's P90, at most
 45 minutes) and when to cancel what is left; a saved flip shows these as
 reminders.
@@ -615,7 +701,9 @@ The ones most worth fitting first, because they do the most work:
 
 | Parameter | What it claims | Fit it from |
 |---|---|---|
-| `competitors_at_touch` | Quiet-market floor: you are one of 16 offers sharing the volume your price reaches (8 before November 2026; the smaller share lost less in the backtest when the true share was small) | Journal: observed fill rate over volume that crossed the offer |
+| `crossing_capture_share` | An Active offer receives 30% of the volume that trades strictly through its price (price priority; the queue share below until 16 November 2026). The largest single lever on order size | Journal: units filled over units that traded through the price while the offer was open |
+| `resting_capture_share` | Away and Max profit offers, which nobody reprices, keep the queue share (0) | The same, for offers left unwatched |
+| `competitors_at_touch` | Quiet-market floor of the queue share: you are one of 16 offers sharing the volume at your price (8 before November 2026; the smaller share lost less in the backtest when the true share was small) | Journal: observed fill rate over volume at the offer's price |
 | `touch_fill_weight` | An offer at exactly the last traded price earns none of the volume traded there (0) | Journal: fill rate of offers at the traded price against offers one tick inside it |
 | `aggressiveness_scale` | How quickly price improvement reaches its capture ceiling | Journal: fill rate against distance from the touch |
 | `fill_rate_log_sigma` | Queue-position uncertainty in the fill rate, centred to mean one | `journal.py calibration`: censored fit of the log error |

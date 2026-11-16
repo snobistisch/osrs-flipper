@@ -394,6 +394,21 @@ def item_category(name: str) -> str:
     return "other"
 
 
+# At most this many funded rows from one family of items that move together
+# (potions, runes, food, ...). "other" is not a family. It is every item no
+# family claims, most of the game, and counting it as one capped the whole
+# plan at three such items: slots stayed empty beside rows that had passed
+# every check.
+CATEGORY_CAP = 3
+UNCATEGORISED = "other"
+
+
+def category_full(counts: Dict[str, int], category: str) -> bool:
+    """Whether the plan already holds its share of a correlated family."""
+    return (category != UNCATEGORISED
+            and counts.get(category, 0) >= CATEGORY_CAP)
+
+
 def _concession_points(maximum: int) -> List[int]:
     if maximum <= 0:
         return [0]
@@ -464,7 +479,9 @@ def _optimise_execution(
     volume that traded above S. Price improvement then pays through the
     volume it reaches, so the invented queue-jump curve is not used, and an
     offer exactly at the last traded price is credited only
-    ``touch_fill_weight`` of what traded there.
+    ``touch_fill_weight`` of what traded there. The offer's share of that
+    measured volume is ``engine.crossing_share``: for Active, price priority
+    rather than a place in the queue at the touch.
     """
     if fill_log_sigma is None:
         fill_log_sigma = engine.fill_log_sigma(config.calibration)
@@ -529,8 +546,8 @@ def _optimise_execution(
             weight = calibration.touch_fill_weight
             volume = reach.buy_volume_per_hour(buy, weight)
             sell_volume = reach.sell_volume_per_hour(sell, weight)
-            buy_share = sell_share = engine.aggressiveness(
-                0.0, calibration, competitors)
+            buy_share = sell_share = engine.crossing_share(
+                calibration, competitors, config.trade_mode)
         else:
             buy_share = engine.aggressiveness(
                 engine.price_edge(max(0, step), original_spread),
@@ -1169,7 +1186,7 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
                 or not has_funding_evidence(row, config)):
             continue
         # Three related slots is diversification, four is a concentrated bet.
-        if category_count.get(row.category, 0) >= 3:
+        if category_full(category_count, row.category):
             continue
         selected.append(row)
         category_count[row.category] = category_count.get(row.category, 0) + 1
@@ -1242,9 +1259,10 @@ def _allocate_portfolio(result: ScreenResult,
     Candidates come from the ranking in order, with the same guards as the
     proportional allocation: positive expectation, the completion target, the
     funding evidence the policy asks for, at most three rows per correlated
-    category and one row per connected buy-limit family. Each candidate is
-    offered at a quarter, half, three quarters and all of its modelled size,
-    re-scored at that exact quantity, and engine.select_portfolio picks.
+    category (category_full) and one row per connected buy-limit family.
+    Each candidate is offered at a quarter, half, three quarters and all of
+    its modelled size, re-scored at that exact quantity, and
+    engine.select_portfolio picks.
     """
     rows = list(result.rows)
     bank = min(config.capital, config.position_bank)
@@ -1260,7 +1278,7 @@ def _allocate_portfolio(result: ScreenResult,
                 or not meets_completion_target(row, config)
                 or not has_funding_evidence(row, config)):
             continue
-        if category_count.get(row.category, 0) >= 3:
+        if category_full(category_count, row.category):
             continue
         if row.limit_group is not None:
             if row.limit_group in groups:

@@ -24,6 +24,8 @@ Families:
   equal split of the free coins. No fill model at all.
 - ``ROBUSTNESS_GRID``: the policy under other values of the two constants
   public data cannot pin down.
+- ``CAPTURE_GRID``: the policy sized on other shares of the volume crossing
+  its price.
 """
 from __future__ import annotations
 
@@ -100,10 +102,13 @@ class Context:
 
     def screen_for(self, config: filters.FilterConfig) -> filters.ScreenResult:
         """Stage-1 screen, shared by every method whose config scores alike."""
-        # touch_fill_weight only acts on measured reach, never in stage 1.
+        # touch_fill_weight and crossing_capture_share only act on measured
+        # reach, never in stage 1.
         key = (config.capital, config.account, config.trade_mode,
                config.overnight_hours, config.nature_rune_cost,
-               replace(config.calibration, touch_fill_weight=0.0),
+               replace(config.calibration, touch_fill_weight=0.0,
+                       crossing_capture_share=0.0,
+                       resting_capture_share=0.0),
                config.max_position_capital)
         if key not in self._screens:
             s = self.snapshot
@@ -363,9 +368,36 @@ LEGACY_COMPETITORS_AT_TOUCH = 8.0
 
 def legacy(config: filters.FilterConfig) -> filters.FilterConfig:
     """The pre-audit Python pipeline: default FilterConfig, the old queue
-    constant. With this config filters reproduces commit 92cee13."""
+    constant, crossing volume shared out like that queue. With this config
+    filters reproduces commit 92cee13, except that the plan is no longer
+    capped at three uncategorised items (filters.category_full)."""
     return replace(config, calibration=replace(
-        config.calibration, competitors_at_touch=LEGACY_COMPETITORS_AT_TOUCH))
+        config.calibration, competitors_at_touch=LEGACY_COMPETITORS_AT_TOUCH,
+        crossing_capture_share=0.0, resting_capture_share=0.0))
+
+
+def policy_capture(share: float) -> Callable[[filters.FilterConfig],
+                                             filters.FilterConfig]:
+    """The shipped policy sized on another share of crossing volume, in
+    every strategy: resting offers get it too, which is how it was measured
+    that they should not."""
+    def configure(config: filters.FilterConfig) -> filters.FilterConfig:
+        config = policy(config)
+        return replace(config, calibration=replace(
+            config.calibration, crossing_capture_share=share,
+            resting_capture_share=share))
+    return configure
+
+
+# The policy under other values of the share of crossing volume an offer is
+# sized on. 0 is the queue share every strategy used until 16 November 2026;
+# the shipped policy is policy_x30 for Active and policy_x00 for the rest.
+CAPTURE_GRID = {
+    "policy_x00": 0.0,
+    "policy_x15": 0.15,
+    "policy_x30": 0.30,
+    "policy_x50": 0.50,
+}
 
 
 def _registry() -> Dict[str, Method]:
@@ -393,6 +425,8 @@ def _registry() -> Dict[str, Method]:
                 Pipeline("policy", config=policy, reach=True)]
     methods += [Pipeline(name, config=calibrated(**values), reach=True)
                 for name, values in ROBUSTNESS_GRID.items()]
+    methods += [Pipeline(name, config=policy_capture(share), reach=True)
+                for name, share in CAPTURE_GRID.items()]
     methods += [Browser("browser"), Browser("browser_baseline")]
     return {method.name: method for method in methods}
 
@@ -400,7 +434,8 @@ def _registry() -> Dict[str, Method]:
 METHODS: Dict[str, Method] = _registry()
 BROWSER_METHODS = ("browser", "browser_baseline")
 DEFAULT_METHODS = [name for name in METHODS if name not in BROWSER_METHODS
-                   and name not in ROBUSTNESS_GRID]
+                   and name not in ROBUSTNESS_GRID
+                   and name not in CAPTURE_GRID]
 
 
 def register(method: Method) -> None:

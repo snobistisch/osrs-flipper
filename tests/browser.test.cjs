@@ -354,7 +354,9 @@ test('the Max profit plan card and note describe profit per flip', () => {
   assert.match(note, /Max profit ranks that profit per flip, not per hour/);
   // The note says what EXPECTED rests on and what it cannot know.
   assert.match(note, /replayed on the item's own last day/);
-  assert.match(note, /an assumption until you log real offers/);
+  assert.match(note, /an assumption until you log real offers\./);
+  // Max profit rests unwatched and keeps the queue share: no size claim.
+  assert.doesNotMatch(note, /Active offers are sized on/);
 });
 
 /* ---- audit 2026-11 ---- */
@@ -416,5 +418,7 @@ test('the automatic plan funds on replay evidence and states its reason', async 
   const note = elements.get('#plan-note').textContent;
   assert.match(note, /Neither bank nor slots ran out/);
   assert.match(note, /made money in both halves/);
+  // An Active plan says what its order sizes rest on.
+  assert.match(note, /Active offers are sized on 30% of the volume that trades through their price/);
   assert.match(elements.get('#status').textContent, /1 flip made money when replayed/);
 });

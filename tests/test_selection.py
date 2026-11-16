@@ -286,6 +286,126 @@ class PolicyTests(unittest.TestCase):
                 filters.FilterConfig(**{field: value})
 
 
+class CrossingShareTests(unittest.TestCase):
+    """Volume that trades through an offer's price reaches it by price
+    priority. Sharing it out like a touch queue kept every offer at a
+    fraction of the buy limit, however much traded."""
+
+    def test_the_share_is_price_priority_not_a_place_in_a_queue(self):
+        share = engine.DEFAULT_CALIBRATION.crossing_capture_share
+        self.assertGreater(share, 1.0 / engine.DEFAULT_CALIBRATION
+                           .competitors_at_touch)
+        self.assertLessEqual(share, 1.0)
+        # A crowd of any size leaves it alone: the crowd is in the price.
+        self.assertEqual(engine.crossing_share(competitors=16), share)
+        self.assertEqual(engine.crossing_share(competitors=134), share)
+
+    def test_an_offer_nobody_watches_keeps_the_queue_share(self):
+        # Away and Max profit: nobody reprices the offer when it is outbid.
+        for mode in (engine.TradeMode.OVERNIGHT, engine.TradeMode.PROFIT):
+            self.assertAlmostEqual(
+                engine.crossing_share(competitors=16, mode=mode), 1 / 16)
+            self.assertAlmostEqual(
+                engine.crossing_share(competitors=134, mode=mode), 1 / 134)
+        resting = replace(engine.DEFAULT_CALIBRATION,
+                          resting_capture_share=0.2)
+        self.assertEqual(engine.crossing_share(
+            resting, 16, engine.TradeMode.OVERNIGHT), 0.2)
+        self.assertEqual(engine.crossing_share(resting, 16),
+                         engine.DEFAULT_CALIBRATION.crossing_capture_share)
+
+    def test_switched_off_it_is_the_old_queue_share(self):
+        queue = replace(engine.DEFAULT_CALIBRATION, crossing_capture_share=0.0)
+        self.assertAlmostEqual(engine.crossing_share(queue, 16), 1 / 16)
+        self.assertAlmostEqual(engine.crossing_share(queue, 134), 1 / 134)
+        whole = replace(engine.DEFAULT_CALIBRATION, crossing_capture_share=3.0)
+        self.assertEqual(engine.crossing_share(whole, 16), 1.0)
+
+    def plan(self, calibration=engine.DEFAULT_CALIBRATION,
+             mode=engine.TradeMode.ACTIVE):
+        # 4,000 units a side every five minutes: 192 buy limits a window.
+        items = {1: Item(1, "Busy", True, 1000, 1, None)}
+        quotes = {1: Quote(110, NOW - 30, 100, NOW - 30)}
+        activity = {1: Activity(110, 48_000, 100, 48_000)}
+        history = [{"timestamp": NOW - (60 - i) * 21600, "avgHighPrice": 110,
+                    "highPriceVolume": 288_000, "avgLowPrice": 100,
+                    "lowPriceVolume": 288_000} for i in range(60)]
+        config = filters.FilterConfig(capital=1_000_000, trade_mode=mode,
+                                      calibration=calibration)
+        result = filters.screen(items, quotes, activity, activity, config, NOW)
+        result = filters.refine_with_history(
+            result, lambda _: history, config, NOW,
+            fetch_reach=lambda _: flat(count=365, volume=4000))
+        return filters.allocate(result, config).rows[0]
+
+    def test_a_busy_item_is_sized_to_its_buy_limit(self):
+        row = self.plan()
+        self.assertEqual(row.buy_share,
+                         engine.DEFAULT_CALIBRATION.crossing_capture_share)
+        self.assertEqual(row.sell_share, row.buy_share)
+        self.assertEqual(row.qty_per_window, 1000)
+        self.assertEqual(row.allocated_quantity, 1000)
+        self.assertGreaterEqual(row.replay.completion_rate, 0.99)
+
+    def test_the_queue_share_left_it_at_a_sixth_of_the_limit(self):
+        # The regression: one buy limit per window as the mean rate, halved
+        # for the round trip and cut again for an 80% completion.
+        queue = replace(engine.DEFAULT_CALIBRATION, crossing_capture_share=0.0)
+        row = self.plan(queue)
+        self.assertAlmostEqual(row.buy_share, 1000 / (48_000 * 4))
+        self.assertLess(row.qty_per_window, 200)
+
+    def test_away_and_max_profit_rows_carry_the_queue_share(self):
+        for mode in (engine.TradeMode.OVERNIGHT, engine.TradeMode.PROFIT):
+            row = self.plan(mode=mode)
+            self.assertAlmostEqual(row.buy_share, 1000 / (48_000 * 4))
+            self.assertEqual(row.sell_share, row.buy_share)
+
+    def test_an_offer_at_the_traded_price_still_reaches_nothing(self):
+        # Price priority needs a better price. At the same price the offer
+        # is behind the queue, whatever the capture share.
+        view = engine.reach_view(flat())
+        self.assertEqual(view.buy_volume_per_hour(100), 0.0)
+        replayed = engine.replay_offer(
+            flat(), buy=100, sell=110, qty=50, buy_share=1.0, sell_share=1.0,
+            mode=engine.TradeMode.ACTIVE, horizon_hours=4.0)
+        self.assertEqual(replayed.bought_share, 0.0)
+
+
+class CategoryCapTests(unittest.TestCase):
+    """Three rows per family of related items; "other" is not a family."""
+
+    NAMES = ("Alpha", "Bravo", "Charlie", "Delta", "Echo",
+             "Fire rune", "Water rune", "Earth rune", "Air rune", "Mind rune")
+
+    def plan(self, **overrides):
+        items = {i: Item(i, name, True, 1000, 1, None)
+                 for i, name in enumerate(self.NAMES, 1)}
+        quotes = {i: Quote(130, NOW - 30, 100, NOW - 30) for i in items}
+        activity = {i: Activity(130, 1000, 100, 1000) for i in items}
+        config = filters.FilterConfig(
+            capital=10_000_000, account=engine.AccountType.MEMBERS,
+            **overrides)
+        result = filters.screen(items, quotes, activity, activity, config, NOW)
+        return [row for row in filters.allocate(result, config).rows
+                if row.allocated_quantity]
+
+    def test_uncategorised_items_are_not_capped_together(self):
+        for allocation in filters.ALLOCATIONS:
+            funded = self.plan(allocation=allocation)
+            counts = {}
+            for row in funded:
+                counts[row.category] = counts.get(row.category, 0) + 1
+            # Eight slots: every uncategorised row, and three of the runes.
+            self.assertEqual(counts, {"other": 5, "runes": 3}, allocation)
+
+    def test_category_full(self):
+        self.assertFalse(filters.category_full({"other": 40}, "other"))
+        self.assertFalse(filters.category_full({"runes": 2}, "runes"))
+        self.assertTrue(filters.category_full({"runes": 3}, "runes"))
+        self.assertFalse(filters.category_full({}, "potions"))
+
+
 class DeepTargetTests(unittest.TestCase):
     """Which rows the per-item history budget is spent on."""
 

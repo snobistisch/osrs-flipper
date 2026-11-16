@@ -114,6 +114,13 @@ class ParityTests(unittest.TestCase):
             ("touchCompetitors(10, null)", engine.touch_competitors(10, None)),
             ("aggressiveness(0.2, 30)", engine.aggressiveness(0.2, competitors=30)),
             ("aggressiveness(0, 8)", engine.aggressiveness(0, competitors=8)),
+            ("crossingShare(8)", engine.crossing_share(competitors=8)),
+            ("crossingShare(134, 'active')",
+             engine.crossing_share(competitors=134)),
+            ("crossingShare(134, 'overnight')", engine.crossing_share(
+                competitors=134, mode=engine.TradeMode.OVERNIGHT)),
+            ("crossingShare(20, 'profit')", engine.crossing_share(
+                competitors=20, mode=engine.TradeMode.PROFIT)),
             ("adverseSelectionFactor(-0.4, -0.03)", engine.adverse_selection_factor(-0.4, -0.03)),
             ("holdingRisk(0.05, 7200)", engine.holding_risk(0.05, 7200)),
             ("stalenessFactor(600, 0)", engine.staleness_factor(600, 0)),
@@ -130,6 +137,18 @@ class ParityTests(unittest.TestCase):
                 self.assertEqual(bool(python[2]), bool(browser[2]), expression)
             else:
                 self.assertClose(python, browser, expression)
+
+    def test_category_cap_matches(self):
+        cases = [({"other": 40}, "other"), ({"runes": 2}, "runes"),
+                 ({"runes": 3}, "runes"), ({}, "potions")]
+        self.assertEqual(
+            js(*("categoryFull({}, {})".format(json.dumps(counts),
+                                               json.dumps(category))
+                 for counts, category in cases)),
+            [filters.category_full(counts, category)
+             for counts, category in cases])
+        self.assertEqual(js("[CATEGORY_CAP, UNCATEGORISED]")[0],
+                         [filters.CATEGORY_CAP, filters.UNCATEGORISED])
 
     def test_partial_fill_distribution_matches(self):
         cases = [(100, 0.05, 7200), (5_000, 0.05, 7200), (1, 0.0, 7200),
