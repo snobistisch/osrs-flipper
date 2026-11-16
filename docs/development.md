@@ -42,16 +42,14 @@ working from the repository root. To run one module:
 | `test_fill_time.py` | Fill-time distribution: P50/P80/P90 bands, completion odds, sequential legs, sizing, consistency, and the censored journal backtest |
 | `test_api.py`, `test_agent.py`, `test_journal.py` | API behavior, agent output/state, and trade outcomes |
 | `test_audit.py` | Regression cases for invalid data, arithmetic, archive integrity, and persistence |
-| `test_app.py` | Streamlit landing page and dashboard smoke tests |
 | `test_docs_port.py` | Shared Python/JavaScript constants and static browser guards |
 | `test_parity.py` | Executable Python/JavaScript parity: tax, fees, fills, scores, shrinkage, history, execution choice, rounding, reach, replay, portfolio selection, and the whole funded plan on a slice of real prices, equal to the gp (needs Node; skipped without it) |
 | `test_selection.py` | Measured reach, offer replay, slot-and-bank selection against brute force, the automatic profile, deep-check targeting and CLI overrides |
 | `test_backtest.py` | The backtest harness: no look-ahead, simulator rules, buy limits, balanced books, deterministic output |
 | `browser.test.cjs` | Executable browser behavior and compilation of the complete inline script |
 
-The Streamlit tests skip when dashboard dependencies are missing. Install
-`requirements-dev.txt` to run the complete suite. The Node tests use the built-in
-test runner and need no npm dependencies.
+Install `requirements-dev.txt` (numpy and ruff) to run the complete suite. The
+Node tests use the built-in test runner and need no npm dependencies.
 
 ## Two implementations
 

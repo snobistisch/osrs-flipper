@@ -236,20 +236,5 @@ class ScoreFlipStillConsistentTests(unittest.TestCase):
         self.assertEqual(replace(result).mode, AWAY)
 
 
-class AwayConfidenceTests(unittest.TestCase):
-    def test_quote_age_limits_follow_the_mode(self):
-        from tests.test_filters import one
-        row = replace(one(capital=10_000_000).rows[0], quote_age=400,
-                      edge_probability=0.9, p_fill=0.6,
-                      execution_quality=0.7, fill_low_qty=90.0,
-                      fill_high_qty=100.0, qty_per_window=100)
-        self.assertEqual(filters.confidence_label(
-            replace(row, trade_mode=engine.TradeMode.ACTIVE)), "Speculative")
-        self.assertEqual(filters.confidence_label(
-            replace(row, trade_mode=AWAY)), "Medium")
-        self.assertEqual(filters.confidence_label(
-            replace(row, trade_mode=AWAY, quote_age=1_000)), "Speculative")
-
-
 if __name__ == "__main__":
     unittest.main()

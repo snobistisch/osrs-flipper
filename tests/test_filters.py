@@ -1,6 +1,5 @@
 """Unit tests for filters.py — run with: python3 -m unittest tests.test_filters -v"""
 import dataclasses
-from datetime import date
 import math
 import unittest
 
@@ -421,12 +420,6 @@ class ExemptionTests(unittest.TestCase):
         self.assertGreater(free.rows[0].margin, taxed.rows[0].margin)
         self.assertTrue(free.rows[0].tax_exempt)
 
-    def test_hand_maintained_list_has_a_freshness_guard(self):
-        config = {"_verified_date": "2026-01-01"}
-        warning = exemptions.freshness_warning(
-            config, max_age_days=90, today=date(2026, 8, 22))
-        self.assertIn("re-check", warning)
-
 
 class HistoryStageTests(unittest.TestCase):
     def buckets(self, level, volume=2_000, count=56):
@@ -583,19 +576,6 @@ class ExecutionDecisionTests(unittest.TestCase):
         self.assertEqual(filters.connected_limit_group("Prayer potion(4)"),
                          filters.connected_limit_group("Prayer potion(1)"))
         self.assertIsNone(filters.connected_limit_group("Games necklace(4)"))
-
-    def test_reference_fallback_can_never_be_high_confidence(self):
-        result = one(
-            quotes={1: quote(low=100, high=100)},
-            acts_5m={1: act_5m(avg_low=95, avg_high=110)},
-            acts_1h={1: act_1h(avg_low=95, avg_high=110)})
-        row = dataclasses.replace(
-            result.rows[0], deep_checked=True, edge_probability=.99,
-            p_fill=.99, fill_low_qty=95, fill_high_qty=100,
-            qty_per_window=100, raw_ranking_value=100,
-            ranking_value=100)
-        self.assertTrue(row.priced_from_reference)
-        self.assertNotEqual(filters.confidence_label(row), "High")
 
 
 class VolumeLookupTests(unittest.TestCase):

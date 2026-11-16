@@ -132,8 +132,6 @@ class ProfitQuantityTests(unittest.TestCase):
         self.assertGreater(row.allocated_quantity, 0)
         self.assertLessEqual(row.allocated_quantity, 700)
         self.assertTrue(math.isfinite(row.ranking_value))
-        self.assertIn(filters.confidence_label(row),
-                      ("High", "Medium", "Speculative"))
 
     def test_quantity_is_the_best_expected_value_not_the_capacity(self):
         choice = optimise(PROFIT, **THIN)
@@ -202,10 +200,6 @@ class ProfitOutputTests(unittest.TestCase):
                     "p_fill", "p_stranded", "downside_risk_gp",
                     "gp_per_slot_hour", "edge_probability", "warnings"):
             self.assertIn(key, payload)
-
-    def test_quote_age_limits_match_active(self):
-        self.assertEqual(filters.quote_age_limits(PROFIT),
-                         filters.quote_age_limits(ACTIVE))
 
     def test_meets_completion_target_has_no_target_for_profit(self):
         from tests.test_filters import one

@@ -60,7 +60,7 @@ held-out fortnight it promised an 82–97% chance of a complete Active round
 trip and delivered 22–50%, and a bank run on its ranking lost money.
 
 The plan is now chosen by one policy, `filters.automatic_profile`, applied
-identically by the browser, the CLI, the agent and the dashboard:
+identically by the browser, the CLI and the agent:
 
 1. **Quality gates.** A quote no older than 10 minutes (15 for Away), a
    minimum of traded volume and net ROI, at least one gp of room inside the

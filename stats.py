@@ -232,9 +232,6 @@ class ShrinkageResult:
     weights: List[float]       # per item: how much of its own estimate survived
     posterior_variances: List[float] = field(default_factory=list)
 
-    @property
-    def shrank_everything(self) -> bool:
-        return self.prior_variance <= 0
 
     def probability_above_mean(self, index: int) -> float:
         """P(this item's true value exceeds the cross-sectional mean).

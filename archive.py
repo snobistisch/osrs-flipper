@@ -34,7 +34,7 @@ DEFAULT_DB = Path(__file__).parent / "cache" / "ticks.db"
 
 # SQLite blocks writers while another connection holds the write lock. A
 # generous timeout costs nothing on an idle database and keeps the collector
-# from dying when a dashboard query overlaps a write.
+# from dying when a reader's query overlaps a write.
 BUSY_TIMEOUT_SECONDS = 120
 
 SCHEMA = """
@@ -84,7 +84,7 @@ class Archive:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path), timeout=BUSY_TIMEOUT_SECONDS)
         self.conn.row_factory = sqlite3.Row
-        # WAL lets the dashboard read while the collector writes.
+        # WAL lets the CLI and the agent read while the collector writes.
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)

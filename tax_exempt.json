@@ -2,7 +2,7 @@
   "_source": "OSRS Wiki, Grand Exchange page, 'Convenience fee and item sink'.",
   "_verified_date": "2026-11-13",
   "_verified": "November 2026: every name on the wiki's list is here and nothing else, apart from the dose and poison variants noted below. Rate 2%, rounded down, capped at 5m per item, in force since 29 May 2025.",
-  "_note": "The wiki API exposes no tax-exempt flag, so this list is maintained by hand. Names are matched case-insensitively against /mapping and any name that matches nothing is reported by the CLI and the dashboard — check that count after every game update rather than trusting this file.",
+  "_note": "The wiki API exposes no tax-exempt flag, so this list is maintained by hand. Names are matched case-insensitively against /mapping and any name that matches nothing is reported by the CLI — check that count after every game update rather than trusting this file.",
   "_naming_traps": [
     "Teleports are listed on the wiki by spell name but appear in /mapping as '<place> teleport (tablet)'. Civitas illa fortis is the exception and carries no suffix.",
     "Only the fully charged Games necklace(8) and Ring of dueling(8) are GE-tradeable; partially used jewellery cannot be traded at all, so lower charges are not items to exempt.",

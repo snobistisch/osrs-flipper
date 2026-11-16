@@ -2282,7 +2282,7 @@ function rescoreAllocated(r) {
 /* Quote age at which confidence drops, by mode: [no longer medium, speculative].
    An Away bid rests for hours, so minutes of quote age matter far less than for
    an Active trade; the automatic Away profile admits 15-minute-old quotes.
-   Same policy as filters.QUOTE_AGE_LIMITS. */
+   Max profit places its offer at the live quote, like Active. */
 const QUOTE_AGE_LIMITS = { active: [180, 300], overnight: [600, 900], profit: [180, 300] };
 const quoteAgeLimits = (mode) => QUOTE_AGE_LIMITS[mode === "overnight" ? "overnight" : "active"];
 
@@ -2290,8 +2290,8 @@ function confidenceLabel(row) {
   const retained = row.shrinkRetention ?? (row.rawRankingValue > 0
     ? row.rankingValue / row.rawRankingValue : 0);
   const width = (row.fillHighQty - row.fillLowQty) / Math.max(1, row.qty);
-  // One policy with filters.confidence_label: the evidence threshold is the
-  // posterior probability that the score beats the market, not the weight.
+  // The evidence threshold is the posterior probability that the score beats
+  // the market, not the shrinkage weight.
   const [freshLimit, staleLimit] = quoteAgeLimits(row.mode);
   if (row.age > staleLimit || (row.regimeScore || 0) >= CAL.regime_shift_threshold) return "speculative";
   if (!row.pricedFromReference && (row.edgeProbability || 0) >= 0.80 && row.deep &&

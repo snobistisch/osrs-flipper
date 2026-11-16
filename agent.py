@@ -22,8 +22,7 @@ Commands:
     status       what is cached, how old it is, whether the archive is running
 
 Stdlib only. It has to run from cron on a machine with no virtualenv activated,
-so nothing here may import pandas, streamlit, or anything else from
-requirements.txt.
+so nothing here may import a third-party package.
 """
 from __future__ import annotations
 

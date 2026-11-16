@@ -187,7 +187,6 @@ class EmpiricalBayesTests(unittest.TestCase):
         estimates = [0.0, 0.1, -0.1, 0.05, -0.05, 0.0, 0.02, -0.02]
         result = stats.empirical_bayes(estimates, [1.0] * len(estimates))
         self.assertEqual(result.prior_variance, 0.0)
-        self.assertTrue(result.shrank_everything)
         for value in result.values:
             self.assertAlmostEqual(value, result.prior_mean, places=9)
 

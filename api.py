@@ -226,10 +226,10 @@ class WikiClient:
             raise ApiError("GET {} returned invalid JSON".format(url)) from exc
 
     def _cached(self, key: str, ttl: float, fetch: Callable[[], object]) -> object:
-        # The Streamlit resource is shared between sessions. Coalesce fetches
-        # and enforce the poll floor even when several sessions refresh at once.
-        # One lock per key: a slow per-item history request must not hold up
-        # /latest for every other session while it retries.
+        # One client may serve several threads. Coalesce fetches and enforce
+        # the poll floor even when several refresh at once. One lock per key:
+        # a slow per-item history request must not hold up /latest for every
+        # other caller while it retries.
         with self._lock:
             key_lock = self._key_locks.setdefault(key, RLock())
         with key_lock:

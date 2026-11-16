@@ -20,7 +20,7 @@ the whole argument for starting it now. It writes a row only when an item's
 trade timestamps actually change, so it tracks real trading activity instead of
 accumulating 13 million identical rows a day.
 
-Once it has data, the Python dashboard and CLI use it automatically, replacing the
+Once it has data, the CLI and the agent use it automatically, replacing the
 single-live-hour volume estimate with one smoothed over days — the difference
 between extrapolating a bucket sampled at peak and one sampled at 4am.
 `python3 collect.py --status` shows what it holds.

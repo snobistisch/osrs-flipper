@@ -1,2 +1,2 @@
--r requirements.txt
+numpy>=1.26,<3
 ruff==0.16.7

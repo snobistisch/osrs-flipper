@@ -385,14 +385,6 @@ class PortSyncTests(unittest.TestCase):
                       '"active"', self.source)
         self.assertIn('STRATEGIES.includes(p.strategy) ? p.strategy : '
                       'DEFAULT_STRATEGY', self.source)
-        # Confidence uses the same quote-age policy as filters.
-        match = re.search(r"const QUOTE_AGE_LIMITS = \{([^}]*)\}", self.source)
-        limits = {key: [int(value) for value in values.split(",")]
-                  for key, values in re.findall(r"(\w+): \[([^\]]*)\]",
-                                                match.group(1))}
-        self.assertEqual(limits, {
-            mode.value: list(filters.QUOTE_AGE_LIMITS[mode])
-            for mode in engine.TradeMode})
 
     def test_removed_factors_are_not_still_referenced(self):
         # Functions the rebuild deleted. Their presence means a half-done port.

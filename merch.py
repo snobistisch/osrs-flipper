@@ -510,10 +510,6 @@ class CrashSignal:
     depth: float
     volume_ratio: float
 
-    @property
-    def label(self) -> str:
-        return BADGE_LABELS[self.kind]
-
 
 def crash_signal(depth: Optional[float], vol_ratio: float,
                  regime_score: float = 0.0,
@@ -610,10 +606,6 @@ class DailyView:
     # The six-month volume comparison straddles FEED_SOURCE_CHANGE_TS.
     volume_change_spans_source_change: bool = False
 
-    @property
-    def has_signal(self) -> bool:
-        return self.crash is not None or self.supply is not None
-
 
 def daily_view(points: Sequence[dict], price: Optional[float] = None,
                calibration: engine.Calibration = engine.DEFAULT_CALIBRATION
@@ -679,10 +671,6 @@ class FlipCrash:
     volume_ratio: Optional[float]
     recovery: float
 
-    @property
-    def badge(self) -> Optional[str]:
-        return self.signal.kind if self.signal is not None else None
-
 
 NO_CRASH = FlipCrash(signal=None, volume_ratio=None, recovery=0.0)
 
@@ -693,7 +681,7 @@ def crash_context(row, bucket_hours: float = engine.HISTORY_BUCKET_HOURS,
     """Classify a deep-checked flip row without fetching anything new.
 
     Duck-typed on `filters.FlipRow` rather than importing it, so this stays
-    usable from the CLI, the dashboard and the agent without any of them
+    usable from the CLI and the agent without either of them
     dragging in the pipeline.
 
     The baseline is the 14-day average bucket converted to an hourly rate, so

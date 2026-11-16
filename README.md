@@ -68,22 +68,10 @@ python3 -m http.server 8000 --directory docs
 Open [localhost:8000](http://localhost:8000). The browser requests market data
 directly from the OSRS Wiki API.
 
-### Python dashboard
-
-Requires Python 3.9 or later. Run from the repository root:
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/streamlit run app.py
-```
-
-These commands use macOS/Linux virtual-environment paths. On Windows, use
-`.venv\Scripts\python.exe` and `.venv\Scripts\streamlit.exe` instead.
-
 ### Command line and agent output
 
-The CLI and agent use only the Python standard library:
+The CLI and agent need Python 3.9 or later and use only the standard
+library. Run them from the repository root:
 
 ```bash
 python3 cli.py --capital 1m --account members --strategy active
@@ -94,18 +82,19 @@ python3 agent.py portfolio list
 ```
 
 Use `--account free-to-play` for the F2P profile and `--help` for available
-options. The CLI, the agent and the dashboard apply the same selection policy
-as the browser, so the same market gives the same plan; a display-filter flag
+options. The CLI and the agent apply the same selection policy as the
+browser, so the same market gives the same plan; a display-filter flag
 replaces one of its gates.
 
 ### Backtest
 
 A walk-forward backtest replays the planner on real price history: decide on
 data up to a moment, realise the offers on what traded afterwards. It needs
-the dashboard requirements (numpy) and about 2.5 hours for the first
-download, which is resumable:
+numpy and about 2.5 hours for the first download, which is resumable:
 
 ```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/python -m backtest fetch      # 35 days of 5m + 90 days of 1h buckets into data/
 .venv/bin/python -m backtest build      # raw buckets -> data/panel
 .venv/bin/python -m backtest run --period tune       # or: --period holdout
@@ -128,7 +117,7 @@ For the tick collector, trade journal, watch alerts, and storage details, see
 | `docs/index.html` | Standalone browser app served by GitHub Pages |
 | `engine.py`, `stats.py`, `filters.py`, `merch.py` | Calculations, statistics, selection, and long-horizon signals |
 | `api.py`, `exemptions.py`, `tax_exempt.json` | Market data and tax exemptions |
-| `app.py`, `cli.py`, `agent.py` | Dashboard, terminal, and agent interfaces |
+| `cli.py`, `agent.py` | Terminal and agent interfaces |
 | `archive.py`, `collect.py`, `journal.py`, `storage.py` | Local history, outcomes, and safe persistence |
 | `backtest/` | Walk-forward backtest on real price history |
 | `tests/` | Python regression tests and executable browser tests |
