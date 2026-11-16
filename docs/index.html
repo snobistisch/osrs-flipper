@@ -3230,7 +3230,19 @@ const THESIS_BY_ID = Object.fromEntries(WATCHLIST);
    minutes, and for the item whose chart is open. /mapping is cached for a
    day. */
 
-const BASE = "https://prices.runescape.wiki/api/v1/osrs";
+/* Requests go to API v1 while it works. When v1 answers a request with HTTP
+   400-499 (not 429), the same request is made once on v2; if that succeeds,
+   that kind of request ("bulk": /latest, /mapping, /5m, /1h; "timeseries")
+   uses v2 for the rest of the session. Not persisted. On v2, /timeseries
+   takes a lookback instead of a timestep; the returned timestep must be the
+   one asked for. The v2 path follows the wiki documentation and one observed
+   response; on v2 five-minute history covers 24 hours instead of about 30. */
+const BASE_V1 = "https://prices.runescape.wiki/api/v1/osrs";
+const BASE_V2 = "https://prices.runescape.wiki/api/v2/osrs";
+const apiBase = { bulk: BASE_V1, timeseries: BASE_V1 };
+const V2_LOOKBACK = { "5m": "24h", "1h": "7d", "6h": "6m", "24h": "1y" };
+const TIMESTEP_SECONDS = { "5m": 300, "1h": 3600, "6h": 21600, "24h": 86400 };
+const usingApiV2 = () => apiBase.bulk === BASE_V2 || apiBase.timeseries === BASE_V2;
 const LATEST_TTL = 30_000;
 const INTERVAL_TTL = { "5m": 60_000, "1h": 300_000 };
 const MAPPING_TTL = 24 * 3600 * 1000;
@@ -3389,13 +3401,13 @@ function cleanHistory(data) {
   return [...rows.values()].sort((a, b) => a.timestamp - b.timestamp);
 }
 
-async function getJson(path) {
+async function getJson(path, base = BASE_V1) {
   let lastError;
   for (let attempt = 0; attempt < 3; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
-      const res = await fetch(BASE + path, {
+      const res = await fetch(base + path, {
         headers: { Accept: "application/json" }, signal: controller.signal,
       });
       if (!res.ok) {
@@ -3403,6 +3415,7 @@ async function getJson(path) {
         if (!retryable) {
           const error = new Error(`${path} returned HTTP ${res.status}`);
           error.permanent = true;
+          error.status = res.status;
           throw error;
         }
         throw new Error(`${path} temporarily returned HTTP ${res.status}`);
@@ -3420,6 +3433,36 @@ async function getJson(path) {
   }
   throw lastError || new Error(`${path} failed`);
 }
+
+/* One request of `kind` on the base in use, with the v1 -> v2 fallback
+   described at BASE_V1. `valid` decides whether a v2 payload may be used. */
+async function apiJson(kind, v1Path, v2Path, valid) {
+  if (apiBase[kind] === BASE_V2) {
+    const payload = await getJson(v2Path, BASE_V2);
+    if (!valid(payload)) throw new Error(`${v2Path}: unexpected API v2 response`);
+    return payload;
+  }
+  try {
+    return await getJson(v1Path, BASE_V1);
+  } catch (error) {
+    if (!(error.status >= 400 && error.status <= 499 && error.status !== 429)) throw error;
+    let payload;
+    try { payload = await getJson(v2Path, BASE_V2); } catch { throw error; }
+    if (!valid(payload)) throw error;
+    apiBase[kind] = BASE_V2;
+    return payload;
+  }
+}
+
+const hasDataObject = (payload) => isRecord(payload) && isRecord(payload.data);
+const bulkJson = (path, valid = hasDataObject) => apiJson("bulk", path, path, valid);
+
+/* A /timeseries request for one item at a v1 timestep. */
+const timeseriesJson = (id, step) => apiJson("timeseries",
+  `/timeseries?id=${id}&timestep=${step}`,
+  `/timeseries?id=${id}&lookback=${V2_LOOKBACK[step]}`,
+  (payload) => isRecord(payload) && Array.isArray(payload.data)
+    && payload.timestep === TIMESTEP_SECONDS[step]);
 
 /* The market snapshot the plan is priced from. A stale per-item history only
    weakens that item's deep check; it must not mark the whole feed stale, or
@@ -3457,7 +3500,7 @@ async function cached(key, ttl, fetcher) {
 }
 
 const fetchLatest = () => cached("latest", LATEST_TTL, async () => {
-  const payload = await getJson("/latest");
+  const payload = await bulkJson("/latest");
   if (!payload || !isRecord(payload.data)) {
     throw new Error("/latest: response has no data object");
   }
@@ -3471,7 +3514,7 @@ const fetchLatest = () => cached("latest", LATEST_TTL, async () => {
 });
 
 const fetchInterval = (step) => cached(step, INTERVAL_TTL[step], async () => {
-  const payload = await getJson("/" + step);
+  const payload = await bulkJson("/" + step);
   if (!payload || !isRecord(payload.data)) {
     throw new Error(`/${step}: response has no data object`);
   }
@@ -3521,7 +3564,7 @@ async function fetchMapping() {
 
   let list;
   try {
-    list = await getJson("/mapping");
+    list = await bulkJson("/mapping", Array.isArray);
     if (!Array.isArray(list)) throw new Error("/mapping: expected a list");
   } catch (error) {
     // Item metadata barely changes; an expired copy beats no ranking during
@@ -3559,7 +3602,7 @@ const fetchTimeseries = (id, step) =>
         if (0 <= Date.now() - stored.at && Date.now() - stored.at < TIMESERIES_TTL) return cleanHistory(stored.data);
       }
     } catch { /* corrupt cache: refetch below */ }
-    const payload = await getJson(`/timeseries?id=${id}&timestep=${step}`);
+    const payload = await timeseriesJson(id, step);
     if (!payload || !Array.isArray(payload.data)) {
       throw new Error("/timeseries: response has no data list");
     }
@@ -3663,7 +3706,7 @@ async function pruneTrendCache() {
 async function fetchTrendSeries(id) {
   const cached = await readTrendCache(id);
   if (cached) return cached;
-  const payload = await getJson(`/timeseries?id=${id}&timestep=${TREND_TIMESTEP}`);
+  const payload = await timeseriesJson(id, TREND_TIMESTEP);
   if (!payload || !Array.isArray(payload.data)) {
     throw new Error("/timeseries: response has no data list");
   }
@@ -5284,8 +5327,8 @@ function tickClock() {
   const age = Date.now() - state.lastLoad;
   const stale = state.feedStale || age > STALE_AFTER_MS;
   dot.className = "dot" + (state.loadFailed ? " down" : stale ? " stale" : "");
-  text.textContent = state.loadFailed ? "NO FEED"
-    : stale ? `STALE ${Math.round(age / 1000)}s` : "LIVE";
+  text.textContent = (state.loadFailed ? "NO FEED"
+    : stale ? `STALE ${Math.round(age / 1000)}s` : "LIVE") + (usingApiV2() ? " · API v2" : "");
   $("#plan").classList.toggle("stale-actions", stale || state.loadFailed);
 }
 

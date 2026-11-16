@@ -336,6 +336,85 @@ test('the option table keeps its stale-price refusal and its normal save', () =>
   assert.ok(fresh.storage.get('osrs-flipper.slot-locks.v1'));
 });
 
+/* A fetch stub: `answer(version, url)` returns a fetch response or throws. */
+function apiStub(context, answer) {
+  const urls = [];
+  context.fetch = async (url) => {
+    urls.push(url);
+    return answer(url.includes('/api/v2/') ? 2 : 1, new URL(url));
+  };
+  return urls;
+}
+const okJson = (body) => ({ ok: true, status: 200, json: async () => body });
+const v2Series = (url, timestep) => okJson({ data: [{ timestamp: 1, avgHighPrice: 10.5,
+  avgLowPrice: 9, highPriceVolume: 1, lowPriceVolume: 1 }], itemId: 1,
+  timestep: timestep ?? { '24h': 300, '7d': 3600, '6m': 21600, '1y': 86400 }[
+    url.searchParams.get('lookback')] });
+const liveText = (run, elements) => {
+  run('state.lastLoad = Date.now(); state.loadFailed = false; state.feedStale = false; tickClock()');
+  return elements.get('#livetext').textContent;
+};
+
+test('API v1 that works is the only API used', async () => {
+  const { run, context, elements } = setup();
+  const urls = apiStub(context, (version, url) => url.pathname.endsWith('/timeseries')
+    ? okJson({ data: [] }) : okJson({ data: {} }));
+  await run('fetchLatest()');
+  await run('timeseriesJson(4151, "6h")');
+  assert.ok(urls.length === 2 && urls.every((url) => url.includes('/api/v1/')));
+  assert.equal(liveText(run, elements), 'LIVE');
+});
+
+test('API v1 that answers 404 moves each kind of request to v2', async () => {
+  const { run, context, elements } = setup();
+  const urls = apiStub(context, (version, url) => {
+    if (version === 1) return { ok: false, status: 404 };
+    return url.pathname.endsWith('/timeseries') ? v2Series(url) : okJson({ data: {} });
+  });
+  await run('fetchLatest()');
+  assert.deepEqual(urls.map((url) => new URL(url).pathname), ['/api/v1/osrs/latest', '/api/v2/osrs/latest']);
+  await run('fetchInterval("5m")');
+  assert.equal(new URL(urls[2]).pathname, '/api/v2/osrs/5m');
+  const series = await run('timeseriesJson(4151, "6h")');
+  assert.equal(series.data.length, 1);
+  const asked = new URL(urls[urls.length - 1]);
+  assert.equal(asked.pathname, '/api/v2/osrs/timeseries');
+  assert.equal(asked.searchParams.get('lookback'), '6m');
+  assert.equal(asked.searchParams.get('timestep'), null);
+  assert.ok(liveText(run, elements).endsWith(' · API v2'));
+});
+
+test('a v2 series with the wrong timestep is not used', async () => {
+  const { run, context } = setup();
+  apiStub(context, (version, url) => version === 1 ? { ok: false, status: 404 } : v2Series(url, 3600));
+  await assert.rejects(run('timeseriesJson(4151, "6h")'), /timestep=6h returned HTTP 404/);
+  assert.equal(run('apiBase.timeseries'), run('BASE_V1'));
+});
+
+test('server and network errors on v1 never move to v2', async () => {
+  for (const failure of ['500', 'network']) {
+    const { run, context } = setup();
+    const urls = apiStub(context, () => {
+      if (failure === 'network') throw new TypeError('network down');
+      return { ok: false, status: 500 };
+    });
+    await assert.rejects(run('bulkJson("/latest")'));
+    assert.equal(urls.length, 3, failure);           // three tries, all on v1
+    assert.ok(urls.every((url) => url.includes('/api/v1/')), failure);
+    assert.equal(run('apiBase.bulk'), run('BASE_V1'));
+  }
+});
+
+test('an unknown item on both APIs keeps timeseries on v1', async () => {
+  const { run, context } = setup();
+  const urls = apiStub(context, (version, url) => url.searchParams.get('id') === '999999'
+    ? { ok: false, status: 404 } : okJson({ data: [] }));
+  await assert.rejects(run('timeseriesJson(999999, "5m")'), /HTTP 404/);
+  assert.equal(run('apiBase.timeseries'), run('BASE_V1'));
+  await run('timeseriesJson(4151, "5m")');
+  assert.ok(urls[urls.length - 1].includes('/api/v1/osrs/timeseries?id=4151&timestep=5m'));
+});
+
 test('invalid stored records cannot crash rendering', () => {
   const { run, storage } = setup();
   storage.set('osrs-flipper.executions.v1', '{}');

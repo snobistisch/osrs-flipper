@@ -1,8 +1,11 @@
 """Reliability tests for the Wiki boundary and stale-data fallback."""
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 from unittest import mock
 
 import api
@@ -124,6 +127,110 @@ class DecimalAverageTests(unittest.TestCase):
         self.assertEqual(activity[1].avg_low, 10)
         self.assertEqual(activity[1].low_volume, 1)
         self.assertIsNone(activity[1].avg_high)
+
+
+class ApiFallbackTests(unittest.TestCase):
+    """v1 while it works; v2 per kind of request once v1 answers 4xx."""
+
+    def client(self, answer):
+        """A client whose transport is ``answer(version, url) -> body``.
+
+        ``answer`` returns a JSON-serialisable body, an int HTTP status, or
+        raises; ``self.urls`` records every request.
+        """
+        self.urls = []
+
+        def urlopen(request, timeout=None):
+            url = request.full_url
+            self.urls.append(url)
+            result = answer(2 if "/api/v2/" in url else 1,
+                            urllib.parse.urlparse(url))
+            if isinstance(result, int):
+                raise urllib.error.HTTPError(url, result, "status", {}, None)
+            return _Response(json.dumps(result).encode())
+        patcher = mock.patch("urllib.request.urlopen", side_effect=urlopen)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        sleeper = mock.patch("api.time.sleep")
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        return api.WikiClient(cache_dir=self.tmp.name)
+
+    @staticmethod
+    def series(url, timestep=None):
+        lookback = urllib.parse.parse_qs(url.query).get("lookback", [""])[0]
+        return {"data": [{"timestamp": 1, "avgHighPrice": 10.5, "avgLowPrice": 9,
+                          "highPriceVolume": 1, "lowPriceVolume": 1}],
+                "itemId": 4151,
+                "timestep": timestep or {"24h": 300, "7d": 3600, "6m": 21600,
+                                         "1y": 86400}.get(lookback)}
+
+    def test_v1_that_works_is_the_only_api_used(self):
+        client = self.client(lambda version, url: {"data": []}
+                             if url.path.endswith("/timeseries") else {"data": {}})
+        client._fetch_latest()
+        client._fetch_timeseries(4151, "6h")
+        self.assertTrue(all("/api/v1/" in url for url in self.urls))
+        self.assertEqual(len(self.urls), 2)
+
+    def test_v1_that_answers_404_moves_each_kind_to_v2(self):
+        def answer(version, url):
+            if version == 1:
+                return 404
+            return (self.series(url) if url.path.endswith("/timeseries")
+                    else {"data": {}})
+        client = self.client(answer)
+        client._fetch_latest()
+        self.assertEqual([urllib.parse.urlparse(u).path for u in self.urls],
+                         ["/api/v1/osrs/latest", "/api/v2/osrs/latest"])
+        client._fetch_interval("5m")
+        self.assertEqual(urllib.parse.urlparse(self.urls[2]).path,
+                         "/api/v2/osrs/5m")
+        rows = client._fetch_timeseries(4151, "6h")
+        self.assertEqual(rows[0]["avgHighPrice"], 11)
+        asked = urllib.parse.urlparse(self.urls[-1])
+        query = urllib.parse.parse_qs(asked.query)
+        self.assertEqual(asked.path, "/api/v2/osrs/timeseries")
+        self.assertEqual(query["lookback"], ["6m"])
+        self.assertNotIn("timestep", query)
+
+    def test_a_v2_series_with_the_wrong_timestep_is_not_used(self):
+        client = self.client(lambda version, url: 404 if version == 1
+                             else self.series(url, timestep=3600))
+        with self.assertRaisesRegex(api.ApiError, "api/v1/.*timestep=6h"):
+            client._fetch_timeseries(4151, "6h")
+        self.assertEqual(client._bases["timeseries"], api.BASE_URL)
+
+    def test_server_and_network_errors_never_move_to_v2(self):
+        def network(version, url):
+            raise urllib.error.URLError("down")
+        for answer in (lambda version, url: 500, network):
+            client = self.client(answer)
+            with self.assertRaises(api.ApiError):
+                client._fetch_latest()
+            self.assertEqual(len(self.urls), 3)
+            self.assertTrue(all("/api/v1/" in url for url in self.urls))
+            self.assertEqual(client._bases["bulk"], api.BASE_URL)
+
+    def test_an_unknown_item_on_both_apis_keeps_timeseries_on_v1(self):
+        client = self.client(lambda version, url: 404 if "id=999999" in url.query
+                             else {"data": []})
+        with self.assertRaises(api.ApiError):
+            client._fetch_timeseries(999999, "5m")
+        self.assertEqual(client._bases["timeseries"], api.BASE_URL)
+        client._fetch_timeseries(4151, "5m")
+        self.assertIn("/api/v1/osrs/timeseries?id=4151&timestep=5m",
+                      self.urls[-1])
+
+    def test_a_client_on_another_base_does_not_fall_back(self):
+        self.client(lambda version, url: 404)
+        client = api.WikiClient(cache_dir=self.tmp.name,
+                                base_url="https://example.invalid/api")
+        with self.assertRaises(api.ApiError):
+            client._fetch_latest()
+        self.assertEqual(len(self.urls), 1)
 
 
 if __name__ == "__main__":

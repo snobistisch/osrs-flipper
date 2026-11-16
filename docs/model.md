@@ -660,9 +660,20 @@ five extra minutes after its memory TTL. A cold start fails clearly. Concurrent
 requests are coalesced. The collector never archives stale fallbacks, records
 the API's bucket timestamp and exits nonzero when a one-shot poll fails.
 
-The clients speak API v1. v1 and v2 differ (checked 2026-11-13): v2
-`/timeseries` rejects `timestep` and wants `lookback`, and v2 averages carry
-two decimals, which both clients round half up to whole gp. The bulk routes
+The clients use API v1 while it works. When v1 answers a request with HTTP
+400–499 other than 429, the same request is made once on v2; if that succeeds,
+that kind of request — bulk (`/latest`, `/mapping`, `/5m`, `/1h`) or
+`/timeseries` — uses v2 for the rest of the session (the browser then shows
+"API v2" next to the feed status). Rate limits, server errors and network
+failures never switch. v2 `/timeseries` takes `lookback` instead of
+`timestep` (`5m` → `24h`, `1h` → `7d`, `6h` → `6m`, `24h` → `1y`), and a v2
+series is used only when the `timestep` it returns is the one asked for; v2
+averages carry two decimals, which both clients round half up to whole gp.
+The v2 path was built from the wiki documentation and one observed response
+and has not run against the live API. Its limit: on v2 the five-minute
+history is expected to cover 24 hours instead of about 30, so Max profit,
+which replays a 24-hour offer, has too few replay placements and funds
+nothing until its replay is changed, which needs a backtest. The bulk routes
 also serve any past bucket for every item at once (`/5m?timestamp=`,
 `/1h?timestamp=`); the backtest builds its history from those, one request at
 a time, and nothing in the live tools uses them.

@@ -24,12 +24,18 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from storage import write_json
 
-# v1 and v2 are NOT interchangeable any more (checked 2026-11-13). The bulk
-# routes still agree, but v2 /timeseries rejects ``timestep`` and wants
-# ``lookback`` (6h, 24h, 7d, 30d, 6m, 1y), and v2 averages carry two decimals
-# where v1 returns whole gp. This client speaks v1; moving it to v2 means
-# changing the /timeseries call and every place that assumes integer prices.
+# Requests go to API v1 while it works. When v1 answers a request with HTTP
+# 400-499 (not 429), the same request is made once on v2; if that succeeds,
+# that kind of request ("bulk": /latest, /mapping, /5m, /1h; "timeseries")
+# uses v2 for the life of the client. On v2, /timeseries takes ``lookback``
+# instead of ``timestep``, and the returned timestep must be the one asked
+# for; v2 averages carry two decimals, which _avg_price rounds. The v2 path
+# follows the wiki documentation and one observed response, and on v2
+# five-minute history covers 24 hours instead of about 30.
 BASE_URL = "https://prices.runescape.wiki/api/v1/osrs"
+BASE_URL_V2 = "https://prices.runescape.wiki/api/v2/osrs"
+V2_LOOKBACK = {"5m": "24h", "1h": "7d", "6h": "6m", "24h": "1y"}
+TIMESTEP_SECONDS = {"5m": 300, "1h": 3600, "6h": 21600, "24h": 86400}
 # Wiki AUP wants a way to reach whoever runs this. If you fork or deploy the
 # tool, put your own contact here.
 USER_AGENT = ("osrs-flipper/0.2 - GE flipping dashboard - "
@@ -52,7 +58,14 @@ TIMESERIES_DISK_TTL = {"5m": 300, "1h": 900, "6h": 1800, "24h": 21600}
 
 
 class ApiError(Exception):
-    """The wiki API was unreachable or returned something unusable."""
+    """The wiki API was unreachable or returned something unusable.
+
+    ``status`` is the HTTP status of a failed request, None otherwise.
+    """
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -178,6 +191,8 @@ class WikiClient:
             cache_dir = Path(__file__).parent / "cache"
         self.cache_dir = Path(cache_dir)
         self.base_url = base_url
+        # The base in use per kind of request; see BASE_URL.
+        self._bases = {"bulk": base_url, "timeseries": base_url}
         self._memory: Dict[str, Tuple[float, object]] = {}
         self.stale_keys = set()
         self.interval_timestamps: Dict[str, int] = {}
@@ -188,7 +203,42 @@ class WikiClient:
     # -- transport -----------------------------------------------------------
 
     def _get(self, path: str, params: Optional[dict] = None) -> object:
-        url = self.base_url + path
+        """One bulk request, with the v1 -> v2 fallback described at BASE_URL."""
+        def valid(payload):
+            if path == "/mapping":
+                return isinstance(payload, list)
+            return isinstance(payload, dict) and isinstance(payload.get("data"), dict)
+        return self._api("bulk", path, params, path, params, valid)
+
+    def _api(self, kind: str, path: str, params: Optional[dict],
+             v2_path: str, v2_params: Optional[dict],
+             valid: Callable[[object], bool]) -> object:
+        """A request of ``kind`` on the base in use, falling back to v2 once."""
+        base = self._bases[kind]
+        if base == BASE_URL_V2:
+            payload = self._request(BASE_URL_V2, v2_path, v2_params)
+            if not valid(payload):
+                raise ApiError("{}: unexpected API v2 response".format(v2_path))
+            return payload
+        try:
+            return self._request(base, path, params)
+        except ApiError as error:
+            if (base != BASE_URL or error.status is None
+                    or not 400 <= error.status <= 499 or error.status == 429):
+                raise
+            fallback_error = error
+        try:
+            payload = self._request(BASE_URL_V2, v2_path, v2_params)
+        except ApiError:
+            raise fallback_error
+        if not valid(payload):
+            raise fallback_error
+        self._bases[kind] = BASE_URL_V2
+        return payload
+
+    def _request(self, base: str, path: str,
+                 params: Optional[dict] = None) -> object:
+        url = base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -218,8 +268,10 @@ class WikiClient:
                 if attempt < 2:
                     time.sleep(0.35 * (2 ** attempt) + random.random() * 0.10)
         if body is None:
+            status = (last_error.code
+                      if isinstance(last_error, urllib.error.HTTPError) else None)
             raise ApiError("GET {} failed after 3 attempts: {}".format(
-                url, last_error)) from last_error
+                url, last_error), status) from last_error
         try:
             return json.loads(body)
         except (ValueError, UnicodeError) as exc:
@@ -441,7 +493,12 @@ class WikiClient:
             return None
 
     def _fetch_timeseries(self, item_id: int, timestep: str) -> List[dict]:
-        payload = self._get("/timeseries", {"id": item_id, "timestep": timestep})
+        payload = self._api(
+            "timeseries", "/timeseries", {"id": item_id, "timestep": timestep},
+            "/timeseries", {"id": item_id, "lookback": V2_LOOKBACK[timestep]},
+            lambda body: (isinstance(body, dict)
+                          and isinstance(body.get("data"), list)
+                          and body.get("timestep") == TIMESTEP_SECONDS[timestep]))
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list):
             raise ApiError("/timeseries: response has no 'data' list")
