@@ -58,6 +58,91 @@ class JournalTests(unittest.TestCase):
             usage = journal.recent_limit_usage(path, now)
             self.assertEqual(usage.used(2353, None), 7)
 
+    BROWSER_EXPORT = {"version": 1, "exportedAt": 1_790_010_000_000,
+                      "executions": [
+        {"key": "1790000000000-2353", "itemId": 2353, "name": "Steel bar",
+         "qty": 1000, "buy": 571, "sell": 598, "bought": 1000, "sold": 0,
+         "status": "sold", "createdAt": 1_790_000_000_000,
+         "updatedAt": 1_790_003_600_000, "limit": 10000, "limitGroup": None,
+         "mode": "active"},
+        {"key": "1790000100000-2434", "itemId": 2434, "name": "Prayer potion(4)",
+         "qty": 300, "buy": 9000, "sell": 9300, "bought": 120, "sold": 0,
+         "status": "watching", "createdAt": 1_790_000_100_000,
+         "updatedAt": 1_790_001_000_000, "limitGroup": "potion:prayer potion",
+         "mode": "active"},
+        {"key": "1790000200000-379", "itemId": 379, "name": "Lobster",
+         "qty": 500, "buy": 150, "sell": 160, "bought": 0, "sold": 0,
+         "status": "cancelled", "createdAt": 1_790_000_200_000,
+         "updatedAt": 1_790_000_900_000, "mode": "overnight"},
+        {"key": "1790000300000-560", "itemId": 560, "name": "Death rune",
+         "qty": 2000, "buy": 190, "sell": 200, "bought": 0, "sold": 0,
+         "status": "watching", "createdAt": 1_790_000_300_000,
+         "updatedAt": 1_790_000_300_000, "mode": "active"},
+    ]}
+
+    def test_browser_export_maps_onto_the_four_outcomes(self):
+        result = self.j.import_browser(self.BROWSER_EXPORT, now=1_790_010_000)
+        self.assertEqual((result["imported"], result["duplicates"],
+                          result["invalid"]), (4, [], []))
+        rows = {row["browser_key"]: row for row in self.j.rows()}
+        sold = rows["1790000000000-2353"]
+        self.assertEqual((sold["outcome"], sold["quantity"], sold["sell_price"],
+                          sold["offer_placed_at"], sold["sold_at"]),
+                         ("filled", 1000, 598, 1_790_000_000, 1_790_003_600))
+        self.assertEqual(journal.realised_profit(sold), 1000 * (598 - 11 - 571))
+        partly = rows["1790000100000-2434"]
+        self.assertEqual((partly["outcome"], partly["quantity"],
+                          partly["sell_price"]), ("open", 120, None))
+        cancelled = rows["1790000200000-379"]
+        self.assertEqual((cancelled["outcome"], cancelled["buy_filled_at"]),
+                         ("cancelled", None))
+        untouched = rows["1790000300000-560"]
+        self.assertEqual((untouched["outcome"], untouched["quantity"]),
+                         ("placed", 2000))
+
+    def test_importing_the_same_file_twice_adds_nothing(self):
+        self.j.import_browser(self.BROWSER_EXPORT, now=1_790_010_000)
+        again = self.j.import_browser(self.BROWSER_EXPORT, now=1_790_010_000)
+        self.assertEqual(again["imported"], 0)
+        self.assertEqual(len(again["duplicates"]), 4)
+        self.assertEqual(len(self.j.rows()), 4)
+
+    def test_unknown_export_version_is_rejected(self):
+        export = dict(self.BROWSER_EXPORT, version=2)
+        with self.assertRaisesRegex(ValueError, "version 2.*reads version 1"):
+            self.j.import_browser(export)
+        self.assertEqual(len(self.j.rows()), 0)
+
+    def test_unmappable_executions_are_skipped_by_key(self):
+        export = {"version": 1, "executions": [
+            {"key": "bad-qty", "itemId": 1, "name": "X", "qty": 0, "buy": 5,
+             "createdAt": 1_790_000_000_000},
+            {"key": "sold-no-sell", "itemId": 1, "name": "X", "qty": 3,
+             "buy": 5, "sell": None, "status": "sold",
+             "createdAt": 1_790_000_000_000},
+            "not a record"]}
+        result = self.j.import_browser(export, now=1_790_010_000)
+        self.assertEqual(result["imported"], 0)
+        self.assertEqual(result["invalid"],
+                         ["bad-qty", "sold-no-sell", "<no key>"])
+
+    def test_import_browser_command(self):
+        import json as json_module
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "offers.json"
+            path.write_text(json_module.dumps(self.BROWSER_EXPORT))
+            db = Path(directory) / "journal.db"
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(journal.main(
+                    ["--db", str(db), "import-browser", str(path)]), 0)
+                self.assertEqual(journal.main(
+                    ["--db", str(db), "import-browser", str(path)]), 0)
+            self.assertIn("Imported 4, skipped 0 as duplicate, skipped 0 as "
+                          "invalid.", out.getvalue())
+            self.assertIn("Imported 0, skipped 4 as duplicate",
+                          out.getvalue())
+
     def test_unrecorded_exemption_is_resolved_by_name(self):
         flip_id = self.j.open_flip("Lobster", quantity=10, buy_price=100)
         self.j.close_flip(flip_id, sell_price=110)

@@ -33,6 +33,7 @@ Terminal use: python3 journal.py place --name "Steel bar" --qty 1000 --buy 571
               python3 journal.py list
               python3 journal.py stats
               python3 journal.py calibration
+              python3 journal.py import-browser osrs-flipper-offers.json
 """
 from __future__ import annotations
 
@@ -110,7 +111,14 @@ COLUMNS_V2 = (
     # Liquidity at entry, to split the backtest into thin/liquid/busy items.
     ("predicted_volume_1h", "REAL"),
     ("predicted_competitors", "REAL"),
+    # The browser's execution key for rows imported from its "Export offers"
+    # file, so importing the same file twice adds nothing. NULL otherwise.
+    ("browser_key", "TEXT"),
 )
+
+# The browser export format this journal reads (docs/index.html,
+# executionExport).
+BROWSER_EXPORT_VERSION = 1
 
 # Outcome values. 'placed' is a buy offer in the book with nothing recorded as
 # bought yet; cancelling one is a censored BUY leg, cancelling an 'open' row a
@@ -174,6 +182,7 @@ class Journal:
                   tax_exempt: Optional[bool] = None,
                   snapshot_at: Optional[int] = None,
                   offer_placed_at: Optional[int] = None,
+                  browser_key: Optional[str] = None,
                   _placed: bool = False) -> int:
         """Record a filled buy offer.
 
@@ -200,6 +209,7 @@ class Journal:
             "offer_placed_at": offer_placed_at,
             "buy_filled_at": None if _placed else bought_at,
             "predicted_rank": rank,
+            "browser_key": browser_key,
         }
         if row is not None:
             fields.update({
@@ -365,6 +375,63 @@ class Journal:
 
     # -- reading ------------------------------------------------------------
 
+    def import_browser(self, export: object,
+                       now: Optional[float] = None) -> dict:
+        """Record the offers of a browser "Export offers" file.
+
+        Each execution becomes one row through this journal's own methods:
+        sold with a sell price -> a closed flip; units bought but not sold ->
+        an open flip of the bought units; nothing bought and cancelled or
+        removed -> a cancelled placement; anything else -> a placement. The
+        browser does not record when the buy filled, so a fill or sale is
+        dated when the offer was last updated there. Keys already in the
+        journal are skipped, so a file can be imported again safely.
+
+        Returns {"imported": n, "duplicates": [keys], "invalid": [keys]}.
+        """
+        if not isinstance(export, dict):
+            raise ValueError("not a browser export: expected a JSON object")
+        version = export.get("version")
+        if version != BROWSER_EXPORT_VERSION:
+            raise ValueError(
+                "unsupported browser export version {!r}; this journal reads "
+                "version {}".format(version, BROWSER_EXPORT_VERSION))
+        executions = export.get("executions")
+        if not isinstance(executions, list):
+            raise ValueError("not a browser export: no 'executions' list")
+        now = time.time() if now is None else now
+        known = {row["browser_key"] for row in self.conn.execute(
+            "SELECT browser_key FROM flips WHERE browser_key IS NOT NULL")}
+        result = {"imported": 0, "duplicates": [], "invalid": []}
+        for execution in executions:
+            plan = _browser_execution(execution, now)
+            key = execution.get("key") if isinstance(execution, dict) else None
+            if plan is None:
+                result["invalid"].append(key if isinstance(key, str) else
+                                         "<no key>")
+                continue
+            if key in known:
+                result["duplicates"].append(key)
+                continue
+            flip_id = self.place_offer(
+                plan["name"], plan["qty"], plan["buy"],
+                placed_at=plan["placed_at"], item_id=plan["item_id"],
+                tax_exempt=exemptions.is_exempt_item(plan["item_id"],
+                                                     plan["name"]),
+                browser_key=key)
+            if plan["bought"] > 0:
+                self.mark_bought(flip_id, filled_at=plan["updated_at"],
+                                 quantity=plan["bought"])
+            if plan["sell"] is not None:
+                self.close_flip(flip_id, plan["sell"],
+                                sold_at=plan["updated_at"])
+            elif plan["cancelled"]:
+                self.cancel_flip(flip_id, "cancelled in the browser",
+                                 cancelled_at=plan["updated_at"])
+            known.add(key)
+            result["imported"] += 1
+        return result
+
     def stats(self) -> dict:
         """Realised totals, capture rate, and how long flips actually took."""
         all_rows = self.rows()
@@ -492,6 +559,57 @@ class FillObservation:
     censored: bool           # True: it took at least this long
     cancelled: bool
     tier: str
+
+
+def _positive_whole(value) -> Optional[int]:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value <= 0 or int(value) != value):
+        return None
+    return int(value)
+
+
+def _browser_execution(execution: object, now: float) -> Optional[dict]:
+    """How one browser execution maps onto the journal, or None if it cannot.
+
+    Times in the browser are milliseconds; the journal stores seconds.
+    """
+    if not isinstance(execution, dict):
+        return None
+    key, name = execution.get("key"), execution.get("name")
+    item_id = _positive_whole(execution.get("itemId"))
+    qty = _positive_whole(execution.get("qty"))
+    buy = _positive_whole(execution.get("buy"))
+    created = execution.get("createdAt")
+    if (not isinstance(key, str) or not key or not isinstance(name, str)
+            or not name.strip() or None in (item_id, qty, buy)
+            or isinstance(created, bool)
+            or not isinstance(created, (int, float))
+            or not math.isfinite(created) or created <= 0
+            or created / 1000 > now + 60):
+        return None
+    placed_at = int(created // 1000)
+    updated = execution.get("updatedAt")
+    updated_at = placed_at
+    if (not isinstance(updated, bool) and isinstance(updated, (int, float))
+            and math.isfinite(updated)):
+        updated_at = max(placed_at, min(int(updated // 1000), int(now)))
+    status = execution.get("status")
+    raw_bought = execution.get("bought", 0) or 0
+    if (isinstance(raw_bought, bool) or not isinstance(raw_bought, (int, float))
+            or not math.isfinite(raw_bought) or raw_bought < 0):
+        return None
+    bought = min(qty, int(raw_bought))
+    sell = None
+    if status == "sold":
+        sell = _positive_whole(execution.get("sell"))
+        if sell is None:
+            return None
+        bought = qty            # Done in the browser: the whole offer went
+    return {"name": name.strip(), "item_id": item_id, "qty": qty, "buy": buy,
+            "bought": bought, "sell": sell, "placed_at": placed_at,
+            "updated_at": updated_at,
+            "cancelled": (sell is None and bought == 0
+                          and status in ("cancelled", "removed"))}
 
 
 def _finite(value) -> Optional[float]:
@@ -883,6 +1001,11 @@ def parse_args(argv):
     x.add_argument("flip_id", type=int)
     x.add_argument("--reason", default="", help="why it was pulled")
 
+    ib = sub.add_parser("import-browser",
+                        help="record the offers of a browser 'Export offers' "
+                             "file; importing it again adds nothing")
+    ib.add_argument("file", type=Path, help="the exported JSON file")
+
     sub.add_parser("list", help="show all flips")
     sub.add_parser("stats", help="realised totals and prediction accuracy")
     sub.add_parser("calibration",
@@ -1044,6 +1167,18 @@ def main(argv=None):
             journal.cancel_flip(opts.flip_id, opts.reason)
             print("Flip {} recorded as never filled. Cancellations are what "
                   "keep the fill-time estimates honest.".format(opts.flip_id))
+        elif opts.command == "import-browser":
+            try:
+                export = json.loads(opts.file.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ValueError("cannot read {}: {}".format(opts.file, exc))
+            result = journal.import_browser(export)
+            print("Imported {}, skipped {} as duplicate, skipped {} as "
+                  "invalid.".format(result["imported"],
+                                    len(result["duplicates"]),
+                                    len(result["invalid"])))
+            for key in result["invalid"]:
+                print("  invalid: {}".format(key))
         elif opts.command == "list":
             cmd_list(journal)
         elif opts.command == "stats":

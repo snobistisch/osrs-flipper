@@ -1043,6 +1043,10 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
       <p class="small dim">Saved in this browser. Your buy, target sell and the
         newest live prices stay visible after every refresh.</p>
       <div id="execution-body" class="active-flip-cards"></div>
+      <div class="plan-actions"><button type="button" id="export-offers">Export offers</button></div>
+      <p class="small dim">Downloads every saved offer, finished ones included,
+        for <code>python3 journal.py import-browser &lt;file&gt;</code>: recorded
+        fills are what the model's fill assumptions need.</p>
     </section>
 
     <section id="plan" class="hidden">
@@ -4994,10 +4998,40 @@ function executionTimingNote(x, nowMs) {
   return null;
 }
 
+/* The "Export offers" file: the stored execution records, unchanged, for
+   `journal.py import-browser`. null when the stored list cannot be read. */
+function executionExport(nowMs = Date.now()) {
+  let executions = null;
+  try { executions = JSON.parse(localStorage.getItem(EXEC_KEY) || "[]"); }
+  catch { /* unreadable: nothing to export */ }
+  if (!Array.isArray(executions)) return null;
+  return { version: 1, exportedAt: nowMs, executions };
+}
+
+function exportOffers() {
+  const payload = executionExport();
+  if (!payload) { alert("Saved offers are damaged and cannot be exported."); return; }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `osrs-flipper-offers-${new Date(payload.exportedAt).toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function renderExecutions() {
-  const list = loadExecutions().filter((x) => !["sold", "cancelled"].includes(x.status));
-  $("#execution").classList.toggle("hidden", !list.length);
-  if (!list.length) { $("#execution-body").innerHTML = ""; return; }
+  const saved = loadExecutions();
+  const list = saved.filter((x) => !["sold", "cancelled"].includes(x.status));
+  // Finished offers stay exportable, so the panel shows while any are saved.
+  $("#execution").classList.toggle("hidden", !saved.length);
+  if (!list.length) {
+    $("#execution-figure").textContent = "0 OPEN";
+    $("#execution-body").innerHTML = '<p class="small dim">No open offers.</p>';
+    return;
+  }
   $("#execution-figure").textContent = `${list.length} SAVED`;
   $("#execution-body").innerHTML = list.slice(0, 24).map((x) => {
     const quote = state.quotes?.[x.itemId];
@@ -6525,6 +6559,7 @@ $("#plan-cards").addEventListener("click", (event) => {
   }
 });
 
+$("#export-offers").addEventListener("click", exportOffers);
 $("#execution-body").addEventListener("click", (event) => {
   const edit = event.target.closest("button[data-edit-execution]");
   if (edit) { editExecution(edit.dataset.editExecution); return; }

@@ -242,6 +242,24 @@ test('one plan requests /timeseries for at most 45 items', async () => {
   assert.ok(requested.size > 0 && requested.size <= 45, `requested ${requested.size}`);
 });
 
+test('Export offers holds the stored execution records unchanged', () => {
+  const { run, storage } = setup();
+  const records = [
+    { key: '1-2', itemId: 2, name: 'Cannonball', qty: 10, buy: 100, sell: 110,
+      bought: 4, sold: 0, status: 'watching', createdAt: 1, updatedAt: 2, mode: 'active' },
+    { key: '3-4', itemId: 4, name: 'Test', qty: 5, buy: 10, sell: 12,
+      bought: 5, sold: 0, status: 'sold', createdAt: 3, updatedAt: 4, extra: 'kept' },
+  ];
+  storage.set('osrs-flipper.executions.v1', JSON.stringify(records));
+  const exported = JSON.parse(JSON.stringify(run('executionExport(1790000000000)')));
+  assert.deepEqual(Object.keys(exported), ['version', 'exportedAt', 'executions']);
+  assert.equal(exported.version, 1);
+  assert.equal(exported.exportedAt, 1790000000000);
+  assert.deepEqual(exported.executions, records);
+  storage.set('osrs-flipper.executions.v1', '{}');
+  assert.equal(run('executionExport(1)'), null);
+});
+
 test('invalid stored records cannot crash rendering', () => {
   const { run, storage } = setup();
   storage.set('osrs-flipper.executions.v1', '{}');
