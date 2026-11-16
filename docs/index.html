@@ -1733,6 +1733,17 @@ function effectiveBuyLimit(limit, hours, mode) {
   return limit * (mode === "overnight" ? buyLimitWindows(hours) : 1);
 }
 
+/* Purchases older than this no longer count against a buy limit. The game's
+   window starts at the first purchase and lasts four hours, so every purchase
+   in the current window lies within the last four hours: a rolling sum over
+   them never overstates what is left. Mirrors engine.remaining_buy_limit. */
+const BUY_LIMIT_WINDOW_SECONDS = WINDOW_HOURS * 3600;
+function remainingBuyLimit(limit, used, hours, mode) {
+  const effective = effectiveBuyLimit(limit, hours, mode);
+  if (effective == null) return null;
+  return Math.max(0, effective - Math.max(0, Math.trunc(used)));
+}
+
 function roundTripProbability(buySeconds, sellSeconds, horizonSeconds) {
   if (!(horizonSeconds > 0) || !(buySeconds > 0) || !(sellSeconds > 0) ||
       !isFinite(buySeconds) || !isFinite(sellSeconds)) return 0;
@@ -3872,7 +3883,8 @@ function optimiseExecution(o) {
   const freeSell = taxBoundaryUndercut(o.baseSell, o.exempt, o.bond);
   const maxTotal = Math.max(0, o.baseSell - o.baseBuy - 1);
   const originalSpread = Math.max(1, o.baseSell - o.baseBuy);
-  const limit = effectiveBuyLimit(o.limit, o.config.horizonHours, o.config.strategy);
+  const limit = remainingBuyLimit(o.limit, o.limitUsed || 0, o.config.horizonHours,
+    o.config.strategy);
   const positionBank = Math.min(o.config.capital,
     o.config.maxPositionCapital ?? o.config.capital);
   const sellPoints = concessionPoints(Math.max(0, maxTotal - (o.baseSell - freeSell)));
@@ -3975,7 +3987,24 @@ function optimiseExecution(o) {
   return best;
 }
 
-function screen(items, quotes, act5m, act1h, config, now) {
+/* Units bought in the last four hours, by item id and by limit group, as
+   limitUsage builds them. An item's used units are the larger of its own total
+   and its family's: every purchase of an item carries the same family name,
+   so the family total already contains the item's own. Mirrors
+   filters.LimitUsage. */
+const LIMIT_USED_WARNING = "buy limit used in the last 4 hours";
+function limitUsedFor(usage, id, group) {
+  if (!usage) return 0;
+  const own = Number(usage.items?.[id]) || 0;
+  const family = group != null ? Number(usage.groups?.[group]) || 0 : 0;
+  return Math.max(own, family);
+}
+const limitExhausted = (row, config) => row.limit != null && (row.limitUsed || 0) > 0 &&
+  remainingBuyLimit(row.limit, row.limitUsed, config.horizonHours, config.strategy) === 0;
+
+/* `limitUsed` is the usage map above; null plans every item on its whole buy
+   limit, which is the behaviour without a usage log. */
+function screen(items, quotes, act5m, act1h, config, now, limitUsed = null) {
   const rows = [];
   const funnel = {
     "in /latest": 0, "no mapping entry": 0, "members-only": 0,
@@ -4028,8 +4057,10 @@ function screen(items, quotes, act5m, act1h, config, now) {
     const crowd = touchCompetitors(thinVolume, item.limit);
     const drift = priceDrift(bucketMid(a5m), bucketMid(a1h));
     const ofi = orderFlowImbalance(highVol1h, lowVol1h);
+    const limitGroup = connectedLimitGroup(item.name);
+    const used = item.limit != null ? limitUsedFor(limitUsed, id, limitGroup) : 0;
     const choice = optimiseExecution({
-      baseBuy, baseSell, exempt, bond, limit: item.limit, config,
+      baseBuy, baseSell, exempt, bond, limit: item.limit, limitUsed: used, config,
       buyVolume1h: lowVol1h,
       sellVolume1h: highVol1h, quoteAge: age, ofi, drift, now, competitors: crowd,
       highalch: item.highalch, natureCost: config.natureCost,
@@ -4074,10 +4105,12 @@ function screen(items, quotes, act5m, act1h, config, now) {
       modelBuyVolume1h: choice.buyVolume1h, modelSellVolume1h: highVol1h,
       dipDepth: choice.dipDepth, dipRetention: choice.dipRetention,
       competitors: crowd, scoredAt: now, sigmaDaily: null, ou: null,
-      category: itemCategory(item.name), limitGroup: connectedLimitGroup(item.name),
+      category: itemCategory(item.name), limitGroup, limitUsed: used,
       deep: false, warnings: [],
     };
     row.warnings = flipWarnings(row, breakdown, affordable, exempt);
+    if (used > 0 && remainingBuyLimit(item.limit, used, config.horizonHours,
+        config.strategy) === 0) row.warnings.push(LIMIT_USED_WARNING);
     // Only the tags that need no history. The deep check adds the rest.
     row.tags = classifyItem(id, buy, item.members, item.limit, null, null, null);
     rows.push(row);
@@ -4213,6 +4246,7 @@ function allocatePortfolio(rows, capital, slots, reserved, config) {
     if (candidates.length >= PORTFOLIO_CANDIDATES) break;
     const unit = rowUnitCapital(row);
     if (!(row.rankingValue > 0) || !(row.expected > 0) || !(unit > 0) || unit > bank ||
+        limitExhausted(row, config) ||
         !meetsCompletionTarget(row, config) || !hasFundingEvidence(row, config)) continue;
     if (categoryFull(categoryCount, row.category)) continue;
     if (row.limitGroup != null) {
@@ -4371,7 +4405,7 @@ async function refineTopRows(rows, config, now) {
       const choice = optimiseExecution({
         baseBuy: row.baseBuy, baseSell: row.baseSell, exempt: row.exempt,
         bond: row.bond,
-        limit: row.limit, config,
+        limit: row.limit, limitUsed: row.limitUsed || 0, config,
         buyVolume1h: reachableBuy, sellVolume1h: reachableSell, competitors: crowd,
         quoteAge: row.age, ofi: row.ofi, drift: row.drift, now,
         sigmaDaily: view.ou ? view.ou.sigma : null, ou: view.ou,
@@ -4494,8 +4528,12 @@ async function refineTopRows(rows, config, now) {
 function buildPlan(rows, config, locks = []) {
   const lockedIds = new Set(locks.map((lock) => lock.id));
   const lockedCommit = locks.reduce((sum, lock) => sum + lock.commit, 0);
+  // A purchase recorded after these rows were screened is not in their size
+  // yet: leave such a row out until the next load re-screens it.
+  const usage = currentLimitUsage();
   const candidates = state.deepReady
-    ? rows.filter((row) => !lockedIds.has(row.id)) : [];
+    ? rows.filter((row) => !lockedIds.has(row.id) && (row.limit == null ||
+      limitUsedFor(usage, row.id, row.limitGroup) <= (row.limitUsed || 0))) : [];
   const qualified = candidates.filter((row) => hasFundingEvidence(row, config)).length;
   const selection = allocatePortfolio(candidates,
     Math.max(0, config.capital - lockedCommit),
@@ -4567,6 +4605,7 @@ const $ = (sel) => document.querySelector(sel);
 const PREF_KEY = "osrs-flipper.preferences.v2";
 const EXEC_KEY = "osrs-flipper.executions.v1";
 const LOCK_KEY = "osrs-flipper.slot-locks.v1";
+const LIMIT_USAGE_KEY = "osrs-flipper.limit-usage.v1";
 
 function lockProfileKey(config) {
   const horizon = config.strategy === "overnight" ? config.horizonHours : 0;
@@ -4708,10 +4747,12 @@ function monitorableRow(row) {
   const remaining = Math.max(0, state.config.capital - locks.reduce((sum, lock) => sum + lock.commit, 0));
   let maxQty = Math.floor(Math.min(remaining, state.config.maxPositionCapital) /
     rowUnitCapital(row));
-  if (row.limitGroup && row.limit != null) {
-    const used = locks.filter((lock) => lock.limitGroup === row.limitGroup)
-      .reduce((sum, lock) => sum + lock.qty, 0);
-    maxQty = Math.min(maxQty, Math.max(0, effectiveBuyLimit(row.limit, row.horizonHours, row.mode) - used));
+  if (row.limit != null) {
+    // Open offers of the same family, plus what was bought in the last 4 hours.
+    const open = row.limitGroup ? locks.filter((lock) => lock.limitGroup === row.limitGroup)
+      .reduce((sum, lock) => sum + lock.qty, 0) : 0;
+    const bought = limitUsedFor(currentLimitUsage(), row.id, row.limitGroup);
+    maxQty = Math.min(maxQty, remainingBuyLimit(row.limit, open + bought, row.horizonHours, row.mode));
   }
   const copy = {
     ...row,
@@ -4763,6 +4804,48 @@ function unlockSlot(slot) {
   replanFromCurrentData();
 }
 
+/* ---- buy-limit usage log ----
+   One entry per recorded purchase: {itemId, limitGroup, qty, at} with `at` in
+   milliseconds. Entries older than four hours are dropped on every write. */
+const validLimitUse = (x) => isRecord(x) && positiveInteger(x.itemId) &&
+  positiveInteger(x.qty) && Number.isFinite(x.at) &&
+  (x.limitGroup == null || typeof x.limitGroup === "string");
+
+function loadLimitUseLog() {
+  return loadStoredArray(LIMIT_USAGE_KEY, validLimitUse);
+}
+
+/* Sum the entries bought after nowMs - 4h, by item and by limit group.
+   Mirrors filters.limit_usage (which takes seconds). */
+function limitUsage(entries, nowMs) {
+  const items = {}, groups = {};
+  for (const entry of entries) {
+    if (!validLimitUse(entry) || !(entry.at > nowMs - BUY_LIMIT_WINDOW_SECONDS * 1000)) continue;
+    items[entry.itemId] = (items[entry.itemId] || 0) + entry.qty;
+    if (entry.limitGroup != null) groups[entry.limitGroup] = (groups[entry.limitGroup] || 0) + entry.qty;
+  }
+  return { items, groups };
+}
+
+const currentLimitUsage = () => limitUsage(loadLimitUseLog(), Date.now());
+
+function recordLimitUse(execution, qty, nowMs = Date.now()) {
+  if (!(qty > 0)) return false;
+  const log = loadLimitUseLog()
+    .filter((entry) => entry.at > nowMs - BUY_LIMIT_WINDOW_SECONDS * 1000);
+  log.push({ itemId: execution.itemId,
+    limitGroup: execution.limitGroup ?? connectedLimitGroup(execution.name),
+    qty: Math.floor(qty), at: nowMs });
+  return writeDurableStorage(LIMIT_USAGE_KEY, JSON.stringify(log));
+}
+
+/* A purchase changes what the plan may still buy, which is decided when rows
+   are screened: re-plan now, then reload so the item is screened again. */
+function replanAfterLimitUse() {
+  replanFromCurrentData();
+  if (state.config) loadAndRender();
+}
+
 function loadExecutions() {
   return loadStoredArray(EXEC_KEY, (x) => isRecord(x) && typeof x.key === "string"
       && typeof x.name === "string" && positiveInteger(x.itemId)
@@ -4797,6 +4880,7 @@ function editExecution(key) {
       !Number.isSafeInteger(offerCommitment(x.itemId, qty, buy, sell))) return;
   // Optional: units bought so far silences the "nothing bought" reminder.
   const bought = Number(prompt("Units bought so far (0 if none yet)", String(x.bought || 0)));
+  const boughtBefore = Number(x.bought || 0);
   x.qty = Math.floor(qty); x.buy = Math.floor(buy); x.sell = Math.floor(sell);
   if (Number.isFinite(bought) && bought >= 0) x.bought = Math.min(x.qty, Math.floor(bought));
   x.updatedAt = Date.now();
@@ -4807,8 +4891,9 @@ function editExecution(key) {
       : lock);
     saveProfileLocks(state.config, locks);
   }
-  saveExecutions(list);
-  replanFromCurrentData();
+  const saved = saveExecutions(list);
+  if (saved && recordLimitUse(x, Number(x.bought || 0) - boughtBefore)) replanAfterLimitUse();
+  else replanFromCurrentData();
 }
 function releaseLockForItem(itemId) {
   if (!state.config) return;
@@ -4819,12 +4904,17 @@ function finishExecution(key, remove = false) {
   const list = loadExecutions();
   const index = list.findIndex((row) => row.key === key);
   if (index < 0) return;
-  const itemId = list[index].itemId;
+  const execution = list[index];
+  const itemId = execution.itemId;
   if (remove) list.splice(index, 1);
-  else { list[index].status = "sold"; list[index].updatedAt = Date.now(); }
+  else { execution.status = "sold"; execution.updatedAt = Date.now(); }
   if (!saveExecutions(list)) return;
   releaseLockForItem(itemId);
-  replanFromCurrentData();
+  // Done means the whole offer was bought: whatever was not yet recorded as
+  // bought used the limit now. Remove records nothing.
+  if (!remove && recordLimitUse(execution,
+      Number(execution.qty) - Number(execution.bought || 0))) replanAfterLimitUse();
+  else replanFromCurrentData();
 }
 /* The concrete reprice/cancel reminder. Only Active offers: an overnight buy
    is meant to sit. Times come from the flip's own fill-time distribution. */
@@ -5028,7 +5118,8 @@ async function loadAndRender() {
     state.loadFailed = false;
     const config = readConfig();
     const now = Date.now() / 1000;
-    const { rows, funnel } = screen(items, quotes, act5m, act1h, config, now);
+    const { rows, funnel } = screen(items, quotes, act5m, act1h, config, now,
+      currentLimitUsage());
     if (previousQuotes) for (const row of rows) {
       const previous = previousQuotes[row.id];
       row.priceChanged = Boolean(previous &&

@@ -372,6 +372,90 @@ class CrossingShareTests(unittest.TestCase):
         self.assertEqual(replayed.bought_share, 0.0)
 
 
+class LimitUsageTests(unittest.TestCase):
+    """Units bought in the last four hours count against the buy limit
+    (audit F-05). Sized on a large capture share so the limit binds."""
+
+    LARGE = replace(engine.DEFAULT_CALIBRATION, crossing_capture_share=0.30)
+
+    def plan(self, entries=(), items=None, limit=10_000,
+             allocation="proportional"):
+        items = items or {1: Item(1, "Busy", True, limit, 1, None)}
+        quotes = {i: Quote(110, NOW - 30, 100, NOW - 30) for i in items}
+        scale = limit / 1000
+        activity = {i: Activity(110, int(48_000 * scale), 100,
+                                int(48_000 * scale)) for i in items}
+        history = [{"timestamp": NOW - (60 - i) * 21600, "avgHighPrice": 110,
+                    "highPriceVolume": int(288_000 * scale),
+                    "avgLowPrice": 100,
+                    "lowPriceVolume": int(288_000 * scale)} for i in range(60)]
+        config = filters.FilterConfig(capital=100_000_000,
+                                      calibration=self.LARGE,
+                                      allocation=allocation)
+        usage = filters.limit_usage(entries, NOW) if entries else None
+        return filters.rank_flips(
+            items, quotes, activity, activity, config, NOW,
+            fetch_history=lambda _: history,
+            fetch_reach=lambda _: flat(count=365, volume=int(4000 * scale)),
+            limit_used=usage).rows
+
+    def test_without_usage_the_whole_limit_is_planned(self):
+        for allocation in filters.ALLOCATIONS:
+            row = self.plan(allocation=allocation)[0]
+            self.assertEqual(row.allocated_quantity, 10_000, allocation)
+            self.assertNotIn(filters.LIMIT_USED_WARNING, row.warnings)
+
+    def test_a_limit_used_up_an_hour_ago_is_not_funded(self):
+        entries = [{"item_id": 1, "limit_group": None, "qty": 10_000,
+                    "at": NOW - 3600}]
+        for allocation in filters.ALLOCATIONS:
+            row = self.plan(entries, allocation=allocation)[0]
+            self.assertIsNone(row.allocated_quantity, allocation)
+            self.assertIn(filters.LIMIT_USED_WARNING, row.warnings)
+
+    def test_part_of_the_limit_used_caps_the_offer(self):
+        entries = [{"item_id": 1, "limit_group": None, "qty": 4_000,
+                    "at": NOW - 3600}]
+        for allocation in filters.ALLOCATIONS:
+            row = self.plan(entries, allocation=allocation)[0]
+            self.assertGreater(row.allocated_quantity, 0, allocation)
+            self.assertLessEqual(row.allocated_quantity, 6_000, allocation)
+            self.assertLessEqual(row.qty_per_window, 6_000, allocation)
+
+    def test_purchases_older_than_four_hours_do_not_count(self):
+        entries = [{"item_id": 1, "limit_group": None, "qty": 10_000,
+                    "at": NOW - 4 * 3600 - 60}]
+        for allocation in filters.ALLOCATIONS:
+            used = self.plan(entries, allocation=allocation)[0]
+            fresh = self.plan(allocation=allocation)[0]
+            self.assertEqual(used, fresh, allocation)
+
+    def test_doses_of_one_potion_share_what_is_left(self):
+        items = {2: Item(2, "Prayer potion(3)", True, 2_000, 1, None)}
+        entries = [{"item_id": 1, "limit_group": "potion:prayer potion",
+                    "qty": 1_500, "at": NOW - 1800}]
+        for allocation in filters.ALLOCATIONS:
+            row = self.plan(entries, items=items, limit=2_000,
+                            allocation=allocation)[0]
+            self.assertEqual(row.limit_used, 1_500)
+            self.assertGreater(row.allocated_quantity, 0, allocation)
+            self.assertLessEqual(row.allocated_quantity, 500, allocation)
+
+    def test_usage_is_summed_by_item_and_by_family(self):
+        usage = filters.limit_usage([
+            {"item_id": 1, "limit_group": "potion:x", "qty": 100, "at": NOW},
+            {"item_id": 2, "limit_group": "potion:x", "qty": 50, "at": NOW},
+            {"item_id": 3, "limit_group": None, "qty": 7, "at": NOW - 100},
+            {"item_id": 3, "limit_group": None, "qty": 9,
+             "at": NOW - 4 * 3600},
+            {"item_id": 3, "limit_group": None, "qty": 0, "at": NOW},
+        ], NOW)
+        self.assertEqual(usage.used(1, "potion:x"), 150)
+        self.assertEqual(usage.used(2, "potion:x"), 150)
+        self.assertEqual(usage.used(3, None), 7)
+        self.assertEqual(usage.used(4, None), 0)
+
+
 class CategoryCapTests(unittest.TestCase):
     """Three rows per family of related items; "other" is not a family."""
 

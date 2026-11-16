@@ -72,7 +72,8 @@ const PREPARE = `(async (snapshot) => {
   state.natureCost = snapshot.natureCost;
   state.items = items;
   const { rows } = screen(items, snapshot.quotes, snapshot.act5m,
-                          snapshot.act1h, config, snapshot.now);
+                          snapshot.act1h, config, snapshot.now,
+                          snapshot.limitUsed ?? null);
   await refineTopRows(rows, config, snapshot.now);
   state.deepReady = true;
   const eligible = applyPreferences(rows, config).kept;

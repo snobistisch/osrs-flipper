@@ -34,6 +34,30 @@ class JournalTests(unittest.TestCase):
         self.j.close_flip(flip_id, sell_price=5_000_000)
         self.assertEqual(journal.realised_profit(self.j.rows()[0]), -300_000)
 
+    def test_recent_buys_feed_the_buy_limit_usage(self):
+        now = 1_790_000_000
+        self.j.open_flip("Prayer potion(4)", quantity=300, buy_price=9_000,
+                         item_id=2434, bought_at=now - 3_600)
+        self.j.open_flip("Steel bar", quantity=50, buy_price=500,
+                         item_id=2353, bought_at=now - 4 * 3_600 - 60)
+        never = self.j.place_offer("Steel bar", quantity=40, buy_price=500,
+                                   item_id=2353, placed_at=now - 600)
+        self.j.cancel_flip(never, cancelled_at=now - 300)
+        self.j.place_offer("Steel bar", quantity=20, buy_price=500,
+                           item_id=2353, placed_at=now - 300)
+        self.assertEqual(
+            sorted((e["item_id"], e["limit_group"], e["qty"])
+                   for e in self.j.recent_buys(now)),
+            [(2353, None, 20), (2434, "potion:prayer potion", 300)])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.db"
+            self.assertIsNone(journal.recent_limit_usage(path, now))
+            with journal.Journal(path) as store:
+                store.open_flip("Steel bar", quantity=7, buy_price=500,
+                                item_id=2353, bought_at=now - 60)
+            usage = journal.recent_limit_usage(path, now)
+            self.assertEqual(usage.used(2353, None), 7)
+
     def test_unrecorded_exemption_is_resolved_by_name(self):
         flip_id = self.j.open_flip("Lobster", quantity=10, buy_price=100)
         self.j.close_flip(flip_id, sell_price=110)

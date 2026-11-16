@@ -754,7 +754,7 @@ class PlanParityTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.planner.close()
 
-    def plans(self, strategy, t, capital, account="members"):
+    def plans(self, strategy, t, capital, account="members", limit_used=None):
         import exemptions
         mode, horizon, _, _ = self.walk_forward.STRATEGIES[strategy]
         panel = self.panel
@@ -771,10 +771,16 @@ class PlanParityTests(unittest.TestCase):
             snapshot.items, snapshot.quotes, snapshot.activity_5m,
             snapshot.activity_1h, config, t,
             fetch_history=lambda item_id: panel.history_6h(item_id, t),
-            exempt=self.exempt, fetch_recent=series, fetch_reach=series)
+            exempt=self.exempt, fetch_recent=series, fetch_reach=series,
+            limit_used=None if limit_used is None else filters.LimitUsage(
+                items=dict(limit_used["items"]),
+                groups=dict(limit_used["groups"])))
         python = [row for row in result.rows if row.allocated_quantity]
+        browser_usage = None if limit_used is None else {
+            "items": {str(k): v for k, v in limit_used["items"].items()},
+            "groups": dict(limit_used["groups"])}
         key = self.planner.prepare(panel, snapshot, capital, account, mode,
-                                   horizon, nature)
+                                   horizon, nature, limit_used=browser_usage)
         try:
             javascript = self.planner.allocate(key, capital, config.slots)
         finally:
@@ -826,6 +832,32 @@ class PlanParityTests(unittest.TestCase):
             sorted((r["id"], r["buy"], r["sell"], r["qty"], r["capital"])
                    for r in javascript))
         self.assertLessEqual(sum(r.allocated_capital for r in python), capital)
+
+    def test_used_buy_limits_plan_the_same(self):
+        t, capital = self.times[3], 2_000_000
+        base, _, _ = self.plans("active", t, capital)
+        self.assertGreaterEqual(len(base), 2)
+        first, second = base[0], base[1]
+        # The first item's limit is used up, the second's partly; a family
+        # entry is included so the group map is exercised too.
+        usage = {"items": {first.item_id: first.limit or 10 ** 9,
+                           second.item_id: second.allocated_quantity // 2},
+                 "groups": {"potion:prayer potion": 1}}
+        python, javascript, result = self.plans("active", t, capital,
+                                                limit_used=usage)
+        self.assertEqual(
+            sorted((r.item_id, r.buy, r.sell, r.allocated_quantity,
+                    r.allocated_capital) for r in python),
+            sorted((r["id"], r["buy"], r["sell"], r["qty"], r["capital"])
+                   for r in javascript))
+        funded = {row.item_id for row in python}
+        if first.limit is not None:
+            self.assertNotIn(first.item_id, funded)
+            row = next(r for r in result.rows if r.item_id == first.item_id)
+            self.assertIn(filters.LIMIT_USED_WARNING, row.warnings)
+        self.assertNotEqual(
+            sorted((r.item_id, r.allocated_quantity) for r in python),
+            sorted((r.item_id, r.allocated_quantity) for r in base))
 
     def test_free_to_play_profile_matches_too(self):
         python, javascript, _ = self.plans("active", self.times[20], 500_000,

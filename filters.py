@@ -33,7 +33,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import math
 import re
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import (Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple,
+                    Union)
 
 import engine
 import exemptions
@@ -236,6 +237,9 @@ class FlipRow:
     scored_at: float = 0.0
     category: str = "other"
     limit_group: Optional[str] = None
+    # Units of this item (or its connected-limit family) bought in the last
+    # four hours; what the plan may still buy is the effective limit less this.
+    limit_used: int = 0
 
     # High alchemy
     alch_floor: Optional[int] = None
@@ -312,6 +316,52 @@ class ScreenResult:
 
 VolumeLookup = Callable[[int], Optional[Tuple[float, float]]]
 
+LIMIT_USED_WARNING = "buy limit used in the last 4 hours"
+
+
+@dataclass(frozen=True)
+class LimitUsage:
+    """Units bought in the last four hours, by item id and by limit group.
+
+    Built from a usage log (limit_usage). An item's used units are the larger
+    of its own total and its family's: every purchase of an item carries the
+    same family name, so the family total already contains the item's own.
+    Mirrored by the browser's limitUsage / limitUsedFor.
+    """
+    items: Dict[int, int] = field(default_factory=dict)
+    groups: Dict[str, int] = field(default_factory=dict)
+
+    def used(self, item_id: int, group: Optional[str]) -> int:
+        own = self.items.get(item_id, 0)
+        family = self.groups.get(group, 0) if group is not None else 0
+        return max(own, family)
+
+
+def limit_usage(entries: Iterable[dict], now: float) -> LimitUsage:
+    """Sum ``{item_id, limit_group, qty, at}`` entries bought after now - 4h."""
+    items: Dict[int, int] = {}
+    groups: Dict[str, int] = {}
+    for entry in entries:
+        qty, at = entry.get("qty"), entry.get("at")
+        if (isinstance(qty, bool) or not isinstance(qty, int) or qty <= 0
+                or isinstance(at, bool) or not isinstance(at, (int, float))
+                or not at > now - engine.BUY_LIMIT_WINDOW_SECONDS):
+            continue
+        item_id, group = entry.get("item_id"), entry.get("limit_group")
+        if isinstance(item_id, int) and not isinstance(item_id, bool):
+            items[item_id] = items.get(item_id, 0) + qty
+        if isinstance(group, str):
+            groups[group] = groups.get(group, 0) + qty
+    return LimitUsage(items=items, groups=groups)
+
+
+def limit_exhausted(row: "FlipRow", config: "FilterConfig") -> bool:
+    """A published limit with nothing left of it in the last four hours."""
+    return (row.limit is not None and row.limit_used > 0
+            and engine.remaining_buy_limit(
+                row.limit, row.limit_used, config.horizon_hours,
+                config.trade_mode) == 0)
+
 
 def screen(
     items: Dict[int, Item],
@@ -322,6 +372,7 @@ def screen(
     now: float,
     exempt: Optional[exemptions.ExemptionSet] = None,
     volume_lookup: Optional[VolumeLookup] = None,
+    limit_used: Optional[LimitUsage] = None,
 ) -> ScreenResult:
     """Score every item that is structurally a flip, then shrink the scores.
 
@@ -339,7 +390,7 @@ def screen(
         result = _evaluate(item_id, quote, items.get(item_id),
                            activity_5m.get(item_id), activity_1h.get(item_id),
                            config, config.position_bank, now, exempt,
-                           volume_lookup)
+                           volume_lookup, limit_used)
         if isinstance(result, str):
             funnel[result] += 1
         else:
@@ -466,6 +517,7 @@ def _optimise_execution(
     sigma_daily: Optional[float] = None, ou_fit: Optional[object] = None,
     regime_score: float = 0.0, fill_log_sigma: Optional[float] = None,
     reach: Optional[engine.ReachView] = None,
+    limit_used: int = 0,
 ) -> Optional[ExecutionChoice]:
     """Choose concrete order prices and quantity as one decision.
 
@@ -508,8 +560,8 @@ def _optimise_execution(
     free_sell = engine.tax_boundary_undercut(base_sell, tax_exempt, bond)
     max_total = max(0, base_sell - base_buy - 1)
     sell_points = _concession_points(max(0, max_total - (base_sell - free_sell)))
-    effective_limit = engine.effective_buy_limit(
-        limit, config.horizon_hours, config.trade_mode)
+    effective_limit = engine.remaining_buy_limit(
+        limit, limit_used, config.horizon_hours, config.trade_mode)
     original_spread = max(1, base_sell - base_buy)
     usable = (config.horizon_hours * engine.SECONDS_PER_HOUR
               - engine.LEGS_PER_ROUND_TRIP * calibration.min_leg_seconds)
@@ -640,6 +692,7 @@ def _evaluate(
     now: float,
     exempt: exemptions.ExemptionSet,
     volume_lookup: Optional["VolumeLookup"] = None,
+    limit_usage: Optional[LimitUsage] = None,
 ) -> Union[FlipRow, str]:
     """One item through the structural gates and the score."""
     if item is None:
@@ -699,6 +752,11 @@ def _evaluate(
                                      config.calibration)
     drift = engine.price_drift(_mid(act_5m), _mid(act_1h))
     ofi = engine.order_flow_imbalance(high_vol_1h, low_vol_1h)
+    group = connected_limit_group(item.name)
+    used = (limit_usage.used(item_id, group)
+            if limit_usage is not None and item.limit is not None else 0)
+    exhausted = used > 0 and engine.remaining_buy_limit(
+        item.limit, used, config.horizon_hours, config.trade_mode) == 0
     choice = _optimise_execution(
         base_buy=buy, base_sell=sell, tax_exempt=tax_exempt, bond=bond,
         limit=item.limit, available_capital=available_capital,
@@ -706,7 +764,8 @@ def _evaluate(
         quote_age=age, ofi=ofi, drift=drift, now=now,
         highalch=item.highalch, competitors=crowd, config=config,
         fill_log_sigma=engine.fill_log_sigma(config.calibration,
-                                             verified=False))
+                                             verified=False),
+        limit_used=used)
     if choice is None:
         return "margin not positive"
     buy, sell, buy_improvement, sell_improvement, qty, breakdown = choice[:6]
@@ -760,14 +819,15 @@ def _evaluate(
         priced_from_reference=priced.from_reference,
         scored_at=now,
         category=item_category(item.name),
-        limit_group=connected_limit_group(item.name),
+        limit_group=group, limit_used=used,
         alch_floor=floor,
         alch_distance=engine.alch_distance(buy, floor),
         alch_arbitrage_gp=breakdown.alch_arbitrage_gp,
         warnings=_warnings(depth, drift, ofi, affordable, qty, item.limit,
                            priced.from_reference,
                            breakdown, priced.sell, tax_exempt,
-                           config.calibration),
+                           config.calibration)
+        + ((LIMIT_USED_WARNING,) if exhausted else ()),
     )
 
 
@@ -1061,7 +1121,7 @@ def _rescore_with_history(row: FlipRow, view: engine.HistoryView,
         sigma_daily=sigma, ou_fit=view.ou, regime_score=view.regime_score,
         fill_log_sigma=engine.fill_log_sigma(config.calibration,
                                              verified=True),
-        reach=reach)
+        reach=reach, limit_used=row.limit_used)
     if choice is None:
         return replace(row, deep_checked=True, warnings=row.warnings + (
             "history left no positive concrete execution price",))
@@ -1199,6 +1259,7 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
             break
         if (row.ranking_value <= 0 or row.expected_gp <= 0
                 or _unit_capital(row) > remaining_seed
+                or limit_exhausted(row, config)
                 or not meets_completion_target(row, config)
                 or not has_funding_evidence(row, config)):
             continue
@@ -1228,7 +1289,9 @@ def allocate(result: ScreenResult, config: FilterConfig) -> ScreenResult:
         if row.limit_group and row.limit is not None:
             group_cap = engine.effective_buy_limit(
                 row.limit, config.horizon_hours, config.trade_mode) or 0
-            left = max(0, group_cap - group_used.get(row.limit_group, 0))
+            # The family's purchases of the last four hours count first.
+            group_used.setdefault(row.limit_group, row.limit_used)
+            left = max(0, group_cap - group_used[row.limit_group])
             quantity = min(quantity, left)
             group_used[row.limit_group] = group_used.get(row.limit_group, 0) + quantity
         if quantity <= 0:
@@ -1291,7 +1354,7 @@ def _allocate_portfolio(result: ScreenResult,
             break
         unit = _unit_capital(row)
         if (row.ranking_value <= 0 or row.expected_gp <= 0 or unit <= 0
-                or unit > bank
+                or unit > bank or limit_exhausted(row, config)
                 or not meets_completion_target(row, config)
                 or not has_funding_evidence(row, config)):
             continue
@@ -1531,15 +1594,21 @@ def rank_flips(
     volume_lookup: Optional["VolumeLookup"] = None,
     fetch_recent: Optional[Callable[[int], Optional[List[dict]]]] = None,
     fetch_reach: Optional[Callable[[int], Optional[List[dict]]]] = None,
+    limit_used: Optional[LimitUsage] = None,
 ) -> ScreenResult:
     """The whole pipeline: score, shrink, deep-check, filter, allocate.
 
     The deep check spends its per-item history budget on the leaders among
     the rows the preferences allow; shrinkage still runs over every scored
     row, because it is a statement about the whole cross-section.
+
+    ``limit_used`` holds the units bought in the last four hours (see
+    limit_usage). Each item is planned on its effective buy limit less those;
+    an item with nothing left is listed with a warning and not funded. The
+    default, nothing used, is the old behaviour.
     """
     result = screen(items, quotes, activity_5m, activity_1h, config, now, exempt,
-                    volume_lookup)
+                    volume_lookup, limit_used)
     if fetch_history is not None and top_k > 0:
         result = refine_with_history(result, fetch_history, config, now, top_k,
                                      fetch_recent=fetch_recent,

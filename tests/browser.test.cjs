@@ -139,6 +139,54 @@ test('manual offer sizing respects remaining bank and connected buy limits', () 
   assert.equal(run(`monitorableRow(${row}).allocatedQty`), 0);
 });
 
+test('buy-limit usage is logged on edit and done, and pruned after four hours', () => {
+  const { run, storage, context } = setup();
+  const LOG = 'osrs-flipper.limit-usage.v1';
+  const log = () => JSON.parse(storage.get(LOG) || '[]');
+  storage.set('osrs-flipper.executions.v1', JSON.stringify([
+    { key: 'a', itemId: 2434, name: 'Prayer potion(4)', qty: 100, buy: 9000, sell: 9300,
+      bought: 0, status: 'watching', createdAt: 1, limitGroup: 'potion:prayer potion' },
+    { key: 'b', itemId: 1, name: 'Test', qty: 50, buy: 100, sell: 110,
+      bought: 0, status: 'watching', createdAt: 1 },
+  ]));
+  // Edit: quantity, buy, sell, then units bought so far.
+  const answers = ['100', '9000', '9300', '30'];
+  context.prompt = () => answers.shift();
+  run('editExecution("a")');
+  assert.deepEqual(log().map(({ itemId, limitGroup, qty }) => ({ itemId, limitGroup, qty })),
+    [{ itemId: 2434, limitGroup: 'potion:prayer potion', qty: 30 }]);
+  // A second edit logs only the increase; no increase logs nothing.
+  answers.push('100', '9000', '9300', '45', '100', '9000', '9300', '45');
+  run('editExecution("a")');
+  run('editExecution("a")');
+  assert.deepEqual(log().map((entry) => entry.qty), [30, 15]);
+  // Done: the rest of the offer was bought. Remove logs nothing.
+  run('finishExecution("a")');
+  assert.deepEqual(log().map((entry) => entry.qty), [30, 15, 55]);
+  run('finishExecution("b", true)');
+  assert.equal(log().length, 3);
+  const usage = run('currentLimitUsage()');
+  assert.equal(usage.items[2434], 100);
+  assert.equal(usage.groups['potion:prayer potion'], 100);
+  assert.equal(run('limitUsedFor(currentLimitUsage(), 2433, "potion:prayer potion")'), 100);
+  // Entries older than four hours stop counting and are dropped on the next write.
+  const old = Date.now() - 4 * 3600 * 1000 - 60000;
+  storage.set(LOG, JSON.stringify(log().map((entry) => ({ ...entry, at: old }))));
+  assert.equal(run('Object.keys(currentLimitUsage().items).length'), 0);
+  run('recordLimitUse({itemId: 1, name: "Test"}, 5)');
+  assert.deepEqual(log().map(({ itemId, qty }) => ({ itemId, qty })), [{ itemId: 1, qty: 5 }]);
+});
+
+test('a used buy limit caps a manually saved offer', () => {
+  const { run, storage } = setup();
+  storage.set('osrs-flipper.limit-usage.v1', JSON.stringify([
+    { itemId: 2, limitGroup: null, qty: 7, at: Date.now() - 3600000 },
+  ]));
+  run('state.config = {capital:100000, maxPositionCapital:100000}; rescoreAllocated = () => {}');
+  const row = '{id:2, buy:100, qty:10, limit:10, limitGroup:null, mode:"active", horizonHours:4}';
+  assert.equal(run(`monitorableRow(${row}).allocatedQty`), 3);
+});
+
 test('invalid stored records cannot crash rendering', () => {
   const { run, storage } = setup();
   storage.set('osrs-flipper.executions.v1', '{}');

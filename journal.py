@@ -48,6 +48,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import engine
 import exemptions
+import filters
 
 DEFAULT_DB = Path(__file__).parent / "journal.db"
 
@@ -116,6 +117,20 @@ COLUMNS_V2 = (
 # censored SELL leg. Without 'placed', an offer that never filled could not be
 # written down at all, so the journal only ever saw buys that worked.
 OUTCOMES = ("placed", "open", "filled", "cancelled")
+
+
+def recent_limit_usage(db_path=DEFAULT_DB, now: Optional[float] = None
+                       ) -> Optional[filters.LimitUsage]:
+    """Buy-limit usage of the last four hours, or None without a journal.
+
+    cli.py and agent.py pass this to filters.rank_flips, so an item bought in
+    the last four hours is planned on what is left of its limit.
+    """
+    if not Path(db_path).exists():
+        return None
+    now = time.time() if now is None else now
+    with Journal(db_path) as store:
+        return filters.limit_usage(store.recent_buys(now), now)
 
 
 class Journal:
@@ -328,6 +343,25 @@ class Journal:
 
     def rows(self):
         return self.conn.execute("SELECT * FROM flips ORDER BY id").fetchall()
+
+    def recent_buys(self, now: Optional[float] = None) -> List[dict]:
+        """Buy-limit usage of the last four hours, for filters.limit_usage.
+
+        One entry per row whose ``bought_at`` lies within the window, with its
+        quantity. A buy offer that is still waiting counts at full size, as it
+        will use the limit as it fills; a cancelled offer that never filled
+        used nothing and is left out.
+        """
+        now = time.time() if now is None else now
+        cursor = self.conn.execute(
+            "SELECT item_id, item_name, quantity, bought_at FROM flips"
+            " WHERE bought_at > ? AND NOT (outcome = 'cancelled'"
+            " AND buy_filled_at IS NULL)",
+            (now - engine.BUY_LIMIT_WINDOW_SECONDS,))
+        return [{"item_id": row["item_id"],
+                 "limit_group": filters.connected_limit_group(row["item_name"]),
+                 "qty": row["quantity"], "at": row["bought_at"]}
+                for row in cursor.fetchall()]
 
     # -- reading ------------------------------------------------------------
 

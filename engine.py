@@ -1252,6 +1252,22 @@ def effective_buy_limit(limit: Optional[int], horizon_hours: float,
     return max(0, int(limit)) * cycles
 
 
+# Purchases older than this no longer count against a buy limit. The game's
+# window starts at the first purchase and lasts four hours, so every purchase
+# in the current window lies within the last four hours: a rolling sum over
+# them never overstates what is left.
+BUY_LIMIT_WINDOW_SECONDS = WINDOW_HOURS * 3600
+
+
+def remaining_buy_limit(limit: Optional[int], used: int, horizon_hours: float,
+                        mode: TradeMode) -> Optional[int]:
+    """The effective buy limit less units bought in the last four hours."""
+    effective = effective_buy_limit(limit, horizon_hours, mode)
+    if effective is None:
+        return None
+    return max(0, effective - max(0, int(used)))
+
+
 def round_trip_probability(buy_seconds: float, sell_seconds: float,
                            horizon_seconds: float) -> float:
     """Probability that two sequential exponential legs finish by ``horizon``.

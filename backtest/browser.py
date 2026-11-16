@@ -89,11 +89,18 @@ class BrowserPlanner:
 
     def prepare(self, panel: Panel, snapshot: Snapshot, capital: int,
                 account: str, strategy: str, horizon_hours: float,
-                nature_cost: int, bank_risk_percent: int = 25) -> int:
-        """As prepare_payload, fetching exactly the history the app asks for."""
+                nature_cost: int, bank_risk_percent: int = 25,
+                limit_used: Optional[dict] = None) -> int:
+        """As prepare_payload, fetching exactly the history the app asks for.
+
+        ``limit_used`` is the browser's usage map, ``{"items": {id: units},
+        "groups": {group: units}}``; None plans on whole buy limits.
+        """
         payload = snapshot_payload(snapshot, capital, account, strategy,
                                    horizon_hours, nature_cost,
                                    bank_risk_percent)
+        if limit_used is not None:
+            payload["limitUsed"] = limit_used
         self._key += 1
         targets = self._call({"op": "targets", "key": self._key,
                               "snapshot": payload})["targets"]

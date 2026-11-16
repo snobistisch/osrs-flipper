@@ -43,6 +43,7 @@ import archive
 import engine
 import exemptions
 import filters
+import journal
 import merch
 from storage import state_lock, write_json
 
@@ -331,7 +332,8 @@ def rank(client: api.WikiClient, capital: int,
             fetch_history=fetch if deep > 0 else None, top_k=deep,
             exempt=exempt, volume_lookup=volume_lookup,
             fetch_recent=fetch_recent if deep > 0 else None,
-            fetch_reach=fetch_recent if deep > 0 else None)
+            fetch_reach=fetch_recent if deep > 0 else None,
+            limit_used=journal.recent_limit_usage())
     finally:
         if store is not None:
             store.close()

@@ -20,6 +20,7 @@ import archive
 import engine
 import exemptions
 import filters
+import journal
 import merch
 
 
@@ -372,7 +373,8 @@ def main(argv=None):
             fetch_recent=fetch_recent if opts.deep > 0 else None,
             # One 5-minute series per item serves the recent-execution
             # evidence, the measured reach and the replay.
-            fetch_reach=fetch_recent if opts.deep > 0 else None)
+            fetch_reach=fetch_recent if opts.deep > 0 else None,
+            limit_used=journal.recent_limit_usage())
         if opts.mode == "crash":
             print_crash_table(result, opts)
         else:
