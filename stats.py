@@ -24,8 +24,8 @@ Three jobs live here:
    actually there.
 
 Everything returns its own diagnostics (t-statistics, shrinkage weights,
-posterior probabilities) because the point of the rebuild is that each step can
-be checked against outcomes separately.
+posterior probabilities) so that each step can be checked against outcomes
+separately.
 """
 from __future__ import annotations
 

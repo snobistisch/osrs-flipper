@@ -1,11 +1,9 @@
 """Which items pay no GE tax.
 
-The old engine exempted exactly one item — the bond — and taxed the other ~75
-exempt items at 2%. That is not a rounding error: it understates the margin on
-cooked food, low-level ammo and tools by the full 2% of the sell price, which
-is most of the spread on a 200 gp lobster. Those are precisely the items a
-capital-constrained free-to-play flipper lives on, so the ranking was biased
-against them systematically rather than randomly.
+About 75 items besides the bond are exempt. Taxing them at 2% would understate
+the margin on cooked food, low-level ammo and tools by the full 2% of the sell
+price, which is most of the spread on a 200 gp lobster. Those are precisely the
+items a capital-constrained free-to-play flipper lives on.
 
 The wiki API publishes no tax-exempt flag, so the list is a hand-maintained
 config file (tax_exempt.json) resolved against /mapping by name. Name matching

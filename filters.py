@@ -1,13 +1,9 @@
 """Screening pipeline: raw market data in, ranked executable flips out.
 
-The old pipeline could only ever remove. Every stage was a gate that rejected
-an item outright or a factor bounded above by 1.0, so an item the intraday
-snapshot happened to misrepresent — a stale print, one thin bucket — was
-eliminated before any deeper data could speak for it, and nothing downstream
-could ever argue it back up. A filter that only subtracts cannot find edge; it
-can only shorten the list.
-
-This version separates three things the old one conflated:
+A filter that only subtracts cannot find edge; it can only shorten the list.
+An item the intraday snapshot happens to misrepresent — a stale print, one thin
+bucket — must still reach the deeper data that can speak for it. So the
+pipeline separates three things:
 
   Structural gates    reasons an item is not a flip at all: no mapping entry,
                       a missing side of the quote, nothing traded, a margin
@@ -53,10 +49,8 @@ class FilterConfig:
     calibration: engine.Calibration = engine.DEFAULT_CALIBRATION
 
     # -- view preferences, applied after scoring -----------------------------
-    # All default to permissive. These used to be gates with opinionated
-    # defaults (300s, 120 units/h, 1% ROI, 1 gp of undercut room), which meant
-    # the tool never scored most of the game and its "shorter list" was mostly
-    # a narrower one.
+    # All default to permissive, so every item is scored; automatic_profile
+    # sets the values the interfaces use.
     max_quote_age: Optional[int] = None    # s since the OLDER /latest side
     min_thin_volume_1h: int = 0            # units/h on the thin side
     min_roi: float = 0.0                   # net margin / buy price
@@ -481,14 +475,13 @@ def _optimise_execution(
 ) -> Optional[ExecutionChoice]:
     """Choose concrete order prices and quantity as one decision.
 
-    Every queue-share benefit is paid for in ``buy``/``sell`` first. This
-    closes the old loophole where maximum affordable priority supplied the fill
-    probability while untouched prices supplied the profit.
+    Every queue-share benefit is paid for in ``buy``/``sell`` first, so the
+    fill probability and the profit come from the same prices.
 
     Active quantity is the largest whose whole round trip completes before the
-    deadline with ``active_target_completion`` probability. It used to fill
-    each half of the window at the mean rate, so every candidate was ranked,
-    and its prices chosen, at a size that completed about one time in eight.
+    deadline with ``active_target_completion`` probability. Filling each half
+    of the window at the mean rate would rank every candidate, and choose its
+    prices, at a size that completes about one time in eight.
 
     Away has two more choices. It may bid under the touch and wait for a dip
     (dip_fill_multiplier), which pays only on items that measurably revert
@@ -864,9 +857,9 @@ def refine_with_history(
     change the order, which it cannot do if it only ever sees the items that
     are already on top.
 
-    Unlike the old version this recomputes the score rather than multiplying
-    the old one by further sub-1.0 factors. History replaces estimates instead
-    of only penalising them: the OU fit can find an item trading *below* its
+    This recomputes the score rather than multiplying the stage-1 one by
+    further sub-1.0 factors. History replaces estimates instead of only
+    penalising them: the OU fit can find an item trading *below* its
     long-run level, which raises its score, and the reachable-volume estimate
     can be more generous than the intraday guess as well as less.
     """
@@ -1471,7 +1464,7 @@ def rank_flips(
     ``limit_used`` holds the units bought in the last four hours (see
     limit_usage). Each item is planned on its effective buy limit less those;
     an item with nothing left is listed with a warning and not funded. The
-    default, nothing used, is the old behaviour.
+    default is nothing used.
     """
     result = screen(items, quotes, activity_5m, activity_1h, config, now, exempt,
                     volume_lookup, limit_used)

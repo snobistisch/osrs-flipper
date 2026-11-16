@@ -4,25 +4,12 @@ A quoted margin is not profit. It is profit *if* both legs fill, and the Grand
 Exchange guarantees nothing. Everything here turns a quoted margin into an
 expected value per slot-hour.
 
-What changed from the first version, and why:
-
-- The old score multiplied nine hand-tuned factors together and divided by four
-  hours. Nine multiplicative constants against one observable outcome cannot be
-  calibrated: when a flip underdelivers, no amount of journal data can say
-  which factor was wrong, because they only ever appear as a product. Worse,
-  four hours was assumed, not modelled — an item that fills in twelve minutes
-  and one that takes the whole window were treated as differing only in size.
-- Fill time is now a random variable with a rate estimated from traded volume,
-  so gp/slot/hour is profit divided by the time a slot is actually occupied.
-- Undercut depth feeds the fill rate instead of being its own invented
-  multiplier: the gp of price improvement you can afford *is* how far you can
-  jump the queue, which is what changes your fill rate.
-- Level and volatility come from a per-item Ornstein-Uhlenbeck fit rather than
-  from one exponential decay constant applied to every item in the game.
-- Every remaining free parameter lives in `Calibration` below, each marked
-  DERIVED (forced by game mechanics or arithmetic) or CALIBRATE (a prior, to be
-  fitted from journal and archive data). Nothing is tuned by feel in the body
-  of a function.
+Fill time is a random variable with a rate estimated from traded volume, so
+gp/slot/hour is profit divided by the time a slot is actually occupied.
+Undercut depth feeds the fill rate. Level and volatility come from a per-item
+Ornstein-Uhlenbeck fit. Every free parameter lives in `Calibration` below,
+marked DERIVED (forced by game mechanics or arithmetic) or CALIBRATE (a prior,
+to be fitted from journal and archive data).
 
 Conventions:
 - The buy side of a flip fills near the instant-sell price ("low"); the sell
@@ -54,11 +41,6 @@ BOND_FEE_RATE = 0.10
 TAX_STEP = int(round(1 / TAX_RATE))    # 50 gp per 1 gp of tax — DERIVED
 
 WINDOW_HOURS = 4                  # the buy-limit window
-
-# There used to be constants here for extrapolating one bucket's volume across
-# the window (x48 for 5m buckets, x4 for 1h). The fill model replaced them:
-# throughput is now a rate scaled by your queue share, not one sample multiplied
-# by a number.
 
 # Offer slots cap how many flips you can run at once — the real bottleneck long
 # before gp is. Free-to-play gets three; members get eight.
@@ -118,8 +100,7 @@ class TradeMode(str, Enum):
 DEFAULT_ACCOUNT = AccountType.MEMBERS
 DEFAULT_TRADE_MODE = TradeMode.ACTIVE
 DEFAULT_OVERNIGHT_HOURS = 8.0
-# Away horizons: short absences are as real as a night's sleep, and they were
-# the gap the old 6-12h presets left between watching and sleeping.
+# Away horizons: short absences are as real as a night's sleep.
 OVERNIGHT_HORIZON_PRESETS = (1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0)
 # Max profit round-trip deadline: the longest horizon the profile accepts. An
 # unfinished trip is cancelled here and what is still unsold carries the same
@@ -208,15 +189,14 @@ class Calibration:
     # jumped the whole queue. Expressed as a fraction of the spread rather than
     # of the price: 1 gp of improvement is decisive on a 3 gp spread and
     # meaningless on a 300 gp one, and normalising by the mid instead would
-    # rank cheap items and expensive ones on different scales — which is how
-    # the old fixed-gp queue constant misranked them.
+    # rank cheap items and expensive ones on different scales.
     # CALIBRATE: regress observed fill rate on distance from the touch.
     aggressiveness_scale: float = 0.25
 
     # Moving one tick inside the observed spread gives price priority, but the
     # public feed exposes neither the quantities already at that tick nor how
-    # quickly other flippers re-price around us. The old curve therefore let a
-    # 1 gp concession claim most of all traded volume. In crowded markets cap
+    # quickly other flippers re-price around us. Without a cap a 1 gp
+    # concession would claim most of all traded volume. In crowded markets cap
     # the improved TOTAL share at 3%; a quiet market whose measured touch share
     # is already larger keeps that base. CALIBRATE from completed journal trades.
     priority_capture_ceiling: float = 0.03
@@ -290,38 +270,9 @@ class Calibration:
     touch_fill_weight: float = 0.0
 
     # Share of the volume that traded strictly THROUGH an Active offer's price
-    # that reaches the offer. This is not the queue share at the top of this
-    # class, and until 16 November 2026 it was wrongly taken to be: crossing
-    # volume was shared out like a touch queue, one sixteenth of it, or one
-    # buy limit per window on a busy item. The Grand Exchange matches on
-    # price first. A sale executes against the highest buy offer and a
-    # purchase against the lowest sell offer; age only decides between offers
-    # at the SAME price (OSRS Wiki, "Grand Exchange", read 2026-11-16). Units
-    # that traded below a buy at B therefore went to offers B would have been
-    # served before, however many of them there were. The crowd is already in
-    # that price: the more flippers work an item, the higher the bid the
-    # sales went through at, and the less volume is left below B.
-    #
-    # With the queue share an Active offer could never approach a buy limit:
-    # sized for an 80% round trip it came to about 1% of the volume crossing
-    # its price in a window, 6% of the limit on an item trading five limits
-    # a window, and the plan put 1.1m of a 20m bank to work.
-    #
-    # What keeps the share below one is what public trades cannot show:
-    # flippers who outbid a new offer after it appears, and 5-minute averages
-    # that stand in for the trades inside them. It stays an ASSUMPTION, and
-    # a bet. On the tuning period (10-29 Oct 2026, 925 decisions, 20m bank)
-    # the Active plan sized on 30% earned 32k gp/h where the real share was
-    # 30%, against 12k sized on the queue share. Where it was 10% it earned
-    # 15k against 7k if offers at the traded price fill as well, and -1k
-    # against 4k if they do not. Where it was 3% it lost 15k gp/h against 2k:
-    # a larger buy fills in full exactly when the price is falling through
-    # it. docs/model.md section 0 has the table.
-    #
-    # The default is 0, the queue share ("careful" in ORDER_SIZES): it is the
-    # only value evaluated on the held-out fortnight (commit f0aaa57). 0.15
-    # ("balanced") and 0.30 ("large", the default of commit 0520b0b) were
-    # chosen on the tuning period only, so they are opt-in.
+    # that reaches the offer (ORDER_SIZES sets it per plan). 0 means the queue
+    # share at the top of this class, and 0 is the only value evaluated on
+    # held-out data.
     # CALIBRATE: journal units filled / units that traded through the price
     # while the offer was open.
     crossing_capture_share: float = 0.0
@@ -621,7 +572,7 @@ def executable_prices(
 
     That blend is right while the two sides of /latest are independent
     observations of the two sides of the book. It is wrong when they are not,
-    and it fails in a way that used to discard the best flips in the game. If
+    and it fails in a way that would discard the best flips in the game. If
     the last instant-buy and the last instant-sell are the same price — one
     trade that crossed, or two prints from moments when the price had moved —
     the blend returns buy >= sell, the margin comes out zero, and the item is
@@ -639,8 +590,8 @@ def executable_prices(
     One guard survives, and it is not a quality judgement: the two sources must
     still be describing the same market. Raw shrimps printed 30/27 against a
     reference of 5/6 — the two estimates of the same price are 81% apart, so
-    one of them is about something that is no longer true and there is nothing
-    to trade on. Measured across the 359 items where the blend collapsed, the
+    one of them describes a market that has moved and there is nothing to
+    trade on. Measured across the 359 items where the blend collapsed, the
     divergence between the two mids has a median of 3% and a 90th percentile of
     25%; past that the population is items trading a handful of units an hour,
     whose "average" rests on one or two prints. See
@@ -761,7 +712,7 @@ def undercut_depth(buy: int, sell: int, tax_exempt: bool = False,
     Leather quoted at 173/192 has depth 7: bidding 180 to sell at 185 still
     clears 2 gp after tax, so you can pay for priority and still profit.
 
-    Depth is no longer a score multiplier of its own. It is the input to the
+    Depth is not a score multiplier of its own. It is the input to the
     fill rate — how far ahead of the queue you can buy your way is precisely
     what determines how fast you fill.
     """
@@ -781,12 +732,11 @@ def touch_competitors(volume_per_hour: float, buy_limit: Optional[int],
                       calibration: Calibration = DEFAULT_CALIBRATION) -> float:
     """How many offers you are queued behind at the touch price.
 
-    This used to be the constant `competitors_at_touch`, and that constant was
-    the model's worst assumption. It said four — on every item, including the
-    ones where the spread is a single gp and every flipper in the game is
-    looking at the same free money. On fire runes it therefore handed you 25%
-    of 1.7 million units an hour and reported a two-hour round trip on a flip
-    that takes a day.
+    A constant crowd (`competitors_at_touch` alone) would be the same on every
+    item, including the ones where the spread is a single gp and every flipper
+    in the game is looking at the same free money. With four, fire runes would
+    hand you 25% of 1.7 million units an hour and report a two-hour round trip
+    on a flip that takes a day.
 
     There is an observable lower bound on the size of the crowd, and it needs
     no new data. Every participant is capped at `buy_limit` units per window,
@@ -794,7 +744,7 @@ def touch_competitors(volume_per_hour: float, buy_limit: Optional[int],
     `volume_per_window / buy_limit` of them. Fire runes: 6.7m units a window
     against a 50,000 limit, so at minimum 134 participants, not four. An
     ordinary item — limpwurt root, 124,000 a window against a 13,000 limit —
-    comes to 9.5, and the floor keeps it near the old behaviour.
+    comes to 9.5, close to the quiet-market floor.
 
     The formula has a property worth stating, because it is what makes it
     believable rather than merely pessimistic: where the crowd term binds,
@@ -851,8 +801,7 @@ def crossing_share(calibration: Calibration = DEFAULT_CALIBRATION,
     for an Active offer this is ``crossing_capture_share`` and not a place
     in a queue: the queue share of ``aggressiveness`` is for volume at
     exactly your price. Away and Max profit read ``resting_capture_share``.
-    A share of 0 means the queue share, which is what every strategy used
-    before 16 November 2026.
+    A share of 0 means the queue share.
     """
     capture = float(calibration.crossing_capture_share
                     if TradeMode(mode) is TradeMode.ACTIVE
@@ -1057,7 +1006,7 @@ def expected_occupancy_seconds(work_seconds: float, deadline_seconds: float,
     is occupied until completion or the deadline, whichever comes first. This
     is the ranking denominator, and expected profit (fill_estimate over the
     same deadline) is its numerator: the two expectations are taken over the
-    same M, which the old mean-rate denominator was not.
+    same M.
     """
     deadline = max(0.0, float(deadline_seconds))
     if deadline <= overhead_seconds:
@@ -1089,8 +1038,8 @@ def target_quantity(rate: float, usable_seconds: float, target: float,
     """Largest quantity that completes inside ``usable_seconds`` with
     probability ``target`` at ``rate`` under the shared multiplier.
 
-    The old sizing filled the horizon at the MEAN rate, which within the
-    model's own distribution completes about a third of the time.
+    Filling the horizon at the MEAN rate instead would, within the model's own
+    distribution, complete about a third of the time.
     """
     if rate <= 0 or usable_seconds <= 0:
         return 0
@@ -1189,7 +1138,7 @@ def effective_buy_limit(limit: Optional[int], horizon_hours: float,
     return max(0, int(limit)) * cycles
 
 
-# Purchases older than this no longer count against a buy limit. The game's
+# Purchases older than this do not count against a buy limit. The game's
 # window starts at the first purchase and lasts four hours, so every purchase
 # in the current window lies within the last four hours: a rolling sum over
 # them never overstates what is left.
@@ -1334,8 +1283,6 @@ def holding_risk(sigma_daily: float, hold_seconds: float,
     standard deviation of the price move over that window scales with the
     square root of its length, so a flip that sits for a day on a volatile item
     is a different proposition from the same margin cleared in ten minutes.
-    The old model had one volatility discount that knew nothing about how long
-    the position would be open.
     """
     if hold_seconds == float("inf"):
         return 0.0
@@ -1349,10 +1296,10 @@ def staleness_factor(age_seconds: float, sigma_daily: float,
                      calibration: Calibration = DEFAULT_CALIBRATION) -> float:
     """Confidence in a quote, given how far the price could have moved since.
 
-    The old version halved confidence every 600 seconds for every item alike.
-    That is too harsh on a liquid staple, where a 20-minute-old print is still
-    the market, and too kind on a thin volatile one, where a 30-second-old
-    print may already be gone. What actually decays is not time but price
+    A fixed half-life for every item alike would be too harsh on a liquid
+    staple, where a 20-minute-old print is still the market, and too kind on a
+    thin volatile one, where a 30-second-old print may already be gone. What
+    actually decays is not time but price
     certainty, so the discount is driven by the item's own volatility over the
     elapsed time.
     """
@@ -1374,9 +1321,8 @@ def mean_reversion_factor(
 ) -> float:
     """EV multiplier from where the price sits relative to its own level.
 
-    Replaces the old level and momentum factors. Those applied one exponential
-    penalty above a 14-day median to every item in the game, which is right for
-    a rune and wrong for a raid unique: supply of rare gear is fixed, demand
+    One exponential penalty above a 14-day median for every item in the game
+    would be right for a rune and wrong for a raid unique: supply of rare gear is fixed, demand
     grows, and "above its two-week median" is that item's permanent condition.
 
     An OU fit separates the two cases per item. Where reversion is real and
@@ -1393,7 +1339,7 @@ def mean_reversion_factor(
 
     if regime_score >= calibration.regime_shift_threshold:
         # The series spans two different markets; its mean is an average of a
-        # level that no longer exists and one that has not settled.
+        # level that has gone and one that has not settled.
         return 1.0
 
     if fit.mean_reverting:
@@ -1450,11 +1396,7 @@ def alch_distance(buy_price: int, floor: Optional[int]) -> Optional[float]:
 
 def alch_bonus(distance: Optional[float],
                calibration: Calibration = DEFAULT_CALIBRATION) -> float:
-    """Credit for downside that is capped by the alchemy floor.
-
-    The old engine loaded highalch from /mapping into the Item dataclass and
-    then never referenced it again.
-    """
+    """Credit for downside that is capped by the alchemy floor."""
     if distance is None or distance >= calibration.alch_relevant_distance:
         return 1.0
     if distance <= 0:
@@ -1584,7 +1526,7 @@ class ScoreBreakdown:
     # Fill-time distribution. buy_seconds, sell_seconds and total_seconds above
     # are the MEDIANS of the same distribution; the ETA band and the
     # occupancy are taken from it too, so what is shown, what p_fill measures
-    # and what the ranking divides by can no longer disagree.
+    # and what the ranking divides by cannot disagree.
     fill_log_sigma: float = 0.0
     round_trip_p50_seconds: float = 0.0
     round_trip_p80_seconds: float = 0.0
@@ -1723,11 +1665,9 @@ def score_flip(
                               + liquidation_hours * SECONDS_PER_HOUR)
     else:
         # The legs are sequential: the sell starts when the buy is done, so a
-        # quick buy leaves the sell more time. The old version gave each leg a
-        # fixed half of the window and multiplied two independent completion
-        # odds, while the shown ETA came from a third, mean-rate calculation.
-        # Now there is one event — the whole quantity bought AND sold by the
-        # deadline — and one distribution behind it. Buying q then selling q
+        # quick buy leaves the sell more time. There is one event — the whole
+        # quantity bought AND sold by the deadline — and one distribution
+        # behind it. Buying q then selling q
         # takes q/rate_rt of market time, so the existing closed form gives the
         # completed round-trip quantity directly.
         usable = max(0.0, horizon_seconds - LEGS_PER_ROUND_TRIP * overhead)
@@ -1759,9 +1699,8 @@ def score_flip(
         sigma = calibration.default_sigma_daily
 
     # How long inventory is held. Active: the sell leg. Away: at least until
-    # you are back, then the sell — the old code used the sell leg alone and
-    # so measured update and reversion exposure over minutes for a position
-    # that is held all night. Max profit relists like Active, but its P80 can
+    # you are back, then the sell: the update and reversion exposure of a
+    # position held all night is measured over the night. Max profit relists like Active, but its P80 can
     # run past the deadline, where the trip is cancelled; what is held after
     # that is priced by the stranded-inventory stress below instead.
     if mode is TradeMode.OVERNIGHT:
@@ -1809,9 +1748,9 @@ def score_flip(
         if (floor_loss is not None
                 and floor_loss < calibration.alch_relevant_distance):
             # The floor is only as wide as your casting: ~1,200 alchs an
-            # hour across the selling window. It used to cap the loss on
-            # every stranded unit, which zeroed the downside of 20,000 bolts
-            # that would take seventeen hours to alch.
+            # hour across the selling window. Capping the loss on every
+            # stranded unit would zero the downside of 20,000 bolts that take
+            # seventeen hours to alch.
             # Max profit has no separate selling phase; leftovers at the
             # deadline get the same clearing window Away inventory gets.
             protected = min(stranded, alch_protected_units(
@@ -1990,7 +1929,7 @@ def select_portfolio(options: Sequence[Sequence[Tuple[float, int]]],
     width = capital // step + 1
     # values[s][c]: most value from the candidates seen so far with at most s
     # positions and at most c steps of coins. taken[i][s][c]: the size of
-    # candidate i used to reach it, -1 if it was left out.
+    # candidate i that reaches it, -1 if it was left out.
     values = [[0.0] * width for _ in range(slots + 1)]
     taken = []
     for sizes in options:
@@ -2549,12 +2488,10 @@ def gp_per_slot_hour(expected_gp: float, total_seconds: float) -> float:
     """Expected gp per offer slot per hour — the metric worth maximising.
 
     Offer slots, not gp, are the binding constraint: three in free-to-play,
-    eight for members. The old version divided by a flat four hours, which
-    assumed every flip occupies a slot for exactly the buy-limit window. It
-    does not: a flip that clears in twelve minutes for 5k gp earns 25k per
-    slot-hour, while one that ties the slot up all four hours for 40k earns
-    10k. The first is the better use of the slot and the old metric ranked it
-    eighth as well.
+    eight for members. A flip does not occupy a slot for exactly the
+    buy-limit window: one that clears in twelve minutes for 5k gp earns 25k
+    per slot-hour, while one that ties the slot up all four hours for 40k
+    earns 10k. The first is the better use of the slot.
     """
     if total_seconds <= 0 or total_seconds == float("inf"):
         return 0.0

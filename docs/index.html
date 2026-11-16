@@ -330,7 +330,7 @@ input[type="checkbox"] { accent-color: var(--title); width: 1rem; height: 1rem; 
   padding: 1rem 1.2rem;
 }
 
-/* The coin mark that replaced the emoji: the wiki's own coin-stack sprite.
+/* The coin mark: the wiki's own coin-stack sprite.
    If it does not arrive, the error handler hides it and a CSS-drawn coin
    takes its place, so the title never loses its mark or its offset. */
 .coin-mark {
@@ -1240,9 +1240,8 @@ const LEGS_PER_ROUND_TRIP = 2;
 /* Items that pay no GE tax. The wiki API publishes no flag for this, so the
    list is maintained by hand in tax_exempt.json and mirrored here; names are
    matched against /mapping because several item ids in circulation are wrong.
-   The previous version of this page exempted exactly one item, the bond, and
-   charged the other ~56 a 2% they do not owe — which is most of the spread on
-   a 200 gp lobster. */
+   Charging these items 2% would take most of the spread on a 200 gp
+   lobster. */
 const EXEMPT_IDS = new Set([13190]);
 const EXEMPT_NAMES = new Set([
   "old school bond",
@@ -1299,17 +1298,8 @@ const CAL = {
   // at a strictly worse price. CALIBRATE from journal fills.
   touch_fill_weight: 0.0,
   // Share of the volume that traded strictly THROUGH an Active offer's price
-  // that reaches the offer. Not a queue share: the Grand Exchange matches on
-  // price first, and age only decides between offers at the same price, so
-  // units that traded below a buy at B went to offers B would have been
-  // served before. The crowd is already in that price. Until 16 November
-  // 2026 this volume was shared out like a touch queue, and no offer could
-  // approach a buy limit. Below one for what public trades cannot show:
-  // flippers who outbid a new offer, and 5-minute averages. An ASSUMPTION and
-  // a bet: in the backtest it earned 32k gp/h against 12k where the real
-  // share was 30%, and lost 15k against 2k where it was 3% (docs/model.md
-  // section 0). The default is 0, the queue share ("careful" in ORDER_SIZES):
-  // the only value evaluated on held-out data. 0.15 and 0.30 are opt-in.
+  // that reaches the offer (ORDER_SIZES sets it per plan). 0 means the queue
+  // share, and 0 is the only value evaluated on held-out data.
   // CALIBRATE from journal fills.
   crossing_capture_share: 0.0,
   // The same share for an offer that rests unwatched (Away, Max profit).
@@ -1469,7 +1459,7 @@ function executablePrices(latestLow, latestHigh, refLow, refHigh) {
    you cannot see. Air runes at 5/6 have depth 0: buying at 6 to sell at 5 is a
    guaranteed loss, so a 1 gp margin can only ever be won by waiting.
 
-   Depth is no longer a score multiplier of its own. It is the input to the
+   Depth is not a score multiplier of its own. It is the input to the
    fill rate — how far ahead of the queue you can buy your way is precisely
    what determines how fast you fill. */
 function undercutDepth(buy, sell, exempt, bond = false) {
@@ -1490,19 +1480,18 @@ const priceEdge = (depth, spread) => spread <= 0 ? 0 : Math.max(0, depth / sprea
 
 /* How many offers you are queued behind at the touch price.
 
-   This used to be the constant CAL.competitors_at_touch, and that constant was
-   the model's worst assumption. It said four — on every item, including the
-   ones where the spread is a single gp and every flipper in the game is
-   looking at the same free money. On fire runes it handed you 25% of 1.7
-   million units an hour and reported a two-hour round trip on a flip that
-   takes a day.
+   A constant crowd (CAL.competitors_at_touch alone) would be the same on
+   every item, including the ones where the spread is a single gp and every
+   flipper in the game is looking at the same free money. With four, fire
+   runes would hand you 25% of 1.7 million units an hour and report a two-hour
+   round trip on a flip that takes a day.
 
    There is an observable lower bound on the crowd, and it needs no new data.
    Every participant is capped at buyLimit units per window, so producing the
    window's observed volume takes at least volumePerWindow / buyLimit of them.
    Fire runes: 6.7m units a window against a 50,000 limit, so at minimum 134
-   participants, not four. Limpwurt root comes to 9.5 and the floor keeps it
-   near the old behaviour.
+   participants, not four. Limpwurt root comes to 9.5, close to the
+   quiet-market floor.
 
    Where the crowd term binds, your share is buyLimit / volumePerWindow, so
    your fill rate is exactly one buy limit per window: on a crowded item you
@@ -1547,8 +1536,8 @@ const fillRate = (volumePerHour, share) =>
 
 /* Standard normal CDF from a Chebyshev fit of erfc (error below 1e-15), so the
    probabilities agree with the Python engine's math.erf to the last digits
-   that matter: the old five-term approximation was off by 1.5e-7, which is
-   fractions of a gp on a large flip and enough to flip a near tie. */
+   that matter: an error of 1.5e-7 is fractions of a gp on a large flip and
+   enough to flip a near tie. */
 const ERFC_COEFFICIENTS = [-1.3026537197817094, 6.4196979235649026e-1,
   1.9476473204185836e-2, -9.561514786808631e-3, -9.46595344482036e-4,
   3.66839497852761e-4, 4.2523324806907e-5, -2.0278578112534e-5,
@@ -1671,7 +1660,7 @@ const roundTripRate = (buyRate, sellRate) =>
   buyRate <= 0 || sellRate <= 0 ? 0 : 1 / (1 / buyRate + 1 / sellRate);
 
 /* Largest quantity whose whole round trip completes in usableSeconds with
-   probability `target`. The old sizing filled the window at the MEAN rate. */
+   probability `target`, not the size that fills the window at the MEAN rate. */
 function targetQuantity(rate, usableSeconds, target, sigma, mu = null) {
   if (rate <= 0 || usableSeconds <= 0) return 0;
   const s = Math.max(1e-6, sigma);
@@ -1729,7 +1718,7 @@ function effectiveBuyLimit(limit, hours, mode) {
   return limit * (mode === "overnight" ? buyLimitWindows(hours) : 1);
 }
 
-/* Purchases older than this no longer count against a buy limit. The game's
+/* Purchases older than this do not count against a buy limit. The game's
    window starts at the first purchase and lasts four hours, so every purchase
    in the current window lies within the last four hours: a rolling sum over
    them never overstates what is left. Mirrors engine.remaining_buy_limit. */
@@ -1819,9 +1808,9 @@ function holdingRisk(sigmaDaily, holdSeconds) {
   return Math.exp(-CAL.risk_aversion_eta * sigmaDaily * Math.sqrt(days));
 }
 
-/* The old page halved confidence every 600 seconds for every item alike. That
-   is too harsh on a liquid staple, where a 20-minute-old print is still the
-   market, and too kind on a thin volatile one. What decays is not time but
+/* A fixed half-life for every item alike would be too harsh on a liquid
+   staple, where a 20-minute-old print is still the market, and too kind on a
+   thin volatile one. What decays is not time but
    price certainty, so the item's own volatility drives it. */
 function stalenessFactor(ageSeconds, sigmaDaily) {
   if (ageSeconds <= 0) return 1;
@@ -1916,9 +1905,9 @@ function regimeShift(prices) {
   return Math.abs(centreSecond - centreFirst) / scale;
 }
 
-/* Replaces one exponential penalty for trading above a 14-day median applied
-   to every item in the game — right for a rune, wrong for a raid unique whose
-   normal condition is trading above its own median. */
+/* Per item, not one exponential penalty for trading above a 14-day median
+   applied to every item in the game — right for a rune, wrong for a raid
+   unique whose normal condition is trading above its own median. */
 function meanReversionFactor(ou, midPrice, holdSeconds, regimeScore) {
   if (!ou || midPrice <= 0 || holdSeconds <= 0 || !isFinite(holdSeconds)) return 1;
   if (regimeScore >= CAL.regime_shift_threshold) return 1;
@@ -1939,8 +1928,7 @@ function meanReversionFactor(ou, midPrice, holdSeconds, regimeScore) {
 
 /* No rational holder sells below the alch value net of a nature rune, because
    the spell pays it unconditionally. For a flipper it is a free put: the worst
-   case on the sell leg is the floor, not zero. The previous version of this
-   page loaded highalch and never used it. */
+   case on the sell leg is the floor, not zero. */
 /* High Alchemy takes five 0.6 s ticks: at most 1,200 casts an hour, so the
    alch floor only protects what you can physically cast. DERIVED. */
 const ALCH_CASTS_PER_HOUR = 1200;
@@ -2279,7 +2267,7 @@ function rescoreAllocated(r) {
   r.downsideRisk = b.downsideRisk; r.factors = b.factors;
 }
 
-/* Quote age at which confidence drops, by mode: [no longer medium, speculative].
+/* Quote age at which confidence drops, by mode: [below medium, speculative].
    An Away bid rests for hours, so minutes of quote age matter far less than for
    an Active trade; the automatic Away profile admits 15-minute-old quotes.
    Max profit places its offer at the live quote, like Active. */
@@ -3721,12 +3709,11 @@ async function loadWatchlist(quotes, items) {
 
 /* ==================== the pipeline ====================
 
-   Structural gates reject; everything else is scored. The old page rejected on
-   ROI, quote age, volume and undercut room before anything deeper could speak
-   for an item — a filter that only subtracts cannot find edge, it can only
-   shorten the list. Those are now scoring inputs, and the sidebar filters hide
-   rows AFTER scoring and shrinkage, so narrowing the view never reorders what
-   is left. */
+   Structural gates reject; everything else is scored. A filter that only
+   subtracts cannot find edge, it can only shorten the list, so ROI, quote age,
+   volume and undercut room are scoring inputs, and the quality gates hide rows
+   AFTER scoring and shrinkage, so narrowing the view never reorders what is
+   left. */
 
 const DEEP_TOP_K = 15;
 const DEEP_BREADTH = 3;      // fetch 3x what is shown, so history can promote
@@ -4308,8 +4295,8 @@ async function refineTopRows(rows, config, now) {
   const byRank = (values) => [...values]
     .sort((a, b) => b.rankingValue - a.rankingValue);
   // /latest often prints both sides at the same price. Those rows use the
-  // traded 5m/1h averages and used to be placed behind every direct-print row,
-  // so none of them received a history check. Reserve one third of the same
+  // traded 5m/1h averages and rank behind every direct-print row, so without
+  // a reserve none of them would receive a history check. Reserve one third of the same
   // fixed request budget for that cohort; no extra API traffic is created.
   const directBudget = Math.ceil(targetCount * 2 / 3);
   const seeded = [
@@ -5176,8 +5163,7 @@ function show(allRows, config, statusText) {
     if (fundedById.has(row.id)) kept[index] = fundedById.get(row.id);
   });
   // Keep the strict automatic plan separate from the complete selectable
-  // market list. The previous implementation replaced the list with the
-  // shortlist, making every medium-confidence alternative disappear.
+  // market list, so every alternative outside the plan stays listed.
   state.rows = kept;
   state.planRows = candidates;
   state.planSelection = selection;
@@ -5931,7 +5917,7 @@ async function loadChart() {
   const selected = state.selected, timestep = state.timestep;
   const chart = $("#chart");
   // The tooltip belongs to the chart that is being replaced; leaving it up
-  // pins a reading from a timeframe that is no longer on screen.
+  // pins a reading from a timeframe that has left the screen.
   $("#tip").style.opacity = 0;
   chart.innerHTML = `<p class="small dim">Loading price history…</p>`;
   try {
@@ -6505,8 +6491,8 @@ $("#merch tbody").addEventListener("keydown", (event) => {
 $("#merch tbody").addEventListener("click", (event) => {
   const hold = event.target.closest("button[data-hold]");
   if (hold) { addHolding(Number(hold.dataset.hold)); return; }
-  // Open the detail panel underneath the crash table. It used to switch to the
-  // Flip tab first, which threw away the view you had just navigated to.
+  // Open the detail panel underneath the crash table, without switching to
+  // the Flip tab and throwing away the view you had just navigated to.
   const row = event.target.closest("tr[data-id]");
   if (row && state.tab === "crash") showDetail(Number(row.dataset.id));
 });
