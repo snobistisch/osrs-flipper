@@ -30,7 +30,8 @@ price; lower `crossing_capture_share` if your offers fill slower than the
 plan says ([order size](docs/model.md#order-size-16-november-2026)). Away
 (next check in 1–12 hours, overnight included) estimates inventory bought
 while you are gone — including bids under today's price on items that
-measurably bounce back — and a separate selling phase after you return.
+measurably bounce back (a mean-reversion test with about 5% false positives on
+random walks) — and a separate selling phase after you return.
 Max profit ranks risk-adjusted expected profit per flip — one buy offer of at
 most one buy limit, relisted as soon as it fills — with a 24-hour deadline; a
 slow flip can rank first, and its time band says how slow.

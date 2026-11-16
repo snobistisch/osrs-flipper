@@ -462,7 +462,12 @@ Each deep-checked item now gets its own **Ornstein-Uhlenbeck fit** on 14 days of
 6-hour buckets, which separates the cases and reports its own half-life:
 
 - Where reversion is real and statistically significant, the expected return
-  over the *actual* holding period is credited or charged.
+  over the *actual* holding period is credited or charged. Significant means
+  a regression t of −2.93 or lower. Under a random walk that statistic follows
+  the Dickey-Fuller distribution, not Student's t: the earlier −2.0 labelled
+  28% of simulated random walks of 56 buckets as reverting, −2.93 labels about
+  5%. The price is power: a half-life of 17 hours is detected about 56% of the
+  time, one of two days about 11%.
 - Where it is not — a trending item — only a small capped trend term applies.
   A rising price and a merch-clan pump look identical in price data, so the
   upside credit stays deliberately timid.

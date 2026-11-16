@@ -49,6 +49,22 @@ class OUTests(unittest.TestCase):
         fit = stats.fit_ou(prices, 0.25)
         self.assertFalse(fit.mean_reverting)
 
+    def test_random_walk_false_positive_rate_is_about_five_percent(self):
+        # Under a random walk the slope's t follows Dickey-Fuller, not
+        # Student's t; at the old threshold of 2.0 this rate was 28%.
+        random.seed(20261116)
+        hits = 0
+        walks = 2000
+        for _ in range(walks):
+            log_price = math.log(1000.0)
+            prices = []
+            for _ in range(56):
+                log_price += random.gauss(0, 0.02)
+                prices.append(math.exp(log_price))
+            fit = stats.fit_ou(prices, 0.25)
+            hits += bool(fit is not None and fit.mean_reverting)
+        self.assertLessEqual(hits / walks, 0.08)
+
     def test_expected_return_does_not_overshoot_the_mean(self):
         # A fast-reverting item 30% below its level, held for a long time,
         # must converge on the gap and never exceed it. The naive Euler form

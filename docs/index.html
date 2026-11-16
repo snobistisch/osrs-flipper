@@ -1841,7 +1841,11 @@ function stalenessFactor(ageSeconds, sigmaDaily) {
 
 /* ---- Ornstein-Uhlenbeck, per item ---- */
 
-const MEAN_REVERSION_T = 2.0;   // |t| for calling the slope significantly < 0
+/* |t| for calling the slope significantly < 0. Under a random walk this
+   statistic follows the Dickey-Fuller distribution: 2.93 gives about 5% false
+   positives at 56 buckets; fewer buckets give lower power, not more false
+   positives. */
+const MEAN_REVERSION_T = 2.93;
 
 function ols(xs, ys) {
   const n = xs.length;

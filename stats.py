@@ -104,10 +104,12 @@ def ols(x: Sequence[float], y: Sequence[float]) -> Optional[OLSFit]:
 # Ornstein-Uhlenbeck
 # ---------------------------------------------------------------------------
 
-# |t| threshold for calling the slope significantly negative. With ~56 buckets
-# the t distribution is close enough to normal that 2.0 is the 2.5% one-sided
-# tail; no scipy needed for a decision this coarse.
-MEAN_REVERSION_T = 2.0
+# |t| threshold for calling the slope significantly negative. Under a random
+# walk this statistic follows the Dickey-Fuller distribution, not Student's t:
+# 2.0 labelled 28% of simulated random walks mean-reverting. 2.93 gives about
+# 5% false positives at 56 buckets; fewer buckets give lower power, not more
+# false positives.
+MEAN_REVERSION_T = 2.93
 
 
 @dataclass(frozen=True)
