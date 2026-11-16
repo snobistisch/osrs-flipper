@@ -2419,6 +2419,9 @@ def history_view(points: List[dict], buy: int, sell: int,
     # prices within a tick-or-so as reachable.
     mid_now = (buy + sell) / 2
     low_ratios, high_ratios, mids = [], [], []
+    # One entry per bucket, None where nothing traded, so the OU fit sees the
+    # gaps instead of treating the traded buckets as evenly spaced.
+    grid: List[Optional[float]] = []
     for p in points:
         high_price, low_price = p.get("avgHighPrice"), p.get("avgLowPrice")
         hv = p.get("highPriceVolume") or 0
@@ -2427,9 +2430,11 @@ def history_view(points: List[dict], buy: int, sell: int,
         vol = (hv if high_price is not None else 0) + \
               (lv if low_price is not None else 0)
         if vol <= 0:
+            grid.append(None)
             continue
         bucket_mid = value / vol
         mids.append(bucket_mid)
+        grid.append(bucket_mid)
         if low_price is not None and lv > 0:
             low_ratios.append((low_price / bucket_mid, lv))
         if high_price is not None and hv > 0:
@@ -2460,7 +2465,7 @@ def history_view(points: List[dict], buy: int, sell: int,
         deviation = stats.median_absolute_deviation(mids)
         volatility = (deviation / median_mid) if deviation is not None else 0.0
 
-    ou = stats.fit_ou(mids, HISTORY_BUCKET_DAYS)
+    ou = stats.fit_ou(grid, HISTORY_BUCKET_DAYS)
     regime = stats.regime_shift(mids)
 
     return HistoryView(

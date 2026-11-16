@@ -196,6 +196,22 @@ class ParityTests(unittest.TestCase):
         self.assertEqual(js("FEED_SOURCE_CHANGE_TS")[0],
                          merch.FEED_SOURCE_CHANGE_TS)
 
+    def test_ou_fit_with_gaps_matches(self):
+        for seed in (1, 2, 5):
+            prices = [point["avgHighPrice"] for point in history(seed)]
+            for index in range(0, len(prices), 3):
+                prices[index] = None
+            prices[10] = 0
+            python = stats.fit_ou(prices, engine.HISTORY_BUCKET_DAYS)
+            browser = js("fitOU({}, HISTORY_BUCKET_DAYS)".format(
+                json.dumps(prices)))[0]
+            self.assertIsNotNone(python)
+            for name, key in (("kappa", "kappa"), ("mu", "mu"),
+                              ("sigma", "sigma"), ("t_stat", "tStat")):
+                self.assertClose(getattr(python, name), browser[key],
+                                 "seed {} {}".format(seed, name))
+            self.assertEqual(python.mean_reverting, browser["meanReverting"])
+
     def test_partial_fill_distribution_matches(self):
         cases = [(100, 0.05, 7200), (5_000, 0.05, 7200), (1, 0.0, 7200),
                  (250, 1.5, 60), (40_000, 2.0, 14_400)]

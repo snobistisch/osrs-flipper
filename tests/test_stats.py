@@ -85,6 +85,77 @@ class OUTests(unittest.TestCase):
         self.assertIsNone(stats.fit_ou([100.0] * 5, 0.25))
 
 
+def _fit_ou_before_gaps(prices, dt_days):
+    """fit_ou as it was before gaps were kept (audit F-14), for comparison."""
+    usable = [p for p in prices if p is not None and p > 0]
+    if len(usable) < 12 or dt_days <= 0:
+        return None
+    logs = [math.log(p) for p in usable]
+    fit = stats.ols(logs[:-1], [logs[i + 1] - logs[i]
+                                for i in range(len(logs) - 1)])
+    if fit is None:
+        return None
+    b = fit.slope
+    mu = (-fit.intercept / b) if b < 0 else (sum(logs) / len(logs))
+    sigma = (math.sqrt(fit.residual_variance / dt_days)
+             if fit.residual_variance > 0 else 0.0)
+    return stats.OUFit(kappa=-b / dt_days, mu=mu, sigma=sigma,
+                       t_stat=fit.t_stat, n=len(usable), dt_days=dt_days)
+
+
+class OUGapTests(unittest.TestCase):
+    """Buckets without trades stay in the series as gaps (audit F-14)."""
+
+    def series(self, seed, n=56, kappa=0.0):
+        rng = random.Random(seed)
+        log_price, prices = math.log(1000.0), []
+        for _ in range(n):
+            log_price += (kappa * (math.log(1000.0) - log_price) * 0.25
+                          + rng.gauss(0, 0.02))
+            prices.append(math.exp(log_price))
+        return prices
+
+    def test_a_series_without_gaps_fits_exactly_as_before(self):
+        cases = [self.series(seed) for seed in range(20)]
+        cases += [self.series(seed, n=300, kappa=4.0) for seed in range(5)]
+        cases += [[100.0 + (i % 3) for i in range(40)], [100.0] * 5]
+        for prices in cases:
+            new = stats.fit_ou(prices, 0.25)
+            old = _fit_ou_before_gaps(prices, 0.25)
+            if old is None:
+                self.assertIsNone(new)
+                continue
+            for name in ("kappa", "mu", "sigma", "t_stat"):
+                self.assertTrue(math.isclose(getattr(new, name),
+                                             getattr(old, name),
+                                             rel_tol=1e-12, abs_tol=1e-12),
+                                name)
+            self.assertEqual(new.n, old.n)
+
+    def test_only_consecutive_traded_buckets_form_pairs(self):
+        prices = self.series(3)
+        for index in range(0, 56, 3):
+            prices[index] = None
+        fit = stats.fit_ou(prices, 0.25)
+        self.assertEqual(fit.n, 18 + 1)
+
+    def test_fewer_than_eleven_pairs_is_no_fit(self):
+        prices = self.series(4, n=12)
+        self.assertEqual(stats.fit_ou(prices, 0.25).n, 12)     # 11 pairs
+        prices[5] = None                                        # 9 pairs
+        self.assertIsNone(stats.fit_ou(prices, 0.25))
+        self.assertIsNone(stats.fit_ou(self.series(4, n=11), 0.25))
+
+    def test_a_gap_is_not_read_as_one_step(self):
+        # A thin item that trades every other bucket. Closing the gaps reads
+        # two steps of noise as one and overstates the volatility.
+        prices = self.series(9, n=112)
+        gapped = [p if i % 2 else None for i, p in enumerate(prices)]
+        closed = [p for p in gapped if p is not None]
+        self.assertIsNone(stats.fit_ou(gapped, 0.25))
+        self.assertIsNotNone(stats.fit_ou(closed, 0.25))
+
+
 class RegimeTests(unittest.TestCase):
     def test_flat_series_has_no_shift(self):
         prices = [100.0 + (i % 3) for i in range(40)]

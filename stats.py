@@ -155,18 +155,28 @@ class OUFit:
         return gap * (1.0 - math.exp(-self.kappa * days))
 
 
-def fit_ou(prices: Sequence[float], dt_days: float) -> Optional[OUFit]:
-    """Fit an OU process to evenly spaced prices (oldest first).
+def fit_ou(prices: Sequence[Optional[float]],
+           dt_days: float) -> Optional[OUFit]:
+    """Fit an OU process to prices on an even grid (oldest first).
 
     Regress the log-price change on the previous log price, per Appendix B:
         dp_t = a + b*p_{t-1} + e   ->   kappa = -b/dt, mu = -a/b
+
+    None (or a non-positive price) marks a bucket in which nothing traded.
+    Only consecutive buckets that both traded form a pair, so a gap is not
+    read as one step of dt_days: closing the gap overstated the reversion
+    speed and the volatility of thin items. Returns None below 11 pairs.
     """
-    usable = [p for p in prices if p is not None and p > 0]
-    if len(usable) < 12 or dt_days <= 0:
+    if dt_days <= 0:
         return None
-    logs = [math.log(p) for p in usable]
-    lagged = logs[:-1]
-    deltas = [logs[i + 1] - logs[i] for i in range(len(logs) - 1)]
+    logs = [math.log(p) if p is not None and p > 0 else None for p in prices]
+    lagged, deltas = [], []
+    for previous, current in zip(logs, logs[1:]):
+        if previous is not None and current is not None:
+            lagged.append(previous)
+            deltas.append(current - previous)
+    if len(lagged) < 11:
+        return None
     fit = ols(lagged, deltas)
     if fit is None:
         return None
@@ -174,10 +184,11 @@ def fit_ou(prices: Sequence[float], dt_days: float) -> Optional[OUFit]:
     kappa = -b / dt_days
     # b >= 0 is a random walk or an explosive series; mu is then undefined and
     # the caller should treat the item as trending, not reverting.
-    mu = (-fit.intercept / b) if b < 0 else (sum(logs) / len(logs))
+    present = [value for value in logs if value is not None]
+    mu = (-fit.intercept / b) if b < 0 else (sum(present) / len(present))
     sigma = math.sqrt(fit.residual_variance / dt_days) if fit.residual_variance > 0 else 0.0
     return OUFit(kappa=kappa, mu=mu, sigma=sigma, t_stat=fit.t_stat,
-                 n=len(usable), dt_days=dt_days)
+                 n=len(lagged) + 1, dt_days=dt_days)
 
 
 def regime_shift(prices: Sequence[float]) -> float:

@@ -1900,19 +1900,27 @@ function ols(xs, ys) {
 
 /* Fit dp = kappa*(mu - p)dt + sigma*dW on LOG prices — log because the item
    universe spans five orders of magnitude. mu is a log price, so exp(mu) is
-   the long-run level in gp. */
+   the long-run level in gp. null (or a non-positive price) marks a bucket in
+   which nothing traded: only consecutive buckets that both traded form a
+   pair, so a gap is not read as one step. Mirrors stats.fit_ou. */
 function fitOU(prices, dtDays) {
-  const usable = prices.filter((p) => p != null && p > 0);
-  if (usable.length < 12 || dtDays <= 0) return null;
-  const logs = usable.map(Math.log);
-  const lagged = logs.slice(0, -1);
-  const deltas = logs.slice(1).map((v, i) => v - logs[i]);
+  if (dtDays <= 0) return null;
+  const logs = prices.map((p) => (p != null && p > 0 ? Math.log(p) : null));
+  const lagged = [], deltas = [];
+  for (let i = 0; i + 1 < logs.length; i++) {
+    if (logs[i] != null && logs[i + 1] != null) {
+      lagged.push(logs[i]);
+      deltas.push(logs[i + 1] - logs[i]);
+    }
+  }
+  if (lagged.length < 11) return null;
   const fit = ols(lagged, deltas);
   if (!fit) return null;
   const b = fit.slope;
   const kappa = -b / dtDays;
   // b >= 0 is a random walk or explosive: mu is undefined, treat as trending.
-  const mu = b < 0 ? -fit.intercept / b : logs.reduce((a, c) => a + c, 0) / logs.length;
+  const present = logs.filter((v) => v != null);
+  const mu = b < 0 ? -fit.intercept / b : present.reduce((a, c) => a + c, 0) / present.length;
   const sigma = fit.residualVariance > 0
     ? Math.sqrt(fit.residualVariance / dtDays) : 0;
   return {
@@ -2671,6 +2679,8 @@ function historyView(rawPoints, buy, sell) {
   let buckets = 0;
   const volumes = [];
   const lows = [], highs = [], lowRatios = [], highRatios = [], mids = [];
+  // One entry per bucket, null where nothing traded, for the OU fit.
+  const grid = [];
   for (const p of points) {
     const hv = p.highPriceVolume || 0, lv = p.lowPriceVolume || 0;
     if (hv > 0 || lv > 0) { buckets++; volumes.push(hv + lv); }
@@ -2679,9 +2689,10 @@ function historyView(rawPoints, buy, sell) {
     const value = (p.avgHighPrice || 0) * hv + (p.avgLowPrice || 0) * lv;
     const vol = (p.avgHighPrice != null ? hv : 0) +
                 (p.avgLowPrice != null ? lv : 0);
-    if (vol <= 0) continue;
+    if (vol <= 0) { grid.push(null); continue; }
     const bucketMidPrice = value / vol;
     mids.push(bucketMidPrice);
+    grid.push(bucketMidPrice);
     if (p.avgLowPrice != null && lv > 0) lowRatios.push([p.avgLowPrice / bucketMidPrice, lv]);
     if (p.avgHighPrice != null && hv > 0) highRatios.push([p.avgHighPrice / bucketMidPrice, hv]);
   }
@@ -2726,7 +2737,7 @@ function historyView(rawPoints, buy, sell) {
     trend, dislocation,
     medianMid: medianMid != null ? Math.round(medianMid) : null,
     elevation, volatility,
-    ou: fitOU(mids, HISTORY_BUCKET_DAYS),
+    ou: fitOU(grid, HISTORY_BUCKET_DAYS),
     regimeScore: regimeShift(mids),
     // Mean total volume per 6h bucket. The crash badge needs a baseline to
     // measure today's activity against; engine.history_view already returns
