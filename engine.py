@@ -1942,62 +1942,6 @@ def shrink_scores(
 # Capital allocation
 # ---------------------------------------------------------------------------
 
-def allocate_portfolio(scores: Sequence[float], capital: int,
-                       unit_costs: Sequence[int], needs: Sequence[int],
-                       slots: int) -> List[int]:
-    """Build an executable, integer-unit portfolio for at most ``slots`` rows.
-
-    Each funded slot first receives one affordable unit.  Remaining capital is
-    distributed by decision value, clipped at the quantity/buy-limit cap and
-    rounded down to whole items.  This prevents a score-weighted split from
-    producing a visually occupied slot whose allocation cannot buy one item.
-    Non-positive candidates are deliberately left open.
-    """
-    count = min(len(scores), len(unit_costs), len(needs), max(0, slots))
-    allocation = [0] * count
-    eligible = [i for i in range(count)
-                if scores[i] > 0 and unit_costs[i] > 0
-                and needs[i] >= unit_costs[i]]
-    # Candidate order is ranking order.  If the bank cannot seed every slot,
-    # fund the best rows first instead of creating impossible fractional buys.
-    seeded = []
-    remaining = max(0, int(capital))
-    for i in eligible:
-        cost = int(unit_costs[i])
-        if remaining < cost:
-            continue
-        allocation[i] = cost
-        remaining -= cost
-        seeded.append(i)
-    if not seeded or remaining <= 0:
-        return allocation
-
-    # Water-fill by score. Rounding may leave a sub-unit residue; leaving a few
-    # gp liquid is more honest than reporting a quantity the GE cannot accept.
-    for _ in range(count + 3):
-        hungry = [i for i in seeded if allocation[i] + unit_costs[i] <= needs[i]]
-        if not hungry or remaining < min(unit_costs[i] for i in hungry):
-            break
-        weight = sum(scores[i] for i in hungry)
-        progressed = False
-        for i in hungry:
-            target = int(remaining * scores[i] / weight)
-            room = needs[i] - allocation[i]
-            grant = min(room, target)
-            grant -= grant % unit_costs[i]
-            if grant <= 0 and remaining >= unit_costs[i]:
-                grant = unit_costs[i]
-            grant = min(grant, remaining)
-            grant -= grant % unit_costs[i]
-            if grant > 0:
-                allocation[i] += grant
-                remaining -= grant
-                progressed = True
-        if not progressed:
-            break
-    return allocation
-
-
 class Selection(NamedTuple):
     """Which size of which candidate to fund, and what made it so."""
     choices: List[int]        # per candidate: index of the chosen size, -1 = none

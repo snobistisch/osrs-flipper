@@ -207,8 +207,16 @@ class AuditOctober2026Tests(unittest.TestCase):
         items, quotes, activity = self.bond_market()
         capital = 29_000_000
         config = filters.FilterConfig(capital=capital, trade_mode="overnight")
-        row = filters.rank_flips(items, quotes, {}, activity, config,
-                                 self.NOW).rows[0]
+
+        def series(volume, step, count):
+            return [{"timestamp": self.NOW - (count - i) * step,
+                     "avgLowPrice": 9_000_000, "lowPriceVolume": volume,
+                     "avgHighPrice": 10_600_000, "highPriceVolume": volume}
+                    for i in range(count)]
+        row = filters.rank_flips(
+            items, quotes, {}, activity, config, self.NOW,
+            fetch_history=lambda _: series(300_000, 21600, 60),
+            fetch_reach=lambda _: series(4_000, 300, 365)).rows[0]
         unit = row.buy + row.bond_fee
         self.assertGreater(row.bond_fee, 0)
         self.assertGreater(row.allocated_quantity, 0)

@@ -49,9 +49,6 @@ def main(argv=None) -> int:
     run.add_argument("--segment-days", type=float, default=None,
                      help="length of each independent bank history")
     run.add_argument("--out", default=None)
-    run.add_argument("--baseline-html", default=None,
-                     help="a saved docs/index.html for the browser_baseline "
-                          "method, e.g. from `git show <rev>:docs/index.html`")
 
     report = sub.add_parser("report", help="tables from a result file")
     report.add_argument("results")
@@ -103,7 +100,7 @@ def main(argv=None) -> int:
         info = run_module.run(
             opts.panel, out, opts.strategy or sorted(STRATEGIES), opts.period,
             capital, opts.account, opts.method, opts.workers, opts.seed,
-            opts.stride, progress=_log, baseline_html=opts.baseline_html,
+            opts.stride, progress=_log,
             **({"segment_days": opts.segment_days}
                if opts.segment_days else {}))
         _log("{segments} segments in {seconds:.0f}s -> {out}".format(**info))
@@ -116,13 +113,12 @@ def main(argv=None) -> int:
         return 0
 
     if opts.command == "smoke":
-        # Seconds, not minutes: every strategy, the old pipeline, the shipped
-        # policy and two naive baselines on the committed slice of real
+        # Every strategy and every method on the committed slice of real
         # prices. The numbers mean nothing (sixty hand-picked items, two
         # days); what is checked is that the harness runs end to end, that
         # the policy places offers, and that every bank's books balance.
         import tempfile
-        methods = ["current", "policy", "naive_roi", "random"]
+        methods = list(rankers.METHODS)
         capital = 2_000_000
         with tempfile.TemporaryDirectory() as folder:
             out = str(Path(folder) / "smoke.jsonl")

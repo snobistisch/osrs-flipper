@@ -83,12 +83,6 @@ def parse_args(argv):
     p.add_argument("--bank-risk", type=int, default=filters.DEFAULT_BANK_RISK_PERCENT,
                    metavar="PERCENT",
                    help="most of the bank one new offer may lock (default: 25)")
-    p.add_argument("--no-policy", action="store_true",
-                   help="rank on the rate model alone, with no quality gates, "
-                        "no replay evidence and score-proportional funding "
-                        "(the behaviour before November 2026). The backtest "
-                        "in docs/audit-2026-11.md is why this is not the "
-                        "default.")
 
     view = p.add_argument_group(
         "display filters", "Each one replaces the automatic value of the same "
@@ -126,8 +120,7 @@ def config_from(opts, nature_cost: int) -> filters.FilterConfig:
         nature_rune_cost=nature_cost,
         calibration=engine.with_order_size(engine.DEFAULT_CALIBRATION,
                                            opts.order_size))
-    if not opts.no_policy:
-        config = filters.automatic_profile(config, opts.bank_risk)
+    config = filters.automatic_profile(config, opts.bank_risk)
     explicit = {
         "max_quote_age": opts.max_age, "min_thin_volume_1h": opts.min_vol,
         "min_roi": opts.min_roi, "min_undercut_depth": opts.min_depth,
@@ -205,8 +198,7 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
                       "gp per flip" if profit else "gp/slot/h"))
     hidden = {k: v for k, v in result.hidden.items() if v and k != "shown"}
     if hidden:
-        print("Hidden by {}:  ".format(
-            "display filters" if opts.no_policy else "quality gates") + "  ".join(
+        print("Hidden by quality gates:  " + "  ".join(
             "{} {}".format(v, k) for k, v in hidden.items()))
     if result.selection is not None:
         funded = sum(1 for row in result.rows if row.allocated_quantity)
@@ -302,17 +294,16 @@ def print_table(result, opts, config, exempt, nature_cost, archive_note):
               "go: leave listed sells in place; cancel Active buys that have "
               "not filled.")
         ranking_explanation = "HORIZON EV"
-    if config.replay_ranking:
-        print("Rows with a replay line are ranked on it: {} is what the exact "
-              "offer earned when replayed on the item's own recent 5-minute "
-              "buckets, taking the weaker half of that window. A buy fills "
-              "only where sellers traded below your price, a sell only where "
-              "buyers traded above it, and stock unsold at the deadline is "
-              "sold at the instant-sell price. Only such rows are funded. "
-              "This is measured on public trades, not on your fills: the "
-              "share of passing volume that reaches your offer is an "
-              "assumption until journal.py holds real offers{}.".format(
-                  ranking_explanation, _capture_note(config)))
+    print("Rows with a replay line are ranked on it: {} is what the exact "
+          "offer earned when replayed on the item's own recent 5-minute "
+          "buckets, taking the weaker half of that window. A buy fills "
+          "only where sellers traded below your price, a sell only where "
+          "buyers traded above it, and stock unsold at the deadline is "
+          "sold at the instant-sell price. Only such rows are funded. "
+          "This is measured on public trades, not on your fills: the "
+          "share of passing volume that reaches your offer is an "
+          "assumption until journal.py holds real offers{}.".format(
+              ranking_explanation, _capture_note(config)))
     print("MEASURED = the score before shrinkage; {} is after. Ranking hundreds "
           "of noisy estimates surfaces the biggest errors rather than the "
           "biggest values, so each score is pulled toward the market average "

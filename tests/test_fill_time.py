@@ -30,6 +30,8 @@ def score(**overrides):
 
 
 def pipeline_row(buy, sell, limit, volume, capital=10_000_000):
+    """One item through the stage-1 screen: the rate model's own quantity,
+    time band and fill odds, before any replay evidence."""
     items = {1: Item(id=1, name="Test item", members=True, limit=limit,
                      value=buy, highalch=None)}
     quotes = {1: Quote(high=sell, high_time=NOW - 30, low=buy,
@@ -41,7 +43,7 @@ def pipeline_row(buy, sell, limit, volume, capital=10_000_000):
     config = filters.FilterConfig(capital=capital)
     screened = filters.screen(items, quotes, five, hour, config, NOW,
                               NO_EXEMPTIONS)
-    return filters.allocate(screened, config).rows[0], config
+    return screened.rows[0], config
 
 
 class DistributionPrimitiveTests(unittest.TestCase):
@@ -196,11 +198,10 @@ class ScoreFlipTimingTests(unittest.TestCase):
 
 
 class PipelineConsistencyTests(unittest.TestCase):
-    def test_eta_p_fill_ranking_and_funded_quantity_agree(self):
+    def test_eta_p_fill_ranking_and_quantity_agree(self):
         row, config = pipeline_row(1_000, 1_060, 10_000, 5_000)
-        self.assertGreater(row.allocated_quantity or 0, 0)
-        qty = row.allocated_quantity
-        self.assertEqual(row.qty_per_window, qty)
+        qty = row.qty_per_window
+        self.assertGreater(qty, 0)
         self.assertEqual(row.capital_needed, qty * (row.buy + row.bond_fee))
         buy_rate = engine.fill_rate(row.model_buy_volume_1h, row.buy_share)
         sell_rate = engine.fill_rate(row.model_sell_volume_1h, row.sell_share)
@@ -225,13 +226,12 @@ class PipelineConsistencyTests(unittest.TestCase):
             row.raw_gp_per_slot_hour,
             row.expected_gp / (row.expected_occupancy_seconds / HOUR),
             places=6)
-        self.assertEqual(row.allocated_expected_gp, row.expected_gp)
 
     def test_fast_liquid_flips_still_look_fast(self):
         # Capital, not the market, binds: a small order on a deep book.
         row, _ = pipeline_row(100_000, 103_000, 100, 2_000,
                               capital=1_000_000)
-        self.assertLessEqual(row.allocated_quantity, 10)
+        self.assertLessEqual(row.qty_per_window, 10)
         cheap, _ = pipeline_row(20, 24, 25_000, 400_000, capital=4_000)
         for fast in (cheap,):
             self.assertLess(fast.round_trip_p50_seconds, 20 * 60)

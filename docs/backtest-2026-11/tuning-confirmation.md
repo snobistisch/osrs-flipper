@@ -1,3 +1,4 @@
+The method names in this document refer to commit `f0aaa57`. Most of them were removed later.
 
 ### active — all period, bank 20.0m, 12 segments, 925 decisions
 

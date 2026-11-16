@@ -542,67 +542,12 @@ class HistoryStageTests(unittest.TestCase):
 
 
 class AllocationStageTests(unittest.TestCase):
-    def test_capital_is_split_by_score_across_the_slots(self):
-        items = {i: item(i, name="Item {}".format(i)) for i in (1, 2, 3)}
-        quotes = {1: quote(low=100, high=110), 2: quote(low=100, high=106),
-                  3: quote(low=100, high=104)}
-        acts5 = {i: act_5m(avg_low=100, avg_high=q.high,
-                           high_volume=500, low_volume=500)
-                 for i, q in quotes.items()}
-        acts1 = {i: act_1h(avg_low=100, avg_high=q.high,
-                           high_volume=6_000, low_volume=6_000)
-                 for i, q in quotes.items()}
-        cfg = filters.FilterConfig(
-            capital=3_000_000, account=engine.AccountType.FREE_TO_PLAY)
-        result = filters.screen(items, quotes, acts5, acts1, cfg, NOW,
-                                NO_EXEMPTIONS)
-        result = filters.allocate(result, cfg)
-        allocated = [r.allocated_capital for r in result.rows[:3]]
-        self.assertTrue(all(a is not None for a in allocated))
-        self.assertLessEqual(sum(allocated), 3_000_000)
-        self.assertGreaterEqual(allocated[0], allocated[-1])
 
     def test_allocation_on_an_empty_list_is_harmless(self):
         cfg = filters.FilterConfig()
         empty = filters.ScreenResult(rows=[], funnel={})
         self.assertEqual(filters.allocate(empty, cfg).rows, [])
 
-    def test_final_quantity_is_rescored_not_linearly_scaled(self):
-        items = {i: item(i, name="Item {}".format(i), limit=100_000)
-                 for i in (1, 2)}
-        quotes = {1: quote(low=100, high=130), 2: quote(low=100, high=125)}
-        acts5 = {i: act_5m(avg_low=100, avg_high=q.high) for i, q in quotes.items()}
-        acts1 = {i: act_1h(avg_low=100, avg_high=q.high,
-                           high_volume=500, low_volume=500)
-                 for i, q in quotes.items()}
-        # Small enough that the bank, not the market, binds the funded size
-        # (the market supports 18 units of each at 100 gp: 3,600 gp).
-        cfg = filters.FilterConfig(capital=2_000)
-        screened = filters.screen(items, quotes, acts5, acts1, cfg, NOW,
-                                  NO_EXEMPTIONS)
-        before = {r.item_id: r for r in screened.rows}
-        allocated = filters.allocate(screened, cfg)
-        row = next(r for r in allocated.rows
-                   if 0 < (r.allocated_quantity or 0)
-                   < before[r.item_id].qty_per_window)
-        old = before[row.item_id]
-        linear = old.expected_gp * row.allocated_quantity / old.qty_per_window
-        self.assertNotAlmostEqual(row.allocated_expected_gp, linear, places=4)
-
-    def test_active_allocation_funds_the_target_completion_size(self):
-        # Active quantity is sized so the whole round trip completes by the
-        # deadline with the target probability. Funding it must not quietly
-        # re-size against a different bound, and the funded row must still
-        # meet the target it was sized for.
-        cfg = filters.FilterConfig(capital=10_000_000,
-                                   trade_mode=engine.TradeMode.ACTIVE)
-        row = one(capital=cfg.capital).rows[0]
-        result = filters.allocate(
-            filters.ScreenResult(rows=[row], funnel={}), cfg)
-        funded = result.rows[0]
-        self.assertEqual(funded.allocated_quantity, row.qty_per_window)
-        self.assertGreaterEqual(funded.p_fill + 1e-9,
-                                cfg.calibration.active_target_completion)
 
     def test_active_flip_below_the_completion_target_is_not_funded(self):
         cfg = filters.FilterConfig(capital=10_000_000,
@@ -615,15 +560,6 @@ class AllocationStageTests(unittest.TestCase):
         result = filters.allocate(
             filters.ScreenResult(rows=[slow], funnel={}), cfg)
         self.assertIsNone(result.rows[0].allocated_quantity)
-
-    def test_overnight_allocation_funds_its_expected_value_size(self):
-        cfg = filters.FilterConfig(capital=10_000_000,
-                                   trade_mode=engine.TradeMode.OVERNIGHT)
-        row = one(capital=cfg.capital,
-                  trade_mode=engine.TradeMode.OVERNIGHT).rows[0]
-        result = filters.allocate(
-            filters.ScreenResult(rows=[row], funnel={}), cfg)
-        self.assertEqual(result.rows[0].allocated_quantity, row.qty_per_window)
 
 
 class ExecutionDecisionTests(unittest.TestCase):
@@ -730,7 +666,8 @@ class FullPipelineTests(unittest.TestCase):
         self.assertTrue(result.rows)
         self.assertIn("shown", result.hidden)
         self.assertTrue(all(r.buy >= 200 for r in result.rows))
-        self.assertIsNotNone(result.rows[0].allocated_capital)
+        # Without recent buckets nothing is replayed, so nothing is funded.
+        self.assertTrue(all(r.allocated_capital is None for r in result.rows))
 
 
 if __name__ == "__main__":

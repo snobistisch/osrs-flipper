@@ -4,7 +4,7 @@
    the JavaScript port is exercised on exactly the inputs the Python model
    sees: screen -> automatic gates -> 14-day check -> plan selection ->
    allocation. Nothing here reimplements model logic; it calls the functions
-   of the inline script in docs/index.html (or the file named in argv[2]).
+   of the inline script in docs/index.html.
 
    Protocol: one JSON request per line on stdin, one JSON reply per line.
 
@@ -28,8 +28,7 @@ const path = require('node:path');
 const readline = require('node:readline');
 const vm = require('node:vm');
 
-const htmlPath = process.argv[2] || path.join(__dirname, '../docs/index.html');
-const html = fs.readFileSync(htmlPath, 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../docs/index.html'), 'utf8');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const library = script.slice(0, script.indexOf('$("#start").addEventListener'));
 
@@ -67,12 +66,9 @@ const PREPARE = `(async (snapshot) => {
     natureCost: snapshot.natureCost,
     ...automaticFilterProfile(snapshot.capital, snapshot.account,
                               snapshot.strategy, risk),
+    orderSize: snapshot.orderSize ?? DEFAULT_ORDER_SIZE,
   };
-  // Order size (pages from 16 November 2026 on): the Active capture share.
-  if (typeof ORDER_SIZES !== "undefined") {
-    config.orderSize = snapshot.orderSize ?? DEFAULT_ORDER_SIZE;
-    config.crossingCaptureShare = ORDER_SIZES[config.orderSize];
-  }
+  config.crossingCaptureShare = ORDER_SIZES[config.orderSize];
   state.capital = snapshot.capital;
   state.natureCost = snapshot.natureCost;
   state.items = items;
@@ -81,38 +77,23 @@ const PREPARE = `(async (snapshot) => {
                           snapshot.limitUsed ?? null);
   await refineTopRows(rows, config, snapshot.now);
   state.deepReady = true;
-  const eligible = applyPreferences(rows, config).kept;
-  // Pages from before the November 2026 audit pick plan candidates with
-  // isAutomaticPlanCandidate and a risk-tier sort; later ones use buildPlan.
-  const legacy = typeof buildPlan !== "function";
-  let candidates = eligible;
-  if (legacy) {
-    candidates = eligible.filter(isAutomaticPlanCandidate);
-    candidates.sort((a, b) => quickPlanRiskTier(a) - quickPlanRiskTier(b) ||
-      b.rankingValue - a.rankingValue);
-  }
-  return { config, candidates, legacy, scored: rows.length,
-           eligible: eligible.length };
+  const candidates = applyPreferences(rows, config).kept;
+  return { config, candidates, scored: rows.length,
+           eligible: candidates.length };
 })`;
 
-/* The same steps show() takes: disposable copies, then allocateCapital with
-   the bank and slots that are still free. */
+/* The same steps show() takes: disposable copies, then buildPlan with the
+   bank and slots that are still free. */
 const ALLOCATE = `((prepared, capital, slots, exclude) => {
   const skip = new Set(exclude);
   const candidates = prepared.candidates.filter((row) => !skip.has(row.id))
     .map((row) => ({ ...row, warnings: [...(row.warnings || [])],
       tags: [...(row.tags || [])], factors: { ...(row.factors || {}) } }));
   const config = prepared.config;
-  let planned = candidates;
-  if (prepared.legacy) {
-    allocateCapital(candidates, Math.max(0, capital), Math.max(0, slots), [],
-      config.maxPositionCapital, config.bankRiskPercent);
-  } else {
-    // The same call show() makes, with the free bank and slots as the whole
-    // bank and every slot: nothing is locked in a backtest or a parity test.
-    planned = buildPlan(candidates, { ...config, capital: Math.max(0, capital),
-      slots: Math.max(0, slots) }, []).candidates;
-  }
+  // The same call show() makes, with the free bank and slots as the whole
+  // bank and every slot: nothing is locked in a backtest or a parity test.
+  const planned = buildPlan(candidates, { ...config, capital: Math.max(0, capital),
+    slots: Math.max(0, slots) }, []).candidates;
   return planned.filter((row) => row.allocatedQty > 0).map((row) => ({
     id: row.id, name: row.name, buy: row.buy, sell: row.sell,
     qty: row.allocatedQty, exempt: Boolean(row.exempt), bond: Boolean(row.bond),

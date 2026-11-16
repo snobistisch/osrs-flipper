@@ -116,9 +116,17 @@ class ProfitQuantityTests(unittest.TestCase):
     def test_allocation_never_funds_more_than_one_window(self):
         from tests.test_filters import act_1h, act_5m, item, quote
         config = filters.FilterConfig(capital=100_000_000, trade_mode="profit")
+
+        def series(volume, step, count):
+            return [{"timestamp": NOW - (count - i) * step,
+                     "avgLowPrice": 950, "lowPriceVolume": volume,
+                     "avgHighPrice": 1_250, "highPriceVolume": volume}
+                    for i in range(count)]
         result = filters.rank_flips(
             {1: item(limit=700)}, {1: quote()}, {1: act_5m()}, {1: act_1h()},
-            config, NOW, exempt=frozenset())
+            config, NOW, exempt=frozenset(),
+            fetch_history=lambda _: series(30_000, 21600, 60),
+            fetch_reach=lambda _: series(400, 300, 365))
         row = result.rows[0]
         self.assertIs(row.trade_mode, PROFIT)
         self.assertGreater(row.allocated_quantity, 0)

@@ -161,11 +161,9 @@ class PortSyncTests(unittest.TestCase):
                         "function allocateCapital("):
             self.assertNotIn(removed, self.source)
         self.assertIn("function buildPlan(", self.source)
-        self.assertIn("function hasFundingEvidence(", self.source)
+        self.assertIn("const hasFundingEvidence = (row) =>", self.source)
+        self.assertIn("view.stableProfit", self.source)
         self.assertIn("function allocatePortfolio(", self.source)
-        self.assertIn('fundingEvidence: "replay"', self.source)
-        self.assertIn('replayStatistic: "stable"', self.source)
-        self.assertIn("replayRanking: true", self.source)
         self.assertIn("state.deepReady = true", self.source)
         # Nothing is funded before the deep check has produced evidence.
         self.assertIn("const candidates = state.deepReady", self.source)

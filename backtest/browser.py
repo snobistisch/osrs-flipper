@@ -6,7 +6,7 @@ undercut room, a per-position bank cap, a stricter plan filter). Measuring
 script, not a Python approximation of it. ``tests/js_plan.cjs`` does that
 under Node; this module is the pipe to it.
 
-Node is optional. Without it the ``browser`` methods are simply unavailable.
+Node is optional. Without it the ``browser`` method is simply unavailable.
 """
 from __future__ import annotations
 
@@ -53,12 +53,11 @@ def snapshot_payload(snapshot: Snapshot, capital: int, account: str,
 class BrowserPlanner:
     """One long-lived Node process answering plan requests."""
 
-    def __init__(self, html: Optional["str | Path"] = None):
+    def __init__(self):
         if NODE is None:
             raise RuntimeError("Node.js is required for the browser methods")
-        command = [NODE, str(RUNNER)] + ([str(html)] if html else [])
         self.process = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            [NODE, str(RUNNER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self._key = 0
 
     def close(self) -> None:

@@ -426,17 +426,6 @@ class ShrinkageTests(unittest.TestCase):
         self.assertAlmostEqual(result.values[0], result.values[1], places=6)
 
 
-class AllocationTests(unittest.TestCase):
-    def test_executable_portfolio_funds_whole_items_and_leaves_bad_slots_open(self):
-        amounts = engine.allocate_portfolio(
-            [100.0, 50.0, -1.0], 1_000, [100, 250, 10],
-            [500, 1_000, 100], 3)
-        self.assertEqual(amounts[0] % 100, 0)
-        self.assertEqual(amounts[1] % 250, 0)
-        self.assertEqual(amounts[2], 0)
-        self.assertLessEqual(sum(amounts), 1_000)
-
-
 class ModeTests(unittest.TestCase):
     def score(self, **overrides):
         values = dict(

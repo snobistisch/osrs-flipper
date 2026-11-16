@@ -288,7 +288,7 @@ class ScheduleAndMetricTests(unittest.TestCase):
 @unittest.skipIf(np is None or not FIXTURE.exists(),
                  "numpy and the committed fixture are required")
 class FixtureRunTests(unittest.TestCase):
-    METHODS = ["current", "naive_roi", "random"]
+    METHODS = ["policy", "naive_margin", "random"]
 
     def test_walk_forward_on_the_fixture_is_deterministic_and_solvent(self):
         with tempfile.TemporaryDirectory() as folder:

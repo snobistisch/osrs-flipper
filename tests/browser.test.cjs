@@ -312,10 +312,12 @@ const bondRow = (extra = '') => `{id:13190, buy:9000000, sell:10000000,
 
 test('bond allocation and reservations fund the conversion fee', () => {
   const { run, storage } = setup();
-  const [qty, allocated, binding] = run(`(() => { const rows = [${bondRow(
-    ', bond:true, pFill:1, deep:true')}];
+  const [qty, allocated, binding] = run(`(() => {
+    const view = { stableProfit: 100, meanProfit: 100, meanSlotHours: 1, completionRate: 1 };
+    const rows = [${bondRow(', bond:true, pFill:1, deep:true, replay:view, ' +
+      'replaySizes:[[1, view], [2, view], [5, view]]')}];
     const selection = allocatePortfolio(rows, 19000000, 8, [],
-      { strategy: "active", fundingEvidence: "history", maxPositionCapital: 19000000 });
+      { strategy: "active", maxPositionCapital: 19000000 });
     return [rows[0].allocatedQty, rows[0].allocated, selection.binding]; })()`);
   // 9m + 1m fee per bond: a 19m bank holds one, not the two the buy price fits.
   assert.equal(qty, 1);

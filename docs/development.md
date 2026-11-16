@@ -74,8 +74,8 @@ and the agent stay on the standard library. `tests/fixtures/backtest_panel.npz`
 is a slice of real OSRS Wiki price history, cut with
 `python3 -m backtest fixture`; the numbers a run on it prints mean nothing.
 Before changing the selection policy, run the backtest on the tuning period
-and compare against `current` and `browser_baseline`; evaluate on the
-held-out period once, after the change is final
+and compare against the `policy` result of the previous commit and against
+`random`; evaluate on the held-out period once, after the change is final
 ([method](audit-2026-11.md)).
 
 Keep browser requests compatible with CORS: do not add a `User-Agent` header.

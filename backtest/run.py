@@ -292,18 +292,13 @@ def run_segment(panel: Panel, strategy: str, times: Sequence[int], capital: int,
 _WORKER: dict = {}
 
 
-def _init(panel_path: str, methods: Sequence[str] = (),
-          baseline_html: Optional[str] = None) -> None:
+def _init(panel_path: str, methods: Sequence[str] = ()) -> None:
     panel = Panel.load(panel_path)
     _WORKER["panel"] = panel
     _WORKER["exempt"] = exemptions.resolve(panel.items)
     planners = {}
     if "browser" in methods:
         planners["browser"] = browser.BrowserPlanner()
-    if "browser_baseline" in methods:
-        if not baseline_html:
-            raise ValueError("browser_baseline needs --baseline-html")
-        planners["browser_baseline"] = browser.BrowserPlanner(baseline_html)
     _WORKER["planners"] = planners
 
 
@@ -320,8 +315,7 @@ def run(panel_path: "str | Path", out_path: "str | Path",
         period: str = "tune", capital: int = 20_000_000,
         account: str = "members", methods: Optional[Sequence[str]] = None,
         workers: int = 0, seed: int = SEED, stride: int = 1,
-        progress=None, baseline_html: Optional[str] = None,
-        segment_days: float = SEGMENT_DAYS) -> dict:
+        progress=None, segment_days: float = SEGMENT_DAYS) -> dict:
     """Run the walk-forward and write one JSON line per segment."""
     panel = Panel.load(panel_path)
     methods = list(methods or rankers.DEFAULT_METHODS)
@@ -339,13 +333,13 @@ def run(panel_path: "str | Path", out_path: "str | Path",
     records = []
     pool = None
     if workers == 1 or len(tasks) < 2:
-        _init(str(panel_path), methods, baseline_html)
+        _init(str(panel_path), methods)
         iterator = map(_task, tasks)
     else:
         pool = multiprocessing.get_context("spawn").Pool(
             min(len(tasks), workers or max(1, multiprocessing.cpu_count() - 2)),
             initializer=_init,
-            initargs=(str(panel_path), methods, baseline_html))
+            initargs=(str(panel_path), methods))
         iterator = pool.imap_unordered(_task, tasks)
     try:
         for done, record in enumerate(iterator, 1):

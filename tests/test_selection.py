@@ -240,11 +240,11 @@ class PolicyTests(unittest.TestCase):
             fetch_reach=self.recent if reach else None)
         return filters.allocate(result, config)
 
-    def test_without_recent_buckets_both_are_funded_on_the_quoted_spread(self):
-        funded = [r for r in self.plan(reach=False).rows
-                  if r.allocated_quantity]
-        self.assertEqual({r.name for r in funded}, {"Steady", "Fluke"})
-        self.assertTrue(all(r.buy_reach is None for r in funded))
+    def test_without_recent_buckets_nothing_is_funded(self):
+        rows = self.plan(reach=False).rows
+        self.assertEqual({r.name for r in rows}, {"Steady", "Fluke"})
+        self.assertTrue(all(r.buy_reach is None and r.replay is None
+                            and r.allocated_quantity is None for r in rows))
 
     def test_reach_moves_the_prices_inside_what_traded(self):
         rows = {r.name: r for r in self.plan().rows}
@@ -255,8 +255,7 @@ class PolicyTests(unittest.TestCase):
         self.assertIsNotNone(steady.replay)
 
     def test_replay_evidence_drops_the_offer_that_only_looked_good(self):
-        result = self.plan(funding_evidence="replay", replay_ranking=True,
-                           replay_statistic="stable", allocation="portfolio")
+        result = self.plan()
         funded = [r for r in result.rows if r.allocated_quantity]
         self.assertEqual([r.name for r in funded], ["Steady"])
         row = funded[0]
@@ -277,11 +276,8 @@ class PolicyTests(unittest.TestCase):
                 self.assertLessEqual(row.allocated_capital, 20_000)
 
     def test_invalid_policy_values_are_rejected(self):
-        for field, value in (("allocation", "greedy"),
-                             ("funding_evidence", "vibes"),
-                             ("replay_statistic", "median"),
-                             ("active_objective", "fun"),
-                             ("max_position_capital", 0)):
+        for field, value in (("max_position_capital", 0),
+                             ("max_position_capital", True)):
             with self.assertRaises(ValueError):
                 filters.FilterConfig(**{field: value})
 
@@ -425,8 +421,7 @@ class LimitUsageTests(unittest.TestCase):
 
     LARGE = replace(engine.DEFAULT_CALIBRATION, crossing_capture_share=0.30)
 
-    def plan(self, entries=(), items=None, limit=10_000,
-             allocation="proportional"):
+    def plan(self, entries=(), items=None, limit=10_000):
         items = items or {1: Item(1, "Busy", True, limit, 1, None)}
         quotes = {i: Quote(110, NOW - 30, 100, NOW - 30) for i in items}
         scale = limit / 1000
@@ -437,8 +432,7 @@ class LimitUsageTests(unittest.TestCase):
                     "avgLowPrice": 100,
                     "lowPriceVolume": int(288_000 * scale)} for i in range(60)]
         config = filters.FilterConfig(capital=100_000_000,
-                                      calibration=self.LARGE,
-                                      allocation=allocation)
+                                      calibration=self.LARGE)
         usage = filters.limit_usage(entries, NOW) if entries else None
         return filters.rank_flips(
             items, quotes, activity, activity, config, NOW,
@@ -447,46 +441,40 @@ class LimitUsageTests(unittest.TestCase):
             limit_used=usage).rows
 
     def test_without_usage_the_whole_limit_is_planned(self):
-        for allocation in filters.ALLOCATIONS:
-            row = self.plan(allocation=allocation)[0]
-            self.assertEqual(row.allocated_quantity, 10_000, allocation)
-            self.assertNotIn(filters.LIMIT_USED_WARNING, row.warnings)
+        row = self.plan()[0]
+        self.assertEqual(row.allocated_quantity, 10_000)
+        self.assertNotIn(filters.LIMIT_USED_WARNING, row.warnings)
 
     def test_a_limit_used_up_an_hour_ago_is_not_funded(self):
         entries = [{"item_id": 1, "limit_group": None, "qty": 10_000,
                     "at": NOW - 3600}]
-        for allocation in filters.ALLOCATIONS:
-            row = self.plan(entries, allocation=allocation)[0]
-            self.assertIsNone(row.allocated_quantity, allocation)
-            self.assertIn(filters.LIMIT_USED_WARNING, row.warnings)
+        row = self.plan(entries)[0]
+        self.assertIsNone(row.allocated_quantity)
+        self.assertIn(filters.LIMIT_USED_WARNING, row.warnings)
 
     def test_part_of_the_limit_used_caps_the_offer(self):
         entries = [{"item_id": 1, "limit_group": None, "qty": 4_000,
                     "at": NOW - 3600}]
-        for allocation in filters.ALLOCATIONS:
-            row = self.plan(entries, allocation=allocation)[0]
-            self.assertGreater(row.allocated_quantity, 0, allocation)
-            self.assertLessEqual(row.allocated_quantity, 6_000, allocation)
-            self.assertLessEqual(row.qty_per_window, 6_000, allocation)
+        row = self.plan(entries)[0]
+        self.assertGreater(row.allocated_quantity, 0)
+        self.assertLessEqual(row.allocated_quantity, 6_000)
+        self.assertLessEqual(row.qty_per_window, 6_000)
 
     def test_purchases_older_than_four_hours_do_not_count(self):
         entries = [{"item_id": 1, "limit_group": None, "qty": 10_000,
                     "at": NOW - 4 * 3600 - 60}]
-        for allocation in filters.ALLOCATIONS:
-            used = self.plan(entries, allocation=allocation)[0]
-            fresh = self.plan(allocation=allocation)[0]
-            self.assertEqual(used, fresh, allocation)
+        used = self.plan(entries)[0]
+        fresh = self.plan()[0]
+        self.assertEqual(used, fresh)
 
     def test_doses_of_one_potion_share_what_is_left(self):
         items = {2: Item(2, "Prayer potion(3)", True, 2_000, 1, None)}
         entries = [{"item_id": 1, "limit_group": "potion:prayer potion",
                     "qty": 1_500, "at": NOW - 1800}]
-        for allocation in filters.ALLOCATIONS:
-            row = self.plan(entries, items=items, limit=2_000,
-                            allocation=allocation)[0]
-            self.assertEqual(row.limit_used, 1_500)
-            self.assertGreater(row.allocated_quantity, 0, allocation)
-            self.assertLessEqual(row.allocated_quantity, 500, allocation)
+        row = self.plan(entries, items=items, limit=2_000)[0]
+        self.assertEqual(row.limit_used, 1_500)
+        self.assertGreater(row.allocated_quantity, 0)
+        self.assertLessEqual(row.allocated_quantity, 500)
 
     def test_usage_is_summed_by_item_and_by_family(self):
         usage = filters.limit_usage([
@@ -509,26 +497,28 @@ class CategoryCapTests(unittest.TestCase):
     NAMES = ("Alpha", "Bravo", "Charlie", "Delta", "Echo",
              "Fire rune", "Water rune", "Earth rune", "Air rune", "Mind rune")
 
-    def plan(self, **overrides):
+    def plan(self):
         items = {i: Item(i, name, True, 1000, 1, None)
                  for i, name in enumerate(self.NAMES, 1)}
         quotes = {i: Quote(130, NOW - 30, 100, NOW - 30) for i in items}
         activity = {i: Activity(130, 1000, 100, 1000) for i in items}
+        history = [{"timestamp": NOW - (60 - i) * 21600, "avgHighPrice": 130,
+                    "highPriceVolume": 6000, "avgLowPrice": 100,
+                    "lowPriceVolume": 6000} for i in range(60)]
         config = filters.FilterConfig(
-            capital=10_000_000, account=engine.AccountType.MEMBERS,
-            **overrides)
-        result = filters.screen(items, quotes, activity, activity, config, NOW)
-        return [row for row in filters.allocate(result, config).rows
-                if row.allocated_quantity]
+            capital=10_000_000, account=engine.AccountType.MEMBERS)
+        result = filters.rank_flips(
+            items, quotes, activity, activity, config, NOW,
+            fetch_history=lambda _: history,
+            fetch_reach=lambda _: flat(count=365, high=130, volume=100))
+        return [row for row in result.rows if row.allocated_quantity]
 
     def test_uncategorised_items_are_not_capped_together(self):
-        for allocation in filters.ALLOCATIONS:
-            funded = self.plan(allocation=allocation)
-            counts = {}
-            for row in funded:
-                counts[row.category] = counts.get(row.category, 0) + 1
-            # Eight slots: every uncategorised row, and three of the runes.
-            self.assertEqual(counts, {"other": 5, "runes": 3}, allocation)
+        counts = {}
+        for row in self.plan():
+            counts[row.category] = counts.get(row.category, 0) + 1
+        # Eight slots: every uncategorised row, and three of the runes.
+        self.assertEqual(counts, {"other": 5, "runes": 3})
 
     def test_category_full(self):
         self.assertFalse(filters.category_full({"other": 40}, "other"))
@@ -553,8 +543,7 @@ class DeepTargetTests(unittest.TestCase):
 
     def test_a_third_of_the_budget_goes_to_reference_priced_rows(self):
         rows = self.rows()
-        config = filters.FilterConfig(deep_reference_share=1.0 / 3.0)
-        targets = filters._deep_targets(rows, 45, config)
+        targets = filters._deep_targets(rows, 45, filters.FilterConfig())
         self.assertEqual(len(targets), 45)
         reference = [i for i in targets if rows[i].priced_from_reference]
         # Regression, audit 2026-11: 45 * (1 - 1/3) is 30.000000000000004 in
@@ -564,13 +553,8 @@ class DeepTargetTests(unittest.TestCase):
                          (30, 15))
         self.assertEqual(targets[:3], [1, 2, 4])     # the best direct rows
 
-    def test_without_a_share_the_leaders_are_taken_in_order(self):
-        rows = self.rows()
-        self.assertEqual(filters._deep_targets(rows, 45, filters.FilterConfig()),
-                         list(range(45)))
-
     def test_rows_the_preferences_hide_do_not_use_the_budget(self):
-        rows = self.rows(count=10)
+        rows = self.rows(count=10, reference_every=1000)
         rows[0] = replace(rows[0], quote_age=5_000)
         rows[1] = replace(rows[1], thin_volume_1h=3)
         config = filters.FilterConfig(max_quote_age=600, min_thin_volume_1h=40)
@@ -583,8 +567,8 @@ class DeepTargetTests(unittest.TestCase):
 
     def test_short_lists_are_checked_in_full(self):
         rows = self.rows(count=7)
-        config = filters.FilterConfig(deep_reference_share=1.0 / 3.0)
-        self.assertEqual(sorted(filters._deep_targets(rows, 45, config)),
+        self.assertEqual(sorted(filters._deep_targets(
+            rows, 45, filters.FilterConfig())),
                          list(range(7)))
 
 
@@ -597,9 +581,6 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual((low.max_price, low.max_position_capital),
                          (1_250_000, 1_250_000))
         self.assertTrue(low.hide_botted)
-        self.assertEqual((low.funding_evidence, low.replay_statistic,
-                          low.replay_ranking, low.allocation),
-                         ("replay", "stable", True, "portfolio"))
         away = filters.automatic_profile(filters.FilterConfig(
             capital=20_000_000, trade_mode="away"), bank_risk_percent=50)
         self.assertEqual((away.max_quote_age, away.min_thin_volume_1h,
@@ -610,28 +591,28 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual((profit.max_quote_age, profit.min_thin_volume_1h,
                           profit.min_roi), (600, 20, 0.003))
 
-    def test_default_config_is_still_the_pipeline_without_a_policy(self):
-        config = filters.FilterConfig()
-        self.assertEqual((config.funding_evidence, config.allocation,
-                          config.replay_ranking, config.max_position_capital,
-                          config.deep_reference_share),
-                         ("any", "proportional", False, None, 0.0))
-
     def test_the_bank_binding_is_reported_when_coins_cut_a_row_short(self):
-        # The market supports 37 units of 100 gp, but other offers hold most
+        # The market supports 20 units of 101 gp, but other offers hold most
         # of the bank and only 1,000 gp is free. The selection never sees the
         # sizes it cannot afford; the plan must still say the bank decided.
         items = {1: Item(1, "Only", True, 1000, 1, None)}
         quotes = {1: Quote(130, NOW - 30, 100, NOW - 30)}
         activity = {1: Activity(130, 1000, 100, 1000)}
-        config = filters.FilterConfig(capital=10_000, allocation="portfolio")
-        screened = filters.screen(items, quotes, activity, activity, config, NOW)
-        self.assertEqual(screened.rows[0].qty_per_window, 37)
+        history = [{"timestamp": NOW - (60 - i) * 21600, "avgHighPrice": 130,
+                    "highPriceVolume": 6000, "avgLowPrice": 100,
+                    "lowPriceVolume": 6000} for i in range(60)]
+        config = filters.FilterConfig(capital=10_000)
+        screened = filters.refine_with_history(
+            filters.screen(items, quotes, activity, activity, config, NOW),
+            lambda _: history, config, NOW,
+            fetch_reach=lambda _: flat(count=365, high=130, volume=40))
+        self.assertEqual(screened.rows[0].qty_per_window, 20)
         roomy = filters.allocate(screened, config)
         self.assertEqual(roomy.selection.binding, "none")
+        self.assertEqual(roomy.rows[0].allocated_quantity, 20)
         tight = filters.allocate(screened, replace(config, capital=1_000))
         row = tight.rows[0]
-        self.assertLess(row.allocated_quantity, 37)
+        self.assertLess(row.allocated_quantity, 20)
         self.assertLessEqual(row.allocated_capital, 1_000)
         self.assertEqual(tight.selection.binding, "capital")
         self.assertGreater(tight.selection.capital_price, 0)
@@ -649,8 +630,6 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual((config.min_thin_volume_1h, config.max_price,
                           config.max_position_capital, config.min_roi),
                          (500, 2_000_000, 10_000_000, 0.003))
-        off = cli.config_from(cli.parse_args(["--no-policy"]), 100)
-        self.assertEqual(off, filters.FilterConfig(nature_rune_cost=100))
         with self.assertRaises(ValueError):
             cli.config_from(cli.parse_args(["--bank-risk", "5"]), 100)
 

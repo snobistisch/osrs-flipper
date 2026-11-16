@@ -1,3 +1,4 @@
+The method names in this document refer to commit `f0aaa57`. Most of them were removed later.
 
 ### active — holdout period, bank 20.0m, 8 segments, 651 decisions
 

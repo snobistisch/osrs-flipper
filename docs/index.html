@@ -4123,16 +4123,15 @@ function withReplay(row, points, config) {
   row.replaySizes = sizes;
 }
 
-/* The replayed profit the policy counts: the plain mean over all placements,
-   or the smaller of the older and newer half of the window ("stable"). */
-const replayProfit = (view, config) =>
-  config.replayStatistic === "stable" ? view.stableProfit : view.meanProfit;
+/* The replayed profit the policy counts: the smaller of the older and the
+   newer half of the window. */
+const replayProfit = (view) => view.stableProfit;
 
 /* Replayed profit in the strategy's own unit: per slot-hour for Active, per
    flip for Away and Max profit. */
 function replayValue(view, config) {
-  const profit = replayProfit(view, config);
-  if (config.strategy !== "active" || config.activeObjective === "offer") return profit;
+  const profit = replayProfit(view);
+  if (config.strategy !== "active") return profit;
   const floor = LEGS_PER_ROUND_TRIP * CAL.min_leg_seconds / SECONDS_PER_HOUR;
   return profit / Math.max(floor, view.meanSlotHours);
 }
@@ -4151,7 +4150,7 @@ function replayRow(row, qty, view, config) {
   const sized = qty === row.qty ? { ...row } : rescoreQuantity(row, qty);
   const value = replayValue(view, config);
   sized.replay = view;
-  sized.expected = replayProfit(view, config);
+  sized.expected = replayProfit(view);
   sized.rawRankingValue = value;
   sized.rankingValue = value;
   if (config.strategy === "active") sized.perSlotHour = value;
@@ -4170,16 +4169,10 @@ function rankByReplay(row, config) {
   Object.assign(row, replayRow(row, best[0], best[1], config));
 }
 
-/* Whether the row was checked as far as the policy demands before it may
-   receive bank. Mirrors filters.has_funding_evidence. */
-function hasFundingEvidence(row, config) {
-  if (config.fundingEvidence === "replay") {
-    return row.replay != null && replayProfit(row.replay, config) > 0;
-  }
-  if (config.fundingEvidence === "reach") return Boolean(row.deep) && row.buyReach != null;
-  if (config.fundingEvidence === "history") return Boolean(row.deep);
-  return true;
-}
+/* Whether the row may receive bank: its concrete offer, replayed on the
+   item's own recent 5-minute buckets, made money in both halves. Mirrors
+   filters.has_funding_evidence. */
+const hasFundingEvidence = (row) => row.replay != null && replayProfit(row.replay) > 0;
 
 const meetsCompletionTarget = (row, config) => config.strategy !== "active" ||
   row.pFill + 1e-9 >= CAL.active_target_completion;
@@ -4198,7 +4191,6 @@ function planReason(selection, strategy) {
   return "neither bank nor slots ran out: every candidate that passed the checks is funded";
 }
 
-const PORTFOLIO_QTY_FRACTIONS = [0.25, 0.5, 0.75, 1.0];
 const PORTFOLIO_CANDIDATES = 40;
 
 /* At most this many funded rows from one family of items that move together
@@ -4213,9 +4205,9 @@ const categoryFull = (counts, category) =>
 /* Fund the sizes that maximise the strategy's objective under both the slot
    and the bank constraint. `rows` is the ranking in order; `capital` and
    `slots` are what is still free. Mirrors filters._allocate_portfolio:
-   candidates need a positive expectation, the completion target and the
-   funding evidence the policy asks for, at most three rows per correlated
-   category and one row per connected buy-limit family. */
+   candidates need a positive expectation, the completion target, a replay
+   that made money, a buy limit not used up, at most three rows per
+   correlated category and one row per connected buy-limit family. */
 function allocatePortfolio(rows, capital, slots, reserved, config) {
   rows.forEach((r) => { r.allocated = 0; r.allocatedQty = 0; r.allocatedExpected = 0; });
   const bank = Math.min(capital, config.maxPositionCapital ?? capital);
@@ -4229,7 +4221,7 @@ function allocatePortfolio(rows, capital, slots, reserved, config) {
     const unit = rowUnitCapital(row);
     if (!(row.rankingValue > 0) || !(row.expected > 0) || !(unit > 0) || unit > bank ||
         limitExhausted(row, config) ||
-        !meetsCompletionTarget(row, config) || !hasFundingEvidence(row, config)) continue;
+        !meetsCompletionTarget(row, config) || !hasFundingEvidence(row)) continue;
     if (categoryFull(categoryCount, row.category)) continue;
     if (row.limitGroup != null) {
       if (groups.has(row.limitGroup)) continue;
@@ -4248,39 +4240,27 @@ function allocatePortfolio(rows, capital, slots, reserved, config) {
     cashLimited.push(Math.floor(capital / unit) < row.qty &&
       Math.floor(capital / unit) <= Math.floor(cap / unit));
     const variants = [], values = [];
-    if (config.replayRanking && row.replaySizes && row.replaySizes.length) {
-      // Sizes the replay measured, as far as the coins reach.
-      for (const [measured, view] of row.replaySizes) {
-        if (measured > Math.max(most, row.replaySizes[0][0])) continue;
-        let qty = measured;
-        let rescored = replayRow(row, qty, view, config);
-        if (qty > most) {
-          // Fewer coins than the smallest measured size: scale it down pro
-          // rata. A smaller offer fills no worse per unit.
-          const scale = most / qty;
-          const scaled = rescoreQuantity(row, most);
-          scaled.replay = view;
-          scaled.expected = rescored.expected * scale;
-          scaled.rawRankingValue = rescored.rankingValue * scale;
-          scaled.rankingValue = rescored.rankingValue * scale;
-          rescored = scaled;
-          qty = most;
-        }
-        if (!(rescored.rankingValue > 0) || qty <= 0) continue;
-        variants.push(rescored);
-        values.push([rescored.rankingValue, qty * unit]);
+    // Sizes the replay measured, as far as the coins reach. A candidate has a
+    // replay (hasFundingEvidence), and with it its sizes.
+    for (const [measured, view] of row.replaySizes) {
+      if (measured > Math.max(most, row.replaySizes[0][0])) continue;
+      let qty = measured;
+      let rescored = replayRow(row, qty, view, config);
+      if (qty > most) {
+        // Fewer coins than the smallest measured size: scale it down pro
+        // rata. A smaller offer fills no worse per unit.
+        const scale = most / qty;
+        const scaled = rescoreQuantity(row, most);
+        scaled.replay = view;
+        scaled.expected = rescored.expected * scale;
+        scaled.rawRankingValue = rescored.rankingValue * scale;
+        scaled.rankingValue = rescored.rankingValue * scale;
+        rescored = scaled;
+        qty = most;
       }
-    } else {
-      const quantities = [...new Set(PORTFOLIO_QTY_FRACTIONS
-        .map((fraction) => Math.max(1, Math.floor(most * fraction))))]
-        .sort((a, b) => a - b);
-      for (const qty of quantities) {
-        const rescored = rescoreQuantity(row, qty);
-        if (!(rescored.rankingValue > 0) || !(rescored.expected > 0) ||
-            !meetsCompletionTarget(rescored, config)) continue;
-        variants.push(rescored);
-        values.push([rescored.rankingValue, qty * unit]);
-      }
+      if (!(rescored.rankingValue > 0) || qty <= 0) continue;
+      variants.push(rescored);
+      values.push([rescored.rankingValue, qty * unit]);
     }
     sized.push(variants);
     options.push(values);
@@ -4497,7 +4477,7 @@ async function refineTopRows(rows, config, now) {
   await Promise.all(recentWorkers);
   const shrinkage = shrinkScores(rows);
   rows.forEach(applyExecutionEvidence);
-  if (config.replayRanking) rows.forEach((row) => rankByReplay(row, config));
+  rows.forEach((row) => rankByReplay(row, config));
   rows.sort((a, b) => b.rankingValue - a.rankingValue);
   return { refined: targets.filter((r) => r.deep).length, shrinkage };
 }
@@ -4516,7 +4496,7 @@ function buildPlan(rows, config, locks = []) {
   const candidates = state.deepReady
     ? rows.filter((row) => !lockedIds.has(row.id) && (row.limit == null ||
       limitUsedFor(usage, row.id, row.limitGroup) <= (row.limitUsed || 0))) : [];
-  const qualified = candidates.filter((row) => hasFundingEvidence(row, config)).length;
+  const qualified = candidates.filter(hasFundingEvidence).length;
   const selection = allocatePortfolio(candidates,
     Math.max(0, config.capital - lockedCommit),
     Math.max(0, config.slots - locks.length), locks, config);
@@ -5055,16 +5035,6 @@ function automaticFilterProfile(capital, account, strategy, bankRiskPercent) {
     maxPositionCapital,
     taxFreeOnly: false,
     hideBotted: true,
-    // Evidence before bank, then slots AND bank: the same policy as
-    // filters.automatic_profile. A row is funded only if its concrete offer,
-    // replayed on the item's own recent 5-minute buckets, made money in both
-    // halves of that window; the plan is the set of sizes that maximises the
-    // strategy's objective under both constraints.
-    fundingEvidence: "replay",
-    replayStatistic: "stable",
-    replayRanking: true,
-    allocation: "portfolio",
-    activeObjective: "slot_hour",
   };
 }
 

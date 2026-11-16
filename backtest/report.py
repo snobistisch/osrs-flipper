@@ -10,7 +10,7 @@ import engine
 from . import metrics
 from .run import DEFAULT_VARIANT, TOUCH_VARIANT, load
 
-BASELINE = "current"
+BASELINE = "random"
 DETAILED = (DEFAULT_VARIANT, TOUCH_VARIANT)
 
 

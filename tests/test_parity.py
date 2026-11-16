@@ -938,15 +938,11 @@ class PlanParityTests(unittest.TestCase):
                 (profile.max_quote_age, profile.min_thin_volume_1h,
                  profile.min_roi, profile.min_undercut_depth,
                  profile.max_price, profile.max_position_capital,
-                 profile.hide_botted, profile.funding_evidence,
-                 profile.replay_statistic, profile.replay_ranking,
-                 profile.allocation, profile.active_objective),
+                 profile.hide_botted),
                 (browser["maxQuoteAge"], browser["minVolume1h"],
                  browser["minRoi"], browser["minUndercutDepth"],
                  browser["maxPrice"], browser["maxPositionCapital"],
-                 browser["hideBotted"], browser["fundingEvidence"],
-                 browser["replayStatistic"], browser["replayRanking"],
-                 browser["allocation"], browser["activeObjective"]))
+                 browser["hideBotted"]))
 
 
 if __name__ == "__main__":

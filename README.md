@@ -96,8 +96,7 @@ python3 agent.py portfolio list
 Use `--account free-to-play` for the F2P profile and `--help` for available
 options. The CLI, the agent and the dashboard apply the same selection policy
 as the browser, so the same market gives the same plan; a display-filter flag
-replaces one of its gates, and `--no-policy` ranks on the rate model alone as
-before November 2026.
+replaces one of its gates.
 
 ### Backtest
 
@@ -114,9 +113,7 @@ download, which is resumable:
 ```
 
 `run` writes a result file and a Markdown report under `data/results/`;
-`--method`, `--strategy`, `--capital` and `--account` narrow it, and
-`--baseline-html` (a saved `docs/index.html`) adds the earlier browser plan
-as a baseline. Every result is produced under six fill assumptions, because
+`--method`, `--strategy`, `--capital` and `--account` narrow it. Every result is produced under six fill assumptions, because
 public trades cannot say what a private offer would have filled. Method,
 results and limits are in the
 [November 2026 audit](docs/audit-2026-11.md) (in Dutch).
