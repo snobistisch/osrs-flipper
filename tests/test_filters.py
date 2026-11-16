@@ -141,6 +141,39 @@ class AccountConfigurationTests(unittest.TestCase):
                 filters.FilterConfig(capital=capital)
 
 
+CATEGORY_TABLE = (
+    ("Rune platebody", "armour", None),
+    ("Rune full helm", "armour", None),
+    ("Rune scimitar", "weapons", None),
+    ("Rune arrow", "other", None),
+    ("Nature rune", "runes", None),
+    ("Swordfish", "food", None),
+    ("Rainbow fish", "food", None),
+    ("Monkfish", "food", None),
+    ("Barbarian rod", "other", None),
+    ("Iron bar", "ores-bars", None),
+    ("Runite ore", "ores-bars", None),
+    ("Abyssal whip", "weapons", None),
+    ("Magic shortbow", "weapons", None),
+    ("Yew logs", "logs", None),
+    ("Prayer potion(4)", "potions", "potion:prayer potion"),
+    ("Extended antifire(4)", "potions", "potion:extended antifire"),
+    ("Anti-venom+(4)", "potions", "potion:anti-venom+"),
+    ("Guthix rest(4)", "potions", "potion:guthix rest"),
+    ("Amulet of glory(4)", "other", None),
+)
+
+
+class CategoryTests(unittest.TestCase):
+    """Whole-word and suffix rules (audit F-09)."""
+
+    def test_category_and_limit_group_table(self):
+        for name, category, group in CATEGORY_TABLE:
+            with self.subTest(name=name):
+                self.assertEqual(filters.item_category(name), category)
+                self.assertEqual(filters.connected_limit_group(name), group)
+
+
 class NoLongerAGateTests(unittest.TestCase):
     """The old pipeline eliminated on these. They are now scoring inputs, so
     the item still reaches the ranking and simply scores what it is worth."""

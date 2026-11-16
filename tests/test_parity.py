@@ -170,6 +170,17 @@ class ParityTests(unittest.TestCase):
         self.assertEqual(js("[CATEGORY_CAP, UNCATEGORISED]")[0],
                          [filters.CATEGORY_CAP, filters.UNCATEGORISED])
 
+    def test_item_category_and_limit_group_match(self):
+        from tests.test_filters import CATEGORY_TABLE
+        names = [name for name, _, _ in CATEGORY_TABLE]
+        browser = js(*("[itemCategory({0}), connectedLimitGroup({0})]".format(
+            json.dumps(name)) for name in names))
+        python = [[filters.item_category(name),
+                   filters.connected_limit_group(name)] for name in names]
+        self.assertEqual(browser, python)
+        self.assertEqual(python, [[category, group]
+                                  for _, category, group in CATEGORY_TABLE])
+
     def test_partial_fill_distribution_matches(self):
         cases = [(100, 0.05, 7200), (5_000, 0.05, 7200), (1, 0.0, 7200),
                  (250, 1.5, 60), (40_000, 2.0, 14_400)]

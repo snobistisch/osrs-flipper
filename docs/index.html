@@ -3823,22 +3823,30 @@ function flipWarnings(row, breakdown, affordable, exempt) {
 function connectedLimitGroup(name) {
   const lower = name.toLowerCase().trim();
   if (/\([1-4]\)$/.test(lower) &&
-      /(potion|brew|restore|antipoison|antidote|serum|mix|overload)/.test(lower)) {
+      /(potion|brew|restore|antipoison|antidote|serum|mix|overload|antifire|anti-venom|guthix rest)/.test(lower)) {
     return "potion:" + lower.replace(/\([1-4]\)$/, "").trim();
   }
   return null;
 }
 
+/* Family of items that move together, for the per-family cap. Matched on the
+   trimmed lower-case name, first rule wins; mirrors filters.item_category. */
+const POTION_WORDS = ["potion", "brew", "restore", "antipoison", "antidote",
+  "antifire", "anti-venom", "guthix rest"];
+const FOOD_WORDS = ["shark", "karambwan", "manta ray", "lobster", "salmon", "tuna",
+  "swordfish", "monkfish", "anglerfish", "rainbow fish"];
+const ARMOUR_WORDS = ["platebody", "platelegs", "helm", "armour", "shield"];
+const WEAPON_PATTERN = /(sword|scimitar|whip|staff|bow)\b/;
+
 function itemCategory(name) {
-  const lower = " " + name.toLowerCase();
-  const groups = [
-    ["potions", ["potion", "brew", "restore", "antipoison", "antidote"]],
-    ["runes", [" rune", "rune "]], ["food", ["shark", "karambwan", "manta ray", "lobster", "salmon", "tuna"]],
-    ["logs", [" logs"]], ["ores-bars", [" ore", " bar"]],
-    ["armour", ["platebody", "platelegs", "helm", "armour", "shield"]],
-    ["weapons", ["sword", "bow", "staff", "whip", "scimitar", "godsword"]],
-  ];
-  for (const [group, words] of groups) if (words.some((word) => lower.includes(word))) return group;
+  const lower = name.toLowerCase().trim();
+  if (POTION_WORDS.some((word) => lower.includes(word))) return "potions";
+  if (FOOD_WORDS.some((word) => lower.includes(word))) return "food";
+  if (lower.endsWith(" rune")) return "runes";
+  if (lower.endsWith(" logs")) return "logs";
+  if (lower.endsWith(" ore") || lower.endsWith(" bar")) return "ores-bars";
+  if (ARMOUR_WORDS.some((word) => lower.includes(word))) return "armour";
+  if (WEAPON_PATTERN.test(lower)) return "weapons";
   return "other";
 }
 

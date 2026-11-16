@@ -371,27 +371,44 @@ def connected_limit_group(name: str) -> Optional[str]:
     lower = name.lower().strip()
     dose = re.search(r"\(([1-4])\)$", lower)
     potion_words = ("potion", "brew", "restore", "antipoison", "antidote",
-                    "serum", "mix", "overload")
+                    "serum", "mix", "overload", "antifire", "anti-venom",
+                    "guthix rest")
     if dose and any(word in lower for word in potion_words):
         return "potion:" + re.sub(r"\([1-4]\)$", "", lower).strip()
     return None
 
 
 def item_category(name: str) -> str:
-    lower = name.lower()
-    families = (
-        ("potions", ("potion", "brew", "restore", "antipoison", "antidote")),
-        ("runes", (" rune", "rune ")),
-        ("food", ("shark", "karambwan", "manta ray", "lobster", "salmon", "tuna")),
-        ("logs", (" logs",)),
-        ("ores-bars", (" ore", " bar")),
-        ("armour", ("platebody", "platelegs", "helm", "armour", "shield")),
-        ("weapons", ("sword", "bow", "staff", "whip", "scimitar", "godsword")),
-    )
-    for category, words in families:
-        if any(word in " " + lower for word in words):
-            return category
+    """Family of items that move together, for the per-family cap.
+
+    Matched on the trimmed lower-case name, first rule wins. Suffix and
+    word-end rules keep "Rune platebody" out of runes, "Swordfish" out of
+    weapons and "Barbarian rod" out of ores and bars.
+    """
+    lower = name.lower().strip()
+    if any(word in lower for word in _POTION_WORDS):
+        return "potions"
+    if any(word in lower for word in _FOOD_WORDS):
+        return "food"
+    if lower.endswith(" rune"):
+        return "runes"
+    if lower.endswith(" logs"):
+        return "logs"
+    if lower.endswith(" ore") or lower.endswith(" bar"):
+        return "ores-bars"
+    if any(word in lower for word in _ARMOUR_WORDS):
+        return "armour"
+    if _WEAPON_PATTERN.search(lower):
+        return "weapons"
     return "other"
+
+
+_POTION_WORDS = ("potion", "brew", "restore", "antipoison", "antidote",
+                 "antifire", "anti-venom", "guthix rest")
+_FOOD_WORDS = ("shark", "karambwan", "manta ray", "lobster", "salmon", "tuna",
+               "swordfish", "monkfish", "anglerfish", "rainbow fish")
+_ARMOUR_WORDS = ("platebody", "platelegs", "helm", "armour", "shield")
+_WEAPON_PATTERN = re.compile(r"(sword|scimitar|whip|staff|bow)\b", re.ASCII)
 
 
 # At most this many funded rows from one family of items that move together
