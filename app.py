@@ -134,9 +134,9 @@ def landing():
             except ValueError:
                 st.error("Enter an amount like 250k, 1.5m or 1,000,000.")
                 return
-            if capital > engine.MAX_CASH_STACK:
-                st.error("That's more than the max cash stack "
-                         "(2,147,483,647 gp). Enter your real budget.")
+            if capital > engine.MAX_GE_CAPITAL:
+                st.error("That is more than the Grand Exchange can hold in "
+                         "coins and platinum tokens (2,149,631,130,647 gp).")
                 return
             st.session_state.capital = capital
             st.rerun()

@@ -112,8 +112,8 @@ class FilterConfig:
         if not 1.0 <= float(self.overnight_hours) <= 24.0:
             raise ValueError("overnight horizon must be between 1 and 24 hours")
         if (isinstance(self.capital, bool) or not isinstance(self.capital, int)
-                or not 0 < self.capital <= engine.MAX_CASH_STACK):
-            raise ValueError("capital must fit in the OSRS cash stack")
+                or not 0 < self.capital <= engine.MAX_GE_CAPITAL):
+            raise ValueError("capital must fit in coins plus platinum tokens")
         if self.active_objective not in ACTIVE_OBJECTIVES:
             raise ValueError("active_objective must be one of {}".format(
                 ACTIVE_OBJECTIVES))

@@ -804,6 +804,18 @@ class PlanParityTests(unittest.TestCase):
         self.assertGreater(funded, 10)
         self.assertGreater(len(bindings), 1)
 
+    def test_a_bank_above_one_coin_stack_plans_the_same(self):
+        capital = 5_000_000_000
+        self.assertEqual(js("MAX_GE_CAPITAL")[0], engine.MAX_GE_CAPITAL)
+        python, javascript, _ = self.plans("active", self.times[3], capital)
+        self.assertTrue(python)
+        self.assertEqual(
+            sorted((r.item_id, r.buy, r.sell, r.allocated_quantity,
+                    r.allocated_capital) for r in python),
+            sorted((r["id"], r["buy"], r["sell"], r["qty"], r["capital"])
+                   for r in javascript))
+        self.assertLessEqual(sum(r.allocated_capital for r in python), capital)
+
     def test_free_to_play_profile_matches_too(self):
         python, javascript, _ = self.plans("active", self.times[20], 500_000,
                                            account="free-to-play")

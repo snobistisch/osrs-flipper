@@ -157,6 +157,9 @@ class TradingProfile:
                 if self.mode is TradeMode.OVERNIGHT else float(WINDOW_HOURS))
 
 MAX_CASH_STACK = 2_147_483_647    # the game's coin cap
+# Since 30 September 2026 the GE pays in coins plus platinum tokens (1,000 gp
+# each), so a bank can hold a full coin stack and a full token stack.
+MAX_GE_CAPITAL = 2_149_631_130_647  # 2,147,483,647 + 2,147,483,647 x 1,000
 
 # Prices are whole gp, so this is the smallest move the market can make and the
 # resolution of every percentage computed from two prices. DERIVED.

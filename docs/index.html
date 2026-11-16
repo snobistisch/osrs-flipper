@@ -1206,6 +1206,9 @@ const DEFAULT_BANK_RISK_PERCENT = 25;
 const MIN_BANK_RISK_PERCENT = 10;
 const MAX_BANK_RISK_PERCENT = 100;
 const MAX_CASH_STACK = 2_147_483_647;
+/* Since 30 September 2026 the GE pays in coins plus platinum tokens (1,000 gp
+   each). Same as engine.MAX_GE_CAPITAL. */
+const MAX_GE_CAPITAL = 2_149_631_130_647;
 
 /* Prices are whole gp, so this is the smallest move the market can make and
    the resolution of every percentage computed from two prices. DERIVED. */
@@ -6242,9 +6245,9 @@ function submitBudget() {
   const error = $("#gate-error");
   try {
     const capital = parseGp($("#budget").value);
-    if (capital > MAX_CASH_STACK) {
+    if (capital > MAX_GE_CAPITAL) {
       error.textContent =
-        "That's more than the max cash stack (2,147,483,647 gp).";
+        "That is more than the Grand Exchange can hold in coins and platinum tokens (2,149,631,130,647 gp).";
       return;
     }
     error.textContent = "";
@@ -6494,7 +6497,7 @@ renderExecutions();
 $("#tab-blurb").textContent = TAB_BLURB.flip;
 const restored = restorePreferences();
 syncFilterLabels();
-if (restored.capital > 0 && restored.capital <= MAX_CASH_STACK) {
+if (restored.capital > 0 && restored.capital <= MAX_GE_CAPITAL) {
   startApp(Math.round(restored.capital));
 } else {
   $("#budget").focus();

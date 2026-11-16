@@ -126,6 +126,20 @@ class AccountConfigurationTests(unittest.TestCase):
         self.assertEqual(config.slots, engine.F2P_SLOTS)
         self.assertFalse(config.include_members)
 
+    def test_capital_may_exceed_one_coin_stack(self):
+        # Coins plus platinum tokens since 30 September 2026 (audit F-06).
+        self.assertEqual(engine.MAX_GE_CAPITAL, 2_149_631_130_647)
+        self.assertEqual(engine.MAX_GE_CAPITAL,
+                         engine.MAX_CASH_STACK + engine.MAX_CASH_STACK * 1_000)
+        for capital in (engine.MAX_CASH_STACK + 1, 5_000_000_000,
+                        engine.MAX_GE_CAPITAL):
+            with self.subTest(capital=capital):
+                self.assertEqual(
+                    filters.FilterConfig(capital=capital).capital, capital)
+        for capital in (engine.MAX_GE_CAPITAL + 1, 0, -1):
+            with self.subTest(capital=capital), self.assertRaises(ValueError):
+                filters.FilterConfig(capital=capital)
+
 
 class NoLongerAGateTests(unittest.TestCase):
     """The old pipeline eliminated on these. They are now scoring inputs, so
