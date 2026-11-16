@@ -191,7 +191,8 @@ class ArchiveTests(unittest.TestCase):
 
 
 class AuditOctober2026Tests(unittest.TestCase):
-    """Regressions for the findings of docs/audit-2026-10-01.md."""
+    """Bond conversion fees, coin-flip shrinkage, CLI and agent error
+    handling, and API outage behaviour."""
 
     NOW = 1_785_000_000.0
 

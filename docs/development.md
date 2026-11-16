@@ -94,7 +94,5 @@ logic in a harness; it does not replace visual or accessibility checks in a
 real browser.
 
 Model parameters remain assumptions until calibrated against recorded fills.
-See [model notes](model.md) and the historical
-repository audits of [September](audit-2026-09-13.md),
-[October](audit-2026-10-01.md) and [November 2026](audit-2026-11.md) for
-known limitations.
+See [model notes](model.md) and the
+[November 2026 audit](audit-2026-11.md) for known limitations.

@@ -29,7 +29,7 @@ watch. Its order size is a setting: `careful` (the default, and the only
 one tested on held-out data) sizes each offer on a queue share of the volume
 that trades through its price, `balanced` and `large` on 15% and 30%. Larger
 orders earn more if your offers fill quickly and lose more if they do not
-([order size](docs/model.md#order-size-16-november-2026); `--order-size` in
+([order size](docs/model.md#order-size); `--order-size` in
 `cli.py` and `agent.py`). Away
 (next check in 1–12 hours, overnight included) estimates inventory bought
 while you are gone — including bids under today's price on items that
@@ -120,8 +120,10 @@ For the tick collector, trade journal, watch alerts, and storage details, see
 | `cli.py`, `agent.py` | Terminal and agent interfaces |
 | `archive.py`, `collect.py`, `journal.py`, `storage.py` | Local history, outcomes, and safe persistence |
 | `backtest/` | Walk-forward backtest on real price history |
-| `tests/` | Python regression tests and executable browser tests |
-| `docs/*.md` | Model, operations, development, and historical audit notes |
+| `tests/` | Python regression tests and executable browser tests; `tests/fixtures/` holds a slice of real price history |
+| `docs/*.md` | Model, operations and development notes, and the November 2026 audit |
+| `docs/backtest-2026-11/` | Raw tables of the November 2026 backtest |
+| `requirements-dev.txt` | numpy for the backtest, ruff for linting |
 | `skills/osrs-flipper/` | Agent usage and output contract |
 | `.github/workflows/` | Automated repository checks |
 
@@ -140,9 +142,7 @@ node --test tests/browser.test.cjs
 GitHub Actions checks Python 3.9 and 3.13. There is no npm build. Calculation
 changes need matching Python and JavaScript updates; see
 [Development](docs/development.md) for test coverage and maintenance guidance.
-The [September](docs/audit-2026-09-13.md),
-[October](docs/audit-2026-10-01.md) and
-[November 2026](docs/audit-2026-11.md) audits record fixes and remaining
-limitations (in Dutch); the last one holds the backtest.
+The [November 2026 audit](docs/audit-2026-11.md) records the backtest, its
+results and its limitations (in Dutch).
 
 Not affiliated with Jagex or the OSRS Wiki.
