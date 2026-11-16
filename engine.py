@@ -1261,7 +1261,11 @@ def reprice_check_seconds(buy_work_seconds: float, sigma: float,
 
 
 def buy_limit_windows(horizon_hours: float) -> int:
-    """Conservative count of rolling four-hour limit windows reached."""
+    """Upper bound on the number of four-hour limit windows an offer can reach.
+
+    The window starts at the first purchase, so the real number can be one
+    lower.
+    """
     return max(1, int(math.ceil(max(0.0, horizon_hours) / WINDOW_HOURS)))
 
 

@@ -210,6 +210,38 @@ test('order size is saved and restored; old preferences load careful', () => {
   assert.equal(elements.get('#f-order-size').value, 'careful');
 });
 
+test('one plan requests /timeseries for at most 45 items', async () => {
+  const { run, context } = setup();
+  const now = Math.floor(Date.now() / 1000);
+  const requested = new Set();
+  context.fetch = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith('/timeseries')) requested.add(parsed.searchParams.get('id'));
+    const data = Array.from({ length: 60 }, (_, i) => ({ timestamp: now - (60 - i) * 21600,
+      avgLowPrice: 100, lowPriceVolume: 20000, avgHighPrice: 110, highPriceVolume: 20000 }));
+    return { ok: true, json: async () => ({ data }) };
+  };
+  const count = await run(`(async () => {
+    const items = {}, quotes = {}, act = {};
+    for (let id = 1; id <= 120; id++) {
+      items[id] = { name: "Item " + id, members: true, limit: 1000, highalch: null };
+      quotes[id] = { high: 110 + (id % 7), low: 100, highTime: ${now} - 30, lowTime: ${now} - 30 };
+      act[id] = { avgHighPrice: 110, highPriceVolume: 4000, avgLowPrice: 100, lowPriceVolume: 4000 };
+    }
+    withExemptions(items);
+    const config = { capital: 100000000, account: "members", slots: 8,
+      includeMembers: true, strategy: "active", horizonHours: 4, natureCost: 100,
+      ...automaticFilterProfile(100000000, "members", "active", 100) };
+    state.capital = config.capital; state.items = items;
+    const { rows } = screen(items, quotes, act, act, config, ${now});
+    await refineTopRows(rows, config, ${now});
+    return applyPreferences(rows, config).kept.length;
+  })()`);
+  assert.ok(count > 45, 'more eligible rows than the budget');
+  assert.equal(run('DEEP_TOP_K * DEEP_BREADTH'), 45);
+  assert.ok(requested.size > 0 && requested.size <= 45, `requested ${requested.size}`);
+});
+
 test('invalid stored records cannot crash rendering', () => {
   const { run, storage } = setup();
   storage.set('osrs-flipper.executions.v1', '{}');

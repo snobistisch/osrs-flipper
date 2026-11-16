@@ -3,8 +3,9 @@
 Acceptable-use constraints (https://prices.runescape.wiki):
 - Every request carries a descriptive User-Agent; default agents are blocked.
 - Bulk data comes from the all-items routes (/latest, /5m, /1h). The only
-  per-item route used is /timeseries, for the detail view of a single item —
-  never called in a loop.
+  per-item route used is /timeseries: for the detail view of a single item,
+  and for the deep check, which fetches it for at most top_k x breadth (45 by
+  default) shortlisted items per plan, cached for 30 minutes.
 - The in-memory TTL on /latest doubles as the 30-second poll limit.
 """
 from __future__ import annotations

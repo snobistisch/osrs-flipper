@@ -250,6 +250,13 @@ Everything about timing comes from that one distribution:
 
 Away reports the buy fill by return separately from liquidation.
 
+In Active the rate model sets `downside_risk` to 0: an unfinished trip is
+cancelled at the deadline and only its occupancy is charged. Stock left over
+is priced only by the default policy, which ranks and sizes on the replayed
+result, and the replay sells whatever is unsold at the deadline at the last
+instant-sell price, after tax. `cli.py --no-policy` (and a bare
+`FilterConfig()`) ranks on the rate model and does not charge it.
+
 ### 1b. Why the ETA used to be too optimistic
 
 Investigated on 2026-10-01 after the complaint that a flip "predicted to fill

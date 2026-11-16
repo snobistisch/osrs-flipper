@@ -1740,6 +1740,9 @@ function repriceCheckSeconds(buyWork, sigma) {
     Math.min(CAL.reprice_check_max_minutes * 60, p90));
 }
 
+/* Upper bound on the number of four-hour limit windows an offer can reach.
+   The window starts at the first purchase, so the real number can be one
+   lower. */
 const buyLimitWindows = (hours) => Math.max(1, Math.ceil(Math.max(0, hours) / WINDOW_HOURS));
 function effectiveBuyLimit(limit, hours, mode) {
   if (limit == null) return null;
@@ -3305,8 +3308,11 @@ const THESIS_BY_ID = Object.fromEntries(WATCHLIST);
 /* ==================== api client ====================
    The wiki's acceptable-use policy asks for a descriptive User-Agent, but
    browsers forbid scripts from setting that header, so this client identifies
-   itself the only way it can: bulk endpoints only, never per-item polling,
-   and never more than once per 30 seconds. /mapping is cached for a day. */
+   itself the only way it can: the bulk endpoints for all items, never more
+   than once per 30 seconds, plus /timeseries for at most
+   DEEP_TOP_K × DEEP_BREADTH (45) shortlisted items per plan, cached for 30
+   minutes, and for the item whose chart is open. /mapping is cached for a
+   day. */
 
 const BASE = "https://prices.runescape.wiki/api/v1/osrs";
 const LATEST_TTL = 30_000;
