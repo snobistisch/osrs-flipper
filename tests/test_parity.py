@@ -101,6 +101,26 @@ class ParityTests(unittest.TestCase):
                 expected.append(engine.undercut_depth(buy, sell, exempt, bond))
         self.assertEqual(js(*expressions), expected)
 
+    def test_decimal_average_history_is_cleaned_identically(self):
+        import api
+        rows = [
+            {"timestamp": NOW - 5 * 300, "avgHighPrice": 649036.25,
+             "avgLowPrice": 643121, "highPriceVolume": 4, "lowPriceVolume": 7},
+            {"timestamp": NOW - 4 * 300, "avgHighPrice": 648416.5,
+             "avgLowPrice": 641999.75, "highPriceVolume": 2, "lowPriceVolume": 1},
+            {"timestamp": NOW - 3 * 300, "avgHighPrice": 0.4,
+             "avgLowPrice": 640000.01, "highPriceVolume": 9, "lowPriceVolume": 3},
+            {"timestamp": NOW - 2 * 300, "avgHighPrice": None,
+             "avgLowPrice": 642500.49, "highPriceVolume": 0, "lowPriceVolume": 5},
+            {"timestamp": NOW - 300, "avgHighPrice": 650000.5,
+             "avgLowPrice": 99.99, "highPriceVolume": 1, "lowPriceVolume": 8},
+        ]
+        python = api.clean_history(rows)
+        browser = js("cleanHistory({})".format(json.dumps(rows)))[0]
+        self.assertEqual(python, browser)
+        self.assertEqual([row["avgHighPrice"] for row in python],
+                         [649036, 648417, None, None, 650001])
+
     def test_price_and_queue_primitives_match(self):
         cases = [
             ("referencePrice(100, 5, 110, 50)", engine.reference_price(100, 5, 110, 50)),

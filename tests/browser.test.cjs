@@ -91,6 +91,31 @@ test('stale data is bounded and history is sorted and sanitized', async () => {
   assert.equal(result[1].highPriceVolume, 0);
 });
 
+test('decimal averages are rounded half up; unreadable responses throw', async () => {
+  const { run, context } = setup();
+  const rows = run(`cleanHistory([{timestamp: 1794825000, avgHighPrice: 649036.25,
+    avgLowPrice: 643121, highPriceVolume: 4, lowPriceVolume: 7}])`);
+  assert.equal(rows[0].avgHighPrice, 649036);
+  assert.equal(rows[0].highPriceVolume, 4);
+  assert.equal(rows[0].avgLowPrice, 643121);
+  assert.equal(rows[0].lowPriceVolume, 7);
+  for (const [raw, expected] of [['648416.5', 648417], ['0.4', null], ['-3', null],
+    ['"12"', null], ['true', null], ['12', 12]]) {
+    assert.equal(run(`averagePrice(${raw})`), expected, raw);
+    const row = run(`cleanHistory([{timestamp: 1, avgHighPrice: ${raw}, highPriceVolume: 5}])`)[0];
+    assert.equal(row.avgHighPrice, expected, raw);
+    assert.equal(row.highPriceVolume, expected ? 5 : 0, raw);
+  }
+  assert.throws(() => run(`cleanHistory(Array.from({length: 10}, (_, i) => ({timestamp: i + 1,
+    avgHighPrice: "100", avgLowPrice: 99.5, highPriceVolume: 1, lowPriceVolume: 1})))`), /\/timeseries/);
+  assert.equal(run(`cleanHistory(Array.from({length: 10}, (_, i) => ({timestamp: i + 1,
+    avgHighPrice: 100, avgLowPrice: i < 4 ? "x" : 99})))`).length, 10);
+  const data = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [String(i + 1), {
+    avgHighPrice: i % 2 ? null : '1', avgLowPrice: 10.25, highPriceVolume: 1, lowPriceVolume: 1 }]));
+  context.fetch = async () => ({ ok: true, json: async () => ({ data }) });
+  await assert.rejects(run('fetchInterval("5m")'), /\/5m/);
+});
+
 test('reservations survive profile changes and derive commitment from quantity', () => {
   const { run, storage } = setup();
   const lock = { slot: 0, id: 1, name: 'Test', qty: 10, buy: 100, sell: 110,

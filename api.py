@@ -100,10 +100,58 @@ def _timestamp(value: object) -> Optional[int]:
     return value if value is not None and value <= time.time() + 60 else None
 
 
+def _avg_price(value: object) -> Optional[int]:
+    """An averaged price (/5m, /1h, /timeseries), rounded half up to whole gp.
+
+    API v2 returns averages with up to two decimals, so whole numbers cannot be
+    required here. Instant prices in /latest, volumes, timestamps and ids stay
+    on the strict integer check.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, int):
+        price = value             # floor(x + 0.5) == x; no float overflow
+    elif not math.isfinite(value) or value <= 0:
+        return None
+    else:
+        price = math.floor(value + 0.5)
+    if price <= 0 or price > 2 ** 53 - 1:
+        return None
+    return int(price)
+
+
+# A response in which many prices that were sent cannot be read is a change in
+# the API, not a thin market. Raise rather than plan on what is left.
+AVG_PRICE_GUARD_MIN = 20
+AVG_PRICE_GUARD_SHARE = 0.20
+
+
+class _PriceTally:
+    def __init__(self, endpoint: str):
+        self.endpoint = endpoint
+        self.present = 0
+        self.rejected = 0
+
+    def price(self, raw: object) -> Optional[int]:
+        price = _avg_price(raw)
+        if raw is not None:
+            self.present += 1
+            if price is None:
+                self.rejected += 1
+        return price
+
+    def check(self) -> None:
+        if (self.present >= AVG_PRICE_GUARD_MIN
+                and self.rejected > AVG_PRICE_GUARD_SHARE * self.present):
+            raise ApiError("{}: {} of {} average prices are unreadable".format(
+                self.endpoint, self.rejected, self.present))
+
+
 def clean_history(data: object) -> List[dict]:
     """Validate history before it reaches statistics; keep missing sides null."""
     if not isinstance(data, list):
         raise ApiError("/timeseries: response has no 'data' list")
+    tally = _PriceTally("/timeseries")
     rows = {}
     for row in data:
         if not isinstance(row, dict):
@@ -113,12 +161,13 @@ def clean_history(data: object) -> List[dict]:
             continue
         cleaned = dict(row)
         for side in ("High", "Low"):
-            price = _positive_int(row.get("avg" + side + "Price"))
+            price = tally.price(row.get("avg" + side + "Price"))
             cleaned["avg" + side + "Price"] = price
             cleaned[side.lower() + "PriceVolume"] = (
                 _opt_int(row.get(side.lower() + "PriceVolume")) or 0
             ) if price is not None else 0
         rows[timestamp] = cleaned
+    tally.check()
     return [rows[key] for key in sorted(rows)]
 
 
@@ -254,6 +303,7 @@ class WikiClient:
         if not isinstance(data, dict):
             raise ApiError("/{}: response has no 'data' object".format(timestep))
         activity = {}
+        tally = _PriceTally("/" + timestep)
         for raw_id, row in data.items():
             if not isinstance(row, dict):
                 continue
@@ -263,14 +313,15 @@ class WikiClient:
                 continue
             if item_id <= 0:
                 continue
-            high = _positive_int(row.get("avgHighPrice"))
-            low = _positive_int(row.get("avgLowPrice"))
+            high = tally.price(row.get("avgHighPrice"))
+            low = tally.price(row.get("avgLowPrice"))
             activity[item_id] = Activity(
                 avg_high=high,
                 high_volume=(_opt_int(row.get("highPriceVolume")) or 0) if high else 0,
                 avg_low=low,
                 low_volume=(_opt_int(row.get("lowPriceVolume")) or 0) if low else 0,
             )
+        tally.check()
         timestamp = _positive_int(payload.get("timestamp"))
         if timestamp is not None and timestamp <= time.time() + 60:
             self.interval_timestamps[timestep] = timestamp

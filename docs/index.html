@@ -3349,10 +3349,40 @@ function loadStoredArray(key, valid) {
   }
 }
 
-function cleanActivity(row) {
+/* An averaged price (/5m, /1h, /timeseries), rounded half up to whole gp.
+   API v2 returns averages with up to two decimals; mirrors api._avg_price.
+   Instant prices in /latest, volumes, timestamps and ids stay strict. */
+function averagePrice(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  const price = Math.floor(value + 0.5);
+  return price > 0 && price <= Number.MAX_SAFE_INTEGER ? price : null;
+}
+
+/* A response in which many prices that were sent cannot be read is a change
+   in the API, not a thin market: throw rather than plan on what is left. */
+const AVG_PRICE_GUARD_MIN = 20;
+const AVG_PRICE_GUARD_SHARE = 0.20;
+
+function priceTally(endpoint) {
+  return { endpoint, present: 0, rejected: 0 };
+}
+
+function checkPriceTally(tally) {
+  if (tally.present >= AVG_PRICE_GUARD_MIN
+      && tally.rejected > AVG_PRICE_GUARD_SHARE * tally.present) {
+    throw new Error(`${tally.endpoint}: ${tally.rejected} of ${tally.present} average prices are unreadable`);
+  }
+}
+
+function cleanActivity(row, tally = null) {
   const result = {};
   for (const side of ["High", "Low"]) {
-    const price = positiveInteger(row[`avg${side}Price`]);
+    const raw = row[`avg${side}Price`];
+    const price = averagePrice(raw);
+    if (tally && raw != null) {
+      tally.present++;
+      if (price == null) tally.rejected++;
+    }
     result[`avg${side}Price`] = price;
     result[`${side.toLowerCase()}PriceVolume`] = price == null ? 0
       : positiveInteger(row[`${side.toLowerCase()}PriceVolume`]) || 0;
@@ -3362,11 +3392,13 @@ function cleanActivity(row) {
 
 function cleanHistory(data) {
   if (!Array.isArray(data)) throw new Error("/timeseries: response has no data list");
+  const tally = priceTally("/timeseries");
   const rows = new Map();
   for (const row of data) {
     if (!isRecord(row) || !validTimestamp(row.timestamp)) continue;
-    rows.set(row.timestamp, { ...row, ...cleanActivity(row) });
+    rows.set(row.timestamp, { ...row, ...cleanActivity(row, tally) });
   }
+  checkPriceTally(tally);
   return [...rows.values()].sort((a, b) => a.timestamp - b.timestamp);
 }
 
@@ -3456,9 +3488,12 @@ const fetchInterval = (step) => cached(step, INTERVAL_TTL[step], async () => {
   if (!payload || !isRecord(payload.data)) {
     throw new Error(`/${step}: response has no data object`);
   }
-  return Object.fromEntries(Object.entries(payload.data)
+  const tally = priceTally("/" + step);
+  const activity = Object.fromEntries(Object.entries(payload.data)
     .filter(([id, row]) => positiveInteger(Number(id)) && isRecord(row))
-    .map(([id, row]) => [id, cleanActivity(row)]));
+    .map(([id, row]) => [id, cleanActivity(row, tally)]));
+  checkPriceTally(tally);
+  return activity;
 });
 
 /* Only the fields the ranking needs are kept, so the cache fits comfortably
