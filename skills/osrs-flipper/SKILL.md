@@ -85,9 +85,9 @@ Say what this is not: it is measured on public trades, not on the player's
 own fills. How much of the passing volume reaches one offer is an assumption
 (`docs/audit-2026-11.md`), so present `expected_profit` as what the offer
 would have made on recent trading under that assumption, never as a
-forecast. Active offers are sized on a queue share of the volume that trades
+forecast. Offers are sized on a queue share of the volume that trades
 through their price by default (`--order-size careful`), or on 15% or 30%
-with `balanced` or `large` (`crossing_capture_share`, `docs/model.md` "Order
+with `balanced` or `large`, in every strategy (`docs/model.md` "Order
 size"): where the real share is far lower the larger sizes lost money in the
 backtest, so if the player reports offers filling slower than the time band,
 say that the size was too large rather than repeating the plan.

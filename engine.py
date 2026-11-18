@@ -277,13 +277,12 @@ class Calibration:
     # while the offer was open.
     crossing_capture_share: float = 0.0
     # The same share for an offer that rests unwatched: Away, and Max profit
-    # with its day-long deadline. Price priority has to be kept up. Nobody
-    # reprices these offers when they are outbid, and behind a better bid
-    # they fill only when the price falls through it. Measured on the same
-    # period, every larger value (15%, 30%, 50%) earned less than the queue
-    # share on average over the six fill assumptions, and under at least
-    # four of them, for Away and for Max profit alike. So they keep it.
-    # 0 = the queue share.
+    # with its day-long deadline (ORDER_SIZES sets it per plan). Price
+    # priority has to be kept up. Nobody reprices these offers when they are
+    # outbid, and behind a better bid they fill only when the price falls
+    # through it. On the tuning period every larger value (15%, 30%, 50%)
+    # earned less than the queue share on average over the six fill
+    # assumptions, for Away and for Max profit alike. 0 = the queue share.
     resting_capture_share: float = 0.0
 
     # Human time per leg. Not a market property: placing an offer, returning to
@@ -443,10 +442,10 @@ class Calibration:
 
 DEFAULT_CALIBRATION = Calibration()
 
-# Order size for Active: the share of crossing volume an offer is sized on.
-# Larger orders earn more if offers fill quickly and lose more if they do not.
-# Only "careful" has been tested on held-out data (docs/audit-2026-11.md,
-# addendum). Away and Max profit keep resting_capture_share whatever is set.
+# Order size: the share of crossing volume an offer is sized on, in every
+# strategy. Larger orders earn more if offers fill quickly and lose more if
+# they do not. Only "careful" has been tested on held-out data
+# (docs/audit-2026-11.md, addendum).
 ORDER_SIZES = {"careful": 0.0, "balanced": 0.15, "large": 0.30}
 DEFAULT_ORDER_SIZE = "careful"
 
@@ -456,8 +455,9 @@ def with_order_size(calibration: Calibration, order_size: str) -> Calibration:
     if order_size not in ORDER_SIZES:
         raise ValueError("order size must be one of {}".format(
             sorted(ORDER_SIZES)))
-    return replace(calibration,
-                   crossing_capture_share=ORDER_SIZES[order_size])
+    share = ORDER_SIZES[order_size]
+    return replace(calibration, crossing_capture_share=share,
+                   resting_capture_share=share)
 
 
 # ---------------------------------------------------------------------------

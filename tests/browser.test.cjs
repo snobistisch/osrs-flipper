@@ -415,7 +415,7 @@ test('an unknown item on both APIs keeps timeseries on v1', async () => {
   assert.ok(urls[urls.length - 1].includes('/api/v1/osrs/timeseries?id=4151&timestep=5m'));
 });
 
-test('a careful Active plan that leaves most of the bank idle names the setting', () => {
+test('a careful plan that leaves most of the bank idle names the setting', () => {
   const { run } = setup();
   const hint = (strategy, orderSize, committed) => run(
     `orderSizeHint({ strategy: "${strategy}", orderSize: "${orderSize}", capital: 20000000 }, ${committed})`);
@@ -423,8 +423,9 @@ test('a careful Active plan that leaves most of the bank idle names the setting'
     'Order size is set to careful. Balanced or large commit more of the bank; neither has been tested on held-out data.');
   assert.equal(hint('active', 'careful', 6000000), '');
   assert.equal(hint('active', 'large', 1100000), '');
-  assert.equal(hint('overnight', 'careful', 1100000), '');
-  assert.equal(hint('profit', 'careful', 1100000), '');
+  for (const strategy of ['overnight', 'profit']) {
+    assert.match(hint(strategy, 'careful', 1100000), /^Order size is set to careful\./);
+  }
 });
 
 test('invalid stored records cannot crash rendering', () => {
@@ -736,6 +737,6 @@ test('the automatic plan funds on replay evidence and states its reason', async 
   assert.match(note, /Neither bank nor slots ran out/);
   assert.match(note, /made money in both halves/);
   // An Active plan says what its order sizes rest on.
-  assert.match(note, /Active offers are sized on 30% of the volume that trades through their price/);
+  assert.match(note, /offers are sized on 30% of the volume that trades through their price/);
   assert.match(elements.get('#status').textContent, /1 flip made money when replayed/);
 });

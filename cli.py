@@ -56,7 +56,7 @@ def parse_args(argv):
                         "(default: 8; presets 1, 2, 4, 6, 8, 10, 12)")
     p.add_argument("--order-size", choices=list(engine.ORDER_SIZES),
                    default=engine.DEFAULT_ORDER_SIZE,
-                   help="Active order size: the share of the volume trading "
+                   help="order size: the share of the volume trading "
                         "through an offer's price it is sized on (careful 0, "
                         "balanced 15%%, large 30%%). Larger orders earn more "
                         "if your offers fill quickly and lose more if they do "
@@ -133,11 +133,13 @@ def config_from(opts, nature_cost: int) -> filters.FilterConfig:
 
 
 def _capture_note(config) -> str:
-    """What an Active offer's size rests on, for the note under the table."""
-    share = config.calibration.crossing_capture_share
-    if config.trade_mode is not engine.TradeMode.ACTIVE or share <= 0:
+    """What an offer's size rests on, for the note under the table."""
+    share = (config.calibration.crossing_capture_share
+             if config.trade_mode is engine.TradeMode.ACTIVE
+             else config.calibration.resting_capture_share)
+    if share <= 0:
         return ""
-    return (" (Active offers are sized on {:.0%} of the volume that trades "
+    return (" (offers are sized on {:.0%} of the volume that trades "
             "through their price; an offer that fills slower than its time "
             "band was sized too large)".format(share))
 

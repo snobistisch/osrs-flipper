@@ -838,7 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
                        default=engine.DEFAULT_OVERNIGHT_HOURS)
     flips.add_argument("--order-size", choices=list(engine.ORDER_SIZES),
                        default=engine.DEFAULT_ORDER_SIZE,
-                       help="Active order size: careful (tested on held-out "
+                       help="order size: careful (tested on held-out "
                             "data), balanced or large. Larger orders earn "
                             "more if offers fill quickly and lose more if "
                             "they do not")

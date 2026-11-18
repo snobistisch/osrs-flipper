@@ -66,10 +66,10 @@ The browser, the CLI and the agent choose the plan in the same way:
    (`touch_fill_weight`), because there the offer queues behind older ones
    and the queue cannot be seen. The execution optimiser therefore prices
    inside the spread when that reaches volume, and an item whose spread is a
-   single gp reaches none. Of the volume its price does beat, an Active
-   offer is sized on the queue share by default (order size `careful`,
-   `crossing_capture_share = 0`), or on 15% or 30% with `balanced` or
-   `large`; Away and Max profit on a queue share of one sixteenth or less.
+   single gp reaches none. Of the volume its price does beat, an offer is
+   sized on the queue share (one sixteenth or less) by default (order size
+   `careful`), or on 15% or 30% with `balanced` or `large`, in every
+   strategy.
 3. **Replay.** The concrete offer — those prices, that quantity, the
    strategy's deadline — is placed at many start times across the last day
    and played forward on the buckets that followed each one: a unit is sold
@@ -125,16 +125,15 @@ assumptions into measurements.
 The Grand Exchange matches on price first: a sale executes against the highest
 buy offer, a purchase against the lowest sell offer, and age only decides
 between offers at the *same* price (OSRS Wiki, *Grand Exchange*, read
-2026-11-16). Volume that traded through an Active offer's price therefore
-reached offers this one would have been served before, and the order size
-says how much of it the plan sizes on: `careful` (the queue share, the
-default and the only value evaluated on held-out data), `balanced` (15%) and
-`large` (30%), in the browser next to the strategy and as `--order-size` in
-`cli.py` and `agent.py`. Larger orders earn more if your offers fill quickly
-and lose more if they do not: a larger buy fills in full exactly when the
-price is falling through it. Away and Max profit keep the queue share
-(`resting_capture_share = 0`), because nobody reprices an offer that rests
-unwatched and every larger share earned less there on average. On the tuning
+2026-11-16). Volume that traded through an offer's price therefore reached
+offers this one would have been served before, and the order size says how
+much of it the plan sizes on, in every strategy: `careful` (the queue share,
+the default and the only value evaluated on held-out data), `balanced` (15%)
+and `large` (30%), in the browser next to the strategy and as `--order-size`
+in `cli.py` and `agent.py` (`crossing_capture_share` for Active,
+`resting_capture_share` for Away and Max profit). Larger orders earn more if
+your offers fill quickly and lose more if they do not: a larger buy fills in
+full exactly when the price is falling through it. On the tuning
 period (10–29 October 2026, 925 decisions, 20m bank, members), bank gp per
 hour against the six fill assumptions of the simulator (`strict`: only volume
 through the price fills; `touch`: volume at the price as well; then the share
@@ -146,6 +145,19 @@ intervals, not out-of-sample evidence:
 | **queue share (`careful`, default)** | −2.4k | 3.8k | 11.6k | 3.4k | 7.2k | 16.0k | 6.6k |
 | 15% (`balanced`) | −7.7k | 8.5k | 25.2k | −1.4k | 14.4k | 35.8k | 12.5k |
 | 30% (`large`) | −15.1k | −1.0k | 32.3k | −6.2k | 15.1k | 51.3k | 12.7k |
+
+For an offer that rests unwatched the evidence points the other way: nobody
+reprices it when it is outbid, and every larger share earned less on average
+over the same six assumptions:
+
+| sized on | Away, mean of six | Max profit, mean of six |
+|---|---|---|
+| queue share (`careful`) | 2.0k | 13.5k |
+| 15% (`balanced`) | 0.2k | 7.9k |
+| 30% (`large`) | −1.9k | 6.4k |
+
+Larger Away and Max profit orders are therefore a choice for more gp in play,
+not for more expected profit.
 
 `python3 -m backtest run --method policy_x00 --method policy_x15 --method
 policy_x30` runs these settings; a new held-out period that starts on or after
@@ -584,7 +596,7 @@ The ones most worth fitting first, because they do the most work:
 | Parameter | What it claims | Fit it from |
 |---|---|---|
 | `crossing_capture_share` | The share of the volume that trades strictly through an Active offer's price that reaches it. Default 0, the queue share below (order size `careful`); `balanced` and `large` set 15% and 30%. The largest single lever on order size | Journal: units filled over units that traded through the price while the offer was open |
-| `resting_capture_share` | Away and Max profit offers, which nobody reprices, keep the queue share (0) | The same, for offers left unwatched |
+| `resting_capture_share` | The same for Away and Max profit offers, which nobody reprices. Default 0; the order size sets it like the Active share | The same, for offers left unwatched |
 | `competitors_at_touch` | Quiet-market floor of the queue share: you are one of 16 offers sharing the volume at your price | Journal: observed fill rate over volume at the offer's price |
 | `touch_fill_weight` | An offer at exactly the last traded price earns none of the volume traded there (0) | Journal: fill rate of offers at the traded price against offers one tick inside it |
 | `aggressiveness_scale` | How quickly price improvement reaches its capture ceiling | Journal: fill rate against distance from the touch |

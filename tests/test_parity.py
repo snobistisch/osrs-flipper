@@ -908,10 +908,10 @@ class PlanParityTests(unittest.TestCase):
                             r["capital"]) for r in javascript), label)
                 sizes[order_size, strategy] = sorted(
                     (r.item_id, r.allocated_quantity) for r in python)
-        # The setting moves Active and leaves Away alone.
+        # The setting moves every strategy.
         self.assertNotEqual(sizes["careful", "active"], sizes["large", "active"])
-        self.assertEqual(sizes["careful", "overnight"],
-                         sizes["large", "overnight"])
+        self.assertNotEqual(sizes["careful", "overnight"],
+                            sizes["large", "overnight"])
         self.assertEqual(js("ORDER_SIZES")[0], engine.ORDER_SIZES)
 
     def test_free_to_play_profile_matches_too(self):

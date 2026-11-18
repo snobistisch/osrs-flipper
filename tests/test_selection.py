@@ -352,11 +352,14 @@ class CrossingShareTests(unittest.TestCase):
         self.assertAlmostEqual(row.buy_share, 1000 / (48_000 * 4))
         self.assertLess(row.qty_per_window, 200)
 
-    def test_away_and_max_profit_rows_carry_the_queue_share(self):
+    def test_away_and_max_profit_rows_carry_the_order_size_too(self):
+        careful = engine.with_order_size(engine.DEFAULT_CALIBRATION, "careful")
         for mode in (engine.TradeMode.OVERNIGHT, engine.TradeMode.PROFIT):
             row = self.plan(mode=mode)
-            self.assertAlmostEqual(row.buy_share, 1000 / (48_000 * 4))
+            self.assertEqual(row.buy_share, 0.30)
             self.assertEqual(row.sell_share, row.buy_share)
+            queue = self.plan(careful, mode=mode)
+            self.assertAlmostEqual(queue.buy_share, 1000 / (48_000 * 4))
 
     def test_an_offer_at_the_traded_price_still_reaches_nothing(self):
         # Price priority needs a better price. At the same price the offer
@@ -390,15 +393,13 @@ class OrderSizeTests(unittest.TestCase):
 
     def test_balanced(self):
         shares = self.shares("balanced")
-        self.assertEqual(shares[engine.TradeMode.ACTIVE], 0.15)
-        self.assertAlmostEqual(shares[engine.TradeMode.OVERNIGHT], 1 / 16)
-        self.assertAlmostEqual(shares[engine.TradeMode.PROFIT], 1 / 16)
+        for mode in engine.TradeMode:
+            self.assertEqual(shares[mode], 0.15, mode)
 
     def test_large(self):
         shares = self.shares("large")
-        self.assertEqual(shares[engine.TradeMode.ACTIVE], 0.30)
-        self.assertAlmostEqual(shares[engine.TradeMode.OVERNIGHT], 1 / 16)
-        self.assertAlmostEqual(shares[engine.TradeMode.PROFIT], 1 / 16)
+        for mode in engine.TradeMode:
+            self.assertEqual(shares[mode], 0.30, mode)
 
     def test_unknown_order_size_is_rejected(self):
         with self.assertRaises(ValueError):

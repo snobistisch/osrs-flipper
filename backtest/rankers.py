@@ -266,7 +266,7 @@ def policy_capture(share: float) -> Callable[[filters.FilterConfig],
 
 # The policy under other values of the share of crossing volume an offer is
 # sized on, in every strategy. 0 is the queue share; the default is
-# policy_x00 (order size "careful"); 0.15 and 0.30 are the Active order sizes
+# policy_x00 (order size "careful"); 0.15 and 0.30 are the order sizes
 # "balanced" and "large".
 CAPTURE_GRID = {
     "policy_x00": 0.0,

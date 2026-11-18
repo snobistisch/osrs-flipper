@@ -965,7 +965,7 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
       </select>
     </div>
     <div class="field">
-      <label for="f-order-size">Order size (Active)</label>
+      <label for="f-order-size">Order size</label>
       <select id="f-order-size">
         <option value="careful" selected>Careful</option>
         <option value="balanced">Balanced</option>
@@ -1520,11 +1520,11 @@ function aggressiveness(edge, competitors) {
    volume is measured (reachView, replayOffer). An offer at a better price is
    matched before the offers the trades actually hit, so for an Active offer
    this is the capture share and not a place in a queue. Away and Max profit
-   read the resting share. 0 means the queue share. Mirrors
-   engine.crossing_share. */
-function crossingShare(competitors, strategy = "active",
-                       activeShare = CAL.crossing_capture_share) {
-  const capture = strategy === "active" ? activeShare : CAL.resting_capture_share;
+   read the resting share. `orderShare`, the plan's order size, replaces both.
+   0 means the queue share. Mirrors engine.crossing_share. */
+function crossingShare(competitors, strategy = "active", orderShare = null) {
+  const capture = orderShare ?? (strategy === "active"
+    ? CAL.crossing_capture_share : CAL.resting_capture_share);
   if (capture > 0) return Math.min(1, capture);
   return aggressiveness(0, competitors);
 }
@@ -3944,7 +3944,7 @@ function optimiseExecution(o) {
       volume = o.reach.buyVolumePerHour(bid.buy, CAL.touch_fill_weight);
       sellVolume = o.reach.sellVolumePerHour(sell, CAL.touch_fill_weight);
       buyShare = sellShare = crossingShare(o.competitors, o.config.strategy,
-        o.config.crossingCaptureShare ?? CAL.crossing_capture_share);
+        o.config.crossingCaptureShare ?? null);
     } else {
       buyShare = aggressiveness(priceEdge(Math.max(0, bid.step), originalSpread), o.competitors);
       sellShare = aggressiveness(priceEdge(sellImprovement, originalSpread), o.competitors);
@@ -5380,11 +5380,11 @@ function renderTerminalStats(config) {
    allocatePortfolio has already worked out and which the table buries in two
    columns twelve apart. */
 
-/* When a careful Active plan leaves most of the bank idle, name the setting
-   that decides how much it commits. */
+/* When a careful plan leaves most of the bank idle, name the setting that
+   decides how much it commits. */
 const ORDER_SIZE_HINT = "Order size is set to careful. Balanced or large commit more of the bank; neither has been tested on held-out data.";
 function orderSizeHint(config, committed) {
-  return config.strategy === "active" && normalizeOrderSize(config.orderSize) === "careful"
+  return normalizeOrderSize(config.orderSize) === "careful"
     && committed < 0.25 * config.capital ? ORDER_SIZE_HINT : "";
 }
 
@@ -5507,7 +5507,7 @@ function renderPlan(config) {
     const reason = planReason(state.planSelection, config.strategy);
     parts.push(reason.charAt(0).toUpperCase() + reason.slice(1) + ".");
   }
-  const evidence = `A flip is funded only if its exact offer, replayed on the item's own last day of 5-minute trading, made money in both halves of that window: a buy fills only where sellers traded below your price, a sell only where buyers traded above it, and stock still unsold at the deadline is sold at the going instant-sell price. EXPECTED is that replayed result, not the quoted margin times quantity. It is measured on public trades, not on your fills — how much of the passing volume reaches your offer is an assumption until you log real offers${config.strategy === "active" && config.crossingCaptureShare > 0 ? `: Active offers are sized on ${Math.round(config.crossingCaptureShare * 100)}% of the volume that trades through their price, so an offer that fills slower than its time band was sized too large` : ""}.`;
+  const evidence = `A flip is funded only if its exact offer, replayed on the item's own last day of 5-minute trading, made money in both halves of that window: a buy fills only where sellers traded below your price, a sell only where buyers traded above it, and stock still unsold at the deadline is sold at the going instant-sell price. EXPECTED is that replayed result, not the quoted margin times quantity. It is measured on public trades, not on your fills — how much of the passing volume reaches your offer is an assumption until you log real offers${config.crossingCaptureShare > 0 ? `: offers are sized on ${Math.round(config.crossingCaptureShare * 100)}% of the volume that trades through their price, so an offer that fills slower than its time band was sized too large` : ""}.`;
   const cap = `At most ${config.bankRiskPercent}% of your bank (${formatGp(config.maxPositionCapital)}) goes into one new trade.`;
   if (config.strategy === "profit") {
     parts.push(`${evidence} Max profit ranks that profit per flip, not per hour, with a ${Math.round(config.horizonHours)}h deadline; a slow flip can win here and its time band is on its card. ${cap} Each card says when to re-check: if nothing has bought by then, re-check the live margin.`);
