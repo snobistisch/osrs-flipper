@@ -967,11 +967,11 @@ footer { margin-top: 1.6rem; color: var(--text-dim); font-size: 0.8rem; }
     <div class="field">
       <label for="f-order-size">Order size</label>
       <select id="f-order-size">
-        <option value="careful" selected>Careful</option>
+        <option value="careful">Careful</option>
         <option value="balanced">Balanced</option>
-        <option value="large">Large</option>
+        <option value="large" selected>Large</option>
       </select>
-      <div class="small dim">Larger orders earn more if your offers fill quickly and lose more if they do not. Only 'careful' has been tested on held-out data.</div>
+      <div class="small dim">Larger orders earn more if your offers fill quickly and lose more if they do not. Real offers filled at about the 'large' rate; only 'careful' has been tested on held-out data.</div>
     </div>
     <div class="field hidden" id="overnight-field">
       <label for="f-horizon">Next check in</label>
@@ -1210,10 +1210,12 @@ const F2P_SLOTS = 3;
 const MEMBER_SLOTS = 8;
 const DEFAULT_ACCOUNT = "members";
 const DEFAULT_STRATEGY = "active";
-/* Order size for Active: the share of crossing volume an offer is sized on.
-   Only "careful" has been tested on held-out data. Same as engine.ORDER_SIZES. */
+/* Order size, in every strategy: the share of crossing volume an offer is
+   sized on. Large is the default because real offers filled at about that
+   rate (docs/model.md, "Live fills"); only "careful" has been tested on
+   held-out data. Same as engine.ORDER_SIZES and engine.DEFAULT_ORDER_SIZE. */
 const ORDER_SIZES = { careful: 0.0, balanced: 0.15, large: 0.30 };
-const DEFAULT_ORDER_SIZE = "careful";
+const DEFAULT_ORDER_SIZE = "large";
 const DEFAULT_OVERNIGHT_HOURS = 8;
 /* Max profit round-trip deadline: the longest horizon the profile accepts.
    Same as engine.PROFIT_HORIZON_HOURS. */
@@ -1304,7 +1306,8 @@ const CAL = {
   crossing_capture_share: 0.0,
   // The same share for an offer that rests unwatched (Away, Max profit).
   // Nobody reprices it when it is outbid; every larger value earned less on
-  // average in the backtest, so these keep the queue share (0).
+  // average in the backtest. 0 is the queue share; plans set both shares
+  // from the order size.
   resting_capture_share: 0.0,
   min_leg_seconds: 60,             // DERIVED: human time per leg
   adverse_selection_gamma: 0.5,    // CALIBRATE
@@ -5048,7 +5051,8 @@ function savePreferences() {
     capital: state.capital, account: $("#f-account").value,
     strategy: $("#f-strategy").value, horizon: Number($("#f-horizon").value),
     bankRiskPercent: normalizeBankRiskPercent($("#f-bank-risk").value),
-    timestep: state.timestep, orderSize: normalizeOrderSize($("#f-order-size").value),
+    timestep: state.timestep,
+    orderSizeChoice: normalizeOrderSize($("#f-order-size").value),
   };
   writeDurableStorage(PREF_KEY, JSON.stringify(value));
 }
@@ -5065,7 +5069,9 @@ const normalizeOrderSize = (value) =>
 
 function restorePreferences() {
   const p = loadPreferences();
-  $("#f-order-size").value = normalizeOrderSize(p.orderSize);
+  // Not `orderSize`: that field was saved with every preference while the
+  // default was careful, so it does not say whether anyone chose careful.
+  $("#f-order-size").value = normalizeOrderSize(p.orderSizeChoice);
   $("#f-account").value = p.account === "free-to-play" ? p.account : DEFAULT_ACCOUNT;
   $("#f-strategy").value = STRATEGIES.includes(p.strategy) ? p.strategy : DEFAULT_STRATEGY;
   $("#f-horizon").value = AWAY_HORIZON_PRESETS.includes(Number(p.horizon))

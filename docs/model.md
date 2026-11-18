@@ -67,8 +67,8 @@ The browser, the CLI and the agent choose the plan in the same way:
    and the queue cannot be seen. The execution optimiser therefore prices
    inside the spread when that reaches volume, and an item whose spread is a
    single gp reaches none. Of the volume its price does beat, an offer is
-   sized on the queue share (one sixteenth or less) by default (order size
-   `careful`), or on 15% or 30% with `balanced` or `large`, in every
+   sized on 30% by default (order size `large`), or on 15% or the queue
+   share (one sixteenth or less) with `balanced` or `careful`, in every
    strategy.
 3. **Replay.** The concrete offer — those prices, that quantity, the
    strategy's deadline — is placed at many start times across the last day
@@ -128,10 +128,11 @@ between offers at the *same* price (OSRS Wiki, *Grand Exchange*, read
 2026-11-16). Volume that traded through an offer's price therefore reached
 offers this one would have been served before, and the order size says how
 much of it the plan sizes on, in every strategy: `careful` (the queue share,
-the default and the only value evaluated on held-out data), `balanced` (15%)
-and `large` (30%), in the browser next to the strategy and as `--order-size`
-in `cli.py` and `agent.py` (`crossing_capture_share` for Active,
-`resting_capture_share` for Away and Max profit). Larger orders earn more if
+the only value evaluated on held-out data), `balanced` (15%) and `large`
+(30%, the default since the [live fills](#live-fills) below), in the browser
+next to the strategy and as `--order-size` in `cli.py` and `agent.py`
+(`crossing_capture_share` for Active, `resting_capture_share` for Away and
+Max profit). Larger orders earn more if
 your offers fill quickly and lose more if they do not: a larger buy fills in
 full exactly when the price is falling through it. On the tuning
 period (10–29 October 2026, 925 decisions, 20m bank, members), bank gp per
@@ -156,8 +157,43 @@ over the same six assumptions:
 | 15% (`balanced`) | 0.2k | 7.9k |
 | 30% (`large`) | −1.9k | 6.4k |
 
-Larger Away and Max profit orders are therefore a choice for more gp in play,
-not for more expected profit.
+Averaged over the six assumptions, larger Away and Max profit orders are a
+choice for more gp in play, not for more expected profit. The six are not
+equally likely, though: real offers showed a share near 30% (next section).
+At that share Away earned about the same at every size (strict 3.7k / 4.0k /
+2.4k, touch 5.0k / 6.7k / 6.0k for careful / balanced / large), Active
+earned three times as much with `large` (16.0k against 51.3k, touch), and
+Max profit still earned less with it (29.8k against 22.7k, touch).
+
+#### Live fills
+
+On 18 November 2026 at 11:58 an Away plan (4 hours, 20m bank, members) was
+placed by hand as seven buy offers, larger than the plan's careful
+quantities. At 13:16, 78 minutes later, the Grand Exchange showed:
+
+| Item | Buy | Plan (careful, 4 h) | Model rate per hour: careful / 30% | Bought by 13:16 | Instant-sells at or under the price by 13:16 |
+|---|---|---|---|---|---|
+| Yanillian hops | 564 | 424 | 106 / 510 | 497 | 497 |
+| Toadflax seed | 668 | 72 | 18 / 87 | 258 | 281 |
+| Harralander potion (unf) | 404 | 724 | 181 / 870 | 6 | 61 |
+| Unpowered orb | 60 | 1,469 | 735 / 3,526 | 2,464 | 3,586 |
+| Black d'hide chaps | 3,200 | 53 | 13 / 127 | 70 (buy limit) | 1,117 |
+| Yew longbow (u) | 143 | 4,331 | 1,083 / 5,198 | 10,000 (whole offer) | 34,309 |
+| Rune crossbow | 8,944 | 33 | 8 / 40 | 69 (buy limit 70) | 75 |
+
+The model rate is the 24-hour reach before 11:58 at the offer's price times
+the share; the last column counts 5-minute buckets whose average
+instant-sell price was at or under the bid. In gp the seven offers bought
+2.87m against 0.59m predicted for those 78 minutes at the queue share and
+3.14m at 30%, and three of them stopped only at their buy limit or their own
+quantity. Where an offer was the best
+bid it took most units sold into it (hops, toadflax, orb, crossbow). The
+exception explains the downside of larger orders: Harralander was bid at a
+price where a large older offer already waited, and the market moved up to
+435 straight after; it bought 6 of 2,000 and a 30% plan would have tied up
+1.4m there. 78 minutes of seven offers is one observation, and the sell
+side had not finished yet; it is the reason the default is `large`, not a
+measurement of the share.
 
 `python3 -m backtest run --method policy_x00 --method policy_x15 --method
 policy_x30` runs these settings; a new held-out period that starts on or after
@@ -595,7 +631,7 @@ The ones most worth fitting first, because they do the most work:
 
 | Parameter | What it claims | Fit it from |
 |---|---|---|
-| `crossing_capture_share` | The share of the volume that trades strictly through an Active offer's price that reaches it. Default 0, the queue share below (order size `careful`); `balanced` and `large` set 15% and 30%. The largest single lever on order size | Journal: units filled over units that traded through the price while the offer was open |
+| `crossing_capture_share` | The share of the volume that trades strictly through an Active offer's price that reaches it. Default 0, the queue share below; plans set it from the order size: `careful` 0, `balanced` 15%, `large` (default) 30%. The largest single lever on order size. First live measurement: [live fills](#live-fills) | Journal: units filled over units that traded through the price while the offer was open |
 | `resting_capture_share` | The same for Away and Max profit offers, which nobody reprices. Default 0; the order size sets it like the Active share | The same, for offers left unwatched |
 | `competitors_at_touch` | Quiet-market floor of the queue share: you are one of 16 offers sharing the volume at your price | Journal: observed fill rate over volume at the offer's price |
 | `touch_fill_weight` | An offer at exactly the last traded price earns none of the volume traded there (0) | Journal: fill rate of offers at the traded price against offers one tick inside it |

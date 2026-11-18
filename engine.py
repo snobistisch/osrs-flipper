@@ -272,7 +272,8 @@ class Calibration:
     # Share of the volume that traded strictly THROUGH an Active offer's price
     # that reaches the offer (ORDER_SIZES sets it per plan). 0 means the queue
     # share at the top of this class, and 0 is the only value evaluated on
-    # held-out data.
+    # held-out data. Plans set it from DEFAULT_ORDER_SIZE (30%) unless asked
+    # otherwise.
     # CALIBRATE: journal units filled / units that traded through the price
     # while the offer was open.
     crossing_capture_share: float = 0.0
@@ -282,7 +283,10 @@ class Calibration:
     # outbid, and behind a better bid they fill only when the price falls
     # through it. On the tuning period every larger value (15%, 30%, 50%)
     # earned less than the queue share on average over the six fill
-    # assumptions, for Away and for Max profit alike. 0 = the queue share.
+    # assumptions, for Away and for Max profit alike; at a true share of 30%,
+    # the share real offers showed (docs/model.md, "Live fills"), 15% and 30%
+    # earned about as much as the queue share in Away and less in Max profit.
+    # 0 = the queue share.
     resting_capture_share: float = 0.0
 
     # Human time per leg. Not a market property: placing an offer, returning to
@@ -444,10 +448,13 @@ DEFAULT_CALIBRATION = Calibration()
 
 # Order size: the share of crossing volume an offer is sized on, in every
 # strategy. Larger orders earn more if offers fill quickly and lose more if
-# they do not. Only "careful" has been tested on held-out data
-# (docs/audit-2026-11.md, addendum).
+# they do not. The default is "large": seven real Away buy offers placed on
+# 18 November 2026 filled in their first 78 minutes about 5 times what the
+# queue share predicted for that time and about 0.9 times what 30% predicted
+# (docs/model.md, "Live fills"). Only "careful" has been tested on held-out
+# data (docs/audit-2026-11.md, addendum).
 ORDER_SIZES = {"careful": 0.0, "balanced": 0.15, "large": 0.30}
-DEFAULT_ORDER_SIZE = "careful"
+DEFAULT_ORDER_SIZE = "large"
 
 
 def with_order_size(calibration: Calibration, order_size: str) -> Calibration:

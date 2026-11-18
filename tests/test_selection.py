@@ -285,9 +285,8 @@ class PolicyTests(unittest.TestCase):
 class CrossingShareTests(unittest.TestCase):
     """Volume that trades through an offer's price reaches it by price
     priority. Sharing it out like a touch queue kept every offer at a
-    fraction of the buy limit, however much traded. Since 16 November 2026
-    the default order size is "careful" (the queue share), so these select
-    "large" explicitly."""
+    fraction of the buy limit, however much traded. These select "large"
+    explicitly, so they do not depend on the default order size."""
 
     LARGE = engine.with_order_size(engine.DEFAULT_CALIBRATION, "large")
 
@@ -373,7 +372,8 @@ class CrossingShareTests(unittest.TestCase):
 
 
 class OrderSizeTests(unittest.TestCase):
-    """The Active order-size setting (audit F-01): careful is the default."""
+    """The order-size setting (audit F-01): large is the default, and the
+    calibration itself keeps the queue share for callers that set none."""
 
     def shares(self, order_size):
         calibration = engine.with_order_size(engine.DEFAULT_CALIBRATION,
@@ -381,8 +381,8 @@ class OrderSizeTests(unittest.TestCase):
         return {mode: engine.crossing_share(calibration, 16, mode)
                 for mode in engine.TradeMode}
 
-    def test_default_is_careful_the_queue_share(self):
-        self.assertEqual(engine.DEFAULT_ORDER_SIZE, "careful")
+    def test_default_is_large_and_the_calibration_the_queue_share(self):
+        self.assertEqual(engine.DEFAULT_ORDER_SIZE, "large")
         self.assertEqual(engine.DEFAULT_CALIBRATION.crossing_capture_share, 0.0)
         self.assertEqual(engine.DEFAULT_CALIBRATION.resting_capture_share, 0.0)
 
@@ -412,8 +412,9 @@ class OrderSizeTests(unittest.TestCase):
             config = cli.config_from(opts, 100)
             self.assertEqual(config.calibration.crossing_capture_share, share)
         opts = cli.parse_args([])
-        self.assertEqual(cli.config_from(opts, 100).calibration
-                         .crossing_capture_share, 0.0)
+        default = cli.config_from(opts, 100).calibration
+        self.assertEqual(default.crossing_capture_share, 0.30)
+        self.assertEqual(default.resting_capture_share, 0.30)
 
 
 class LimitUsageTests(unittest.TestCase):
@@ -624,7 +625,10 @@ class ProfileTests(unittest.TestCase):
         opts = cli.parse_args(["--capital", "20m"])
         config = cli.config_from(opts, 100)
         self.assertEqual(config, filters.automatic_profile(
-            filters.FilterConfig(capital=20_000_000, nature_rune_cost=100)))
+            filters.FilterConfig(capital=20_000_000, nature_rune_cost=100,
+                                 calibration=engine.with_order_size(
+                                     engine.DEFAULT_CALIBRATION,
+                                     engine.DEFAULT_ORDER_SIZE))))
         opts = cli.parse_args(["--capital", "20m", "--min-vol", "500",
                                "--bank-risk", "50", "--max-price", "2m"])
         config = cli.config_from(opts, 100)

@@ -187,27 +187,30 @@ test('a used buy limit caps a manually saved offer', () => {
   assert.equal(run(`monitorableRow(${row}).allocatedQty`), 3);
 });
 
-test('order size is saved and restored; old preferences load careful', () => {
+test('order size is saved and restored; old preferences load large', () => {
   const { run, storage, elements } = setup();
   const PREF = 'osrs-flipper.preferences.v2';
   storage.set(PREF, JSON.stringify({ capital: 1000000, account: 'members',
-    strategy: 'active', horizon: 8, bankRiskPercent: 25, timestep: '1h' }));
-  run('restorePreferences()');
-  assert.equal(elements.get('#f-order-size').value, 'careful');
-  run('state.capital = 1000000');
-  assert.equal(run('readConfig().crossingCaptureShare'), 0);
-  elements.get('#f-order-size').value = 'large';
-  run('savePreferences()');
-  assert.equal(JSON.parse(storage.get(PREF)).orderSize, 'large');
-  elements.get('#f-order-size').value = 'careful';
+    strategy: 'active', horizon: 8, bankRiskPercent: 25, timestep: '1h',
+    orderSize: 'careful' }));
+  // `orderSize` was saved with every preference while careful was the
+  // default, so it is not a choice and the new default applies.
   run('restorePreferences()');
   assert.equal(elements.get('#f-order-size').value, 'large');
+  run('state.capital = 1000000');
   assert.equal(run('readConfig().crossingCaptureShare'), 0.3);
-  elements.get('#f-order-size').value = 'balanced';
-  assert.equal(run('readConfig().crossingCaptureShare'), 0.15);
-  storage.set(PREF, JSON.stringify({ orderSize: 'huge' }));
+  elements.get('#f-order-size').value = 'careful';
+  run('savePreferences()');
+  assert.equal(JSON.parse(storage.get(PREF)).orderSizeChoice, 'careful');
+  elements.get('#f-order-size').value = 'large';
   run('restorePreferences()');
   assert.equal(elements.get('#f-order-size').value, 'careful');
+  assert.equal(run('readConfig().crossingCaptureShare'), 0);
+  elements.get('#f-order-size').value = 'balanced';
+  assert.equal(run('readConfig().crossingCaptureShare'), 0.15);
+  storage.set(PREF, JSON.stringify({ orderSizeChoice: 'huge' }));
+  run('restorePreferences()');
+  assert.equal(elements.get('#f-order-size').value, 'large');
 });
 
 test('one plan requests /timeseries for at most 45 items', async () => {

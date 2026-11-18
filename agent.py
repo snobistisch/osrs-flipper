@@ -839,7 +839,8 @@ def build_parser() -> argparse.ArgumentParser:
     flips.add_argument("--order-size", choices=list(engine.ORDER_SIZES),
                        default=engine.DEFAULT_ORDER_SIZE,
                        help="order size: careful (tested on held-out "
-                            "data), balanced or large. Larger orders earn "
+                            "data), balanced or large (default, the rate "
+                            "real offers filled at). Larger orders earn "
                             "more if offers fill quickly and lose more if "
                             "they do not")
     flips.add_argument("--top", type=_non_negative_int, default=10)

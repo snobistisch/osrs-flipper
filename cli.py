@@ -60,7 +60,8 @@ def parse_args(argv):
                         "through an offer's price it is sized on (careful 0, "
                         "balanced 15%%, large 30%%). Larger orders earn more "
                         "if your offers fill quickly and lose more if they do "
-                        "not. Only careful has been tested on held-out data")
+                        "not. Default large, the rate real offers filled at; "
+                        "only careful has been tested on held-out data")
     p.add_argument("--top", type=_non_negative_int, default=20,
                    help="rows to show")
     p.add_argument("--deep", type=_non_negative_int, default=15,
